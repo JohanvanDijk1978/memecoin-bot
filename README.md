@@ -60,7 +60,7 @@ mkdir -p data
 
 ### 3. Run the bot
 
-- Run Githu
+- Run Github
   git add .
   git commit -m "what you changed"
   git push
@@ -73,11 +73,11 @@ nohup python3 main.py > data/bot.log 2>&1 &
 ### Test scripts
 
 - Test Discord
-  grep -i discord /root/memecoin-bot/data/bot.log
+  1. grep -i discord /root/memecoin-bot/data/bot.log
 - Test Telegram
-  grep -i telegram /root/memecoin-bot/data/bot.log
+  1. grep -i telegram /root/memecoin-bot/data/bot.log
 - Test error logs in Mirror
-  tail -50 /root/memecoin-bot/data/bot.log | grep -i mirror
+  1. tail -50 /root/memecoin-bot/data/bot.log | grep -i mirror
 
 - Check for running bots
   pgrep -f main.py
