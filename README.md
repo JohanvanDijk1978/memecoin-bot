@@ -80,9 +80,8 @@ nohup python3 main.py > data/bot.log 2>&1 &
   1. tail -50 /root/memecoin-bot/data/bot.log | grep -i mirror
 
 - Check for running bots
-  pgrep -f main.py
 
-cat > /root/memecoin-bot-new/memory.md << 'EOF'
+1.  pgrep -f main.py
 
 # Agent Memory
 
