@@ -62,6 +62,7 @@ mkdir -p data
 
 - test
 - test
+- test
 
 ### 3. Run the bot
 
