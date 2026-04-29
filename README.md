@@ -60,6 +60,10 @@ mkdir -p data
 
 ### 3. Run the bot
 
+- Run Github
+  git add .
+  git commit -m "what you changed"
+  git push
 - Kill the previous session and run the bot
 
 kill $(pgrep -f main.py)
@@ -75,6 +79,52 @@ nohup python3 main.py > data/bot.log 2>&1 &
 
 - Check for running bots
   pgrep -f main.py
+
+cat > /root/memecoin-bot-new/memory.md << 'EOF'
+
+# Agent Memory
+
+## Who I am working with
+
+- Name: Johan
+- Location: Amsterdam, NL
+- VPS: Vultr, IP 209.250.245.16
+- Bot folder: /root/memecoin-bot-new
+- Editor: VS Code (local), deploys via git push to VPS
+
+## Stack
+
+- Python 3
+- Telegram bot (python-telegram-bot + Telethon)
+- Discord self-bot
+- Solana memecoin signals bot
+
+## Deploy process
+
+- Edit in VS Code → git add/commit/push → webhook auto-pulls → bot restarts
+- Restart command: kill $(pgrep -f main.py) cd /root/memecoin-bot-new nohup python3 main.py > data/bot.log 2>&1 &
+- Logs: tail -f /root/memecoin-bot-new/data/bot.log
+
+## Preferences
+
+- Always use VS Code solutions, never terminal-only edits
+- Never use pm2, always use nohup restart command above
+- Keep code clean and simple
+
+## Lessons learned
+
+- .env must never be committed to git
+- data/ and **pycache**/ are gitignored
+- GROUP IDs must be cast to int() in Telethon
+
+## Projects
+
+### memecoin-bot
+
+- Monitors Telegram + Discord for contract addresses
+- Mirrors Telegram Channels to the Mirror channel
+
+EOF
 
 - Download backup:
   scp -r root@209.250.245.16:/root/memecoin-bot/ C:\Users\mzshu\Downloads\memebot\
