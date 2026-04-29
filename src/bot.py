@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-ALLOWED_USERS = {1768528319}  # replace with your Telegram ID
+ALLOWED_USERS = {1768528319,6717838435}  # replace with your Telegram ID
 
 START_TIME = time.time()
 
