@@ -60,6 +60,9 @@ mkdir -p data
 
 #### Test
 
+- test
+- test
+
 ### 3. Run the bot
 
 - Run Github
