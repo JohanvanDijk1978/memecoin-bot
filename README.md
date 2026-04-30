@@ -1,4 +1,8 @@
-### Run the bot
+# Bot scripts
+
+## Commands
+
+git pull origin main
 
 When you come back, start the conversation with:
 
