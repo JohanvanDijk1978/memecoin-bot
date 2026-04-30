@@ -9,10 +9,10 @@ instant CA pings in the same format as the Telegram scraper.
 """
 
 import os
-import re
 import logging
 import asyncio
 import aiohttp
+import time as import_time
 from typing import List, Tuple
 from dotenv import load_dotenv
 from .mention_store import store, SOL_ADDRESS_RE, ETH_ADDRESS_RE
@@ -25,28 +25,14 @@ CHANNEL_IDS_RAW = os.getenv("DISCORD_CHANNEL_IDS", "")
 CHANNEL_IDS: List[int] = [
     int(cid.strip()) for cid in CHANNEL_IDS_RAW.split(",") if cid.strip().isdigit()
 ]
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-YOUR_ID   = os.getenv("YOUR_TELEGRAM_USER_ID", "")
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-# Track pinged addresses: address -> {time, groups: set}
+# Track pinged addresses: address -> {time, groups: dict}
 _recent_pings: dict = {}
 PING_COOLDOWN = 600  # 10 minutes
 
-# Bot usernames/display names to ignore
+# Display names to ignore
 BLOCKED_NAMES = {"rickburpbot", "rick"}
 
-
-def clean_text(text: str) -> str:
-    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-    text = re.sub(r'https?://\S+', '', text)
-    text = re.sub(r'\*\*([^\*]+)\*\*', r'\1', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text[:150]
-
-
-# send_ping imported from shared module
 from .send_ping import send_ping
 
 
@@ -79,8 +65,7 @@ async def fetch_token_quick(address: str, chain: str) -> dict:
 
             created_at = best.get("pairCreatedAt", 0) or 0
             if created_at:
-                import time as _t2
-                age_secs = _t2.time() - created_at / 1000
+                age_secs = import_time.time() - created_at / 1000
                 if age_secs < 3600:
                     age_str = f"{int(age_secs/60)} minutes"
                 elif age_secs < 86400:
@@ -99,10 +84,10 @@ async def fetch_token_quick(address: str, chain: str) -> dict:
             return {
                 "name":       base.get("name", "Unknown"),
                 "symbol":     base.get("symbol", "???"),
-                "price":      float(best.get("priceUsd", 0) or 0),
+                "price":      price_usd,
                 "volume_24h": float(vol.get("h24", 0) or 0),
                 "change_24h": float(chg.get("h24", 0) or 0),
-                "market_cap": float(best.get("marketCap", 0) or 0),
+                "market_cap": fdv_usd,
                 "url":        best.get("url", ""),
                 "image_url":  image_url,
                 "age":        age_str,
@@ -114,54 +99,10 @@ async def fetch_token_quick(address: str, chain: str) -> dict:
         return {}
 
 
-async def fetch_token_age(address: str, chain: str, session) -> str:
-    import time as _t, os
-    try:
-        if chain == "SOL":
-            try:
-                payload = {"jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress",
-                           "params": [address, {"limit": 1000, "commitment": "finalized"}]}
-                async with session.post("https://api.mainnet-beta.solana.com", json=payload,
-                                        timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        sigs = data.get("result", [])
-                        if sigs:
-                            block_time = sigs[-1].get("blockTime", 0)
-                            if block_time:
-                                age_secs = _t.time() - block_time
-                                if age_secs < 3600: return f"{int(age_secs/60)} minutes"
-                                elif age_secs < 86400: return f"{int(age_secs/3600)} hours"
-                                elif age_secs < 2592000: return f"{int(age_secs/86400)} days"
-                                else: return f"{int(age_secs/2592000)} months"
-            except Exception:
-                pass
-        elif chain == "ETH":
-            key = os.getenv("ETHERSCAN_API_KEY", "")
-            if key:
-                url = f"https://api.etherscan.io/v2/api?chainid=1&module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset=1&sort=asc&apikey={key}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        txs = data.get("result", [])
-                        if txs and isinstance(txs, list):
-                            ts = int(txs[0].get("timeStamp", 0))
-                            if ts:
-                                age_secs = _t.time() - ts
-                                if age_secs < 3600: return f"{int(age_secs/60)} minutes"
-                                elif age_secs < 86400: return f"{int(age_secs/3600)} hours"
-                                elif age_secs < 2592000: return f"{int(age_secs/86400)} days"
-                                else: return f"{int(age_secs/2592000)} months"
-    except Exception as e:
-        logger.warning(f"Age fetch failed: {e}")
-    return "?"
-
-
 async def fetch_ath(address: str, chain: str, current_price: float, current_fdv: float, session: aiohttp.ClientSession) -> tuple:
-    """Fetch ATH market cap and time from GeckoTerminal. Returns (ath_mc, ath_time)."""
+    """Fetch ATH market cap and time from GeckoTerminal."""
     try:
         network = "solana" if chain == "SOL" else "eth"
-        # Get pools for this token
         url = f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{address}/pools?page=1"
         headers = {"Accept": "application/json;version=20230302"}
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
@@ -173,7 +114,6 @@ async def fetch_ath(address: str, chain: str, current_price: float, current_fdv:
                 return 0, 0
             pool_id = pools[0].get("id", "").replace(f"{network}_", "")
 
-        # Get OHLCV data for the top pool
         ohlcv_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_id}/ohlcv/hour?limit=1000&currency=usd&token=base"
         async with session.get(ohlcv_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
             if resp.status != 200:
@@ -184,10 +124,9 @@ async def fetch_ath(address: str, chain: str, current_price: float, current_fdv:
                 return 0, 0
 
             ath_candle = max(candles, key=lambda c: c[2])
-            ath_price = ath_candle[2]
-            ath_time  = ath_candle[0]
+            ath_price  = ath_candle[2]
+            ath_time   = ath_candle[0]
 
-            # Calculate ATH MC
             if current_price > 0 and current_fdv > 0:
                 ath_mc = (ath_price / current_price) * current_fdv
             else:
@@ -199,9 +138,7 @@ async def fetch_ath(address: str, chain: str, current_price: float, current_fdv:
         return 0, 0
 
 
-import time as import_time
-
-async def handle_ca_ping(text: str, sender_name: str, group_name: str, prev_messages: List[Tuple[str, str]] = None):
+async def handle_ca_ping(text: str, sender_name: str, group_name: str):
     found = []
     for m in SOL_ADDRESS_RE.finditer(text):
         found.append((m.group(), "SOL"))
@@ -212,40 +149,38 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str, prev_mess
         return
 
     found = found[:1]
+    now = import_time.time()
 
-    import time
-    now = time.time()
+    def fmt(n):
+        if n >= 1_000_000: return f"${n/1_000_000:.1f}M"
+        if n >= 1_000: return f"${n/1_000:.0f}K"
+        return f"${n:.0f}"
 
-    chain_emoji = {"SOL": "◎", "ETH": "Ξ"}
+    def fmt2(n):
+        if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+        if n >= 1_000: return f"{n/1_000:.1f}K"
+        return str(n)
 
     for address, chain in found:
         ping_key = f"{address}:{group_name}"
         existing = _recent_pings.get(address)
         group_last_ping = _recent_pings.get(ping_key, 0)
 
-        # Per-group cooldown: same CA can only ping once per 5 min per group
         if now - group_last_ping < PING_COOLDOWN:
             continue
         _recent_pings[ping_key] = now
 
-        axiom_url  = f"https://axiom.trade/t/{address}" if chain == "SOL" else f"https://axiom.trade/t/{address}?chain=eth"
-        padre_url  = f"https://trade.padre.gg/trade/solana/{address}" if chain == "SOL" else f"https://trade.padre.gg/trade/eth/{address}"
-        gmgn_url = f"https://gmgn.ai/sol/token/{address}" if chain == "SOL" else f"https://gmgn.ai/eth/token/{address}"
+        axiom_url = f"https://axiom.trade/t/{address}" if chain == "SOL" else f"https://axiom.trade/t/{address}?chain=eth"
+        padre_url = f"https://trade.padre.gg/trade/solana/{address}" if chain == "SOL" else f"https://trade.padre.gg/trade/eth/{address}"
+        gmgn_url  = f"https://gmgn.ai/sol/token/{address}" if chain == "SOL" else f"https://gmgn.ai/eth/token/{address}"
 
-        token = await fetch_token_quick(address, chain)
-
-        def fmt(n):
-            if n >= 1_000_000: return f"${n/1_000_000:.1f}M"
-            if n >= 1_000: return f"${n/1_000:.0f}K"
-            return f"${n:.0f}"
-
-        mc = token.get("market_cap", 0) if token else 0
+        token  = await fetch_token_quick(address, chain)
+        mc     = token.get("market_cap", 0) if token else 0
         mc_str = fmt(mc) if mc else "N/A"
 
         if existing and now - existing["time"] < PING_COOLDOWN:
             if group_name not in existing["groups"]:
                 existing["groups"][group_name] = mc_str
-                # Store this group's scan for history
                 store.add_message(f"CA:{address}", source="discord", group_name=group_name, sender_name=sender_name, market_cap=mc)
                 groups_str = " | ".join(f"{g}({m})" for g, m in existing["groups"].items())
                 token_name = token.get("name", "") if token else ""
@@ -257,25 +192,13 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str, prev_mess
                     f"📍 Groups: {groups_str}\n"
                     f"`{address}`"
                 )
-            # Always fall through to send full ping too
         else:
-            # Store detailed mention with MC for history tracking
             store.add_message(f"CA:{address}", source="discord", group_name=group_name, sender_name=sender_name, market_cap=mc)
             _recent_pings[address] = {"time": now, "groups": {group_name: mc_str}}
 
-        icon      = chain_emoji.get(chain, "🔗")
-
-        context_block = ""
-
-        # Get ATH from token data (fetched from GeckoTerminal)
+        # ATH suffix
         ath_mc   = token.get("ath_mc", 0) if token else 0
         ath_time = token.get("ath_time", 0) if token else 0
-        # Pre-compute ATH suffix for FDV line
-        def fmt2(n):
-            if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
-            if n >= 1_000: return f"{n/1_000:.1f}K"
-            return str(n)
-
         if ath_mc > mc * 1.05 and ath_time:
             ago_secs = import_time.time() - ath_time
             if ago_secs < 3600:
@@ -288,7 +211,7 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str, prev_mess
         else:
             fdv_ath_suffix = " ATH" if ath_mc > 0 else ""
 
-        # Get scan stats
+        # Scan stats
         scan_total, scan_groups = store.get_scan_stats(address)
         if scan_total == 0:
             scan_total, scan_groups = 1, 1
@@ -298,15 +221,15 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str, prev_mess
             grp_word = "groups" if scan_groups != 1 else "group"
             scan_line = f"👥 Scanned *{scan_total}x* in *{scan_groups}* {grp_word}\n"
 
-        # Build top 3 scanner history
+        # History block
+        context_block = ""
         history = store.get_ca_history(address, limit=3)
         if history:
             medals = ["🥇", "🥈", "🥉"]
-            current_mc = token.get("market_cap", 0) if token else 0
+            current_mc = mc
             context_block += "\n\n━━━━━━━━━━━━━━━"
             for i, mention in enumerate(history):
-                import time as _time
-                ago_secs = _time.time() - mention.timestamp
+                ago_secs = import_time.time() - mention.timestamp
                 ago_mins = int(ago_secs / 60)
                 if ago_mins < 60:
                     ts = f"{ago_mins}m ago"
@@ -314,40 +237,37 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str, prev_mess
                     ts = f"{ago_mins // 60}h ago"
                 else:
                     ts = f"{ago_mins // 1440}d ago"
-                grp = mention.group_name or mention.source
-                who = mention.sender_name or "Unknown"
-                mc  = mention.market_cap
-                if mc >= 1_000_000:
-                    mc_str = f"${mc/1_000_000:.1f}M"
-                elif mc > 0:
-                    mc_str = f"${mc/1_000:.0f}K"
+                grp  = mention.group_name or mention.source
+                who  = mention.sender_name or "Unknown"
+                mca  = mention.market_cap
+
+                # Use peak_mc from store for multiplier
+                stored_entries = store._ca_history.get(address, [])
+                peak_mc_stored = max((e.get("peak_mc", 0) for e in stored_entries), default=0)
+                best_mc = peak_mc_stored if peak_mc_stored > 0 else current_mc
+
+                if mca >= 1_000_000:
+                    mca_str = f"${mca/1_000_000:.1f}M"
+                elif mca > 0:
+                    mca_str = f"${mca/1_000:.0f}K"
                 else:
-                    mc_str = "N/A"
-                if mc > 0 and current_mc > 0:
-                    mult = current_mc / mc
+                    mca_str = "N/A"
+
+                if mca > 0 and best_mc > 0:
+                    mult = best_mc / mca
                     mult_str = f"({mult:.1f}x)" if mult >= 1.1 else ""
                 else:
                     mult_str = ""
+
                 medal = medals[i] if i < len(medals) else "•"
-                # Skip entries with no useful data
-                if mc_str == "N/A" and who == "Unknown" and grp in ("discord", "telegram"):
+                if mca_str == "N/A" and who == "Unknown" and grp in ("discord", "telegram"):
                     continue
-                context_block += f"\n{medal} *{grp}* — *{who}* — *{mc_str}{mult_str}* — *{ts}*"
+                context_block += f"\n{medal} *{grp}* — *{who}* — *{mca_str}{mult_str}* — *{ts}*"
 
         if token:
-            vol    = token["volume_24h"]
-            mc     = token["market_cap"]
-            chg    = token["change_24h"]
             price  = token["price"]
             ticker = f"${token['symbol']}" if token.get("symbol") else ""
             name   = token["name"]
-
-            def fmt2(n):
-                if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
-                if n >= 1_000: return f"{n/1_000:.1f}K"
-                return str(n)
-
-            chg_icon = "📈" if chg >= 0 else "📉"
             platform = "Pump" if chain == "SOL" else "ETH"
 
             msg = (
@@ -360,7 +280,7 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str, prev_mess
                 f"💎 FDV: *{fmt2(mc)}{fdv_ath_suffix}*\n"
                 f"{scan_line}"
                 f"\n`{address}`\n"
-                f"\n🔗 [Axiom]({axiom_url})" + f" | [Padre]({padre_url})" + f" | [GMGN]({gmgn_url})" +
+                f"\n🔗 [Axiom]({axiom_url}) | [Padre]({padre_url}) | [GMGN]({gmgn_url})"
                 f"{context_block}"
             )
             image_url = token.get("image_url", "")
@@ -370,7 +290,7 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str, prev_mess
                 f"━━━━━━━━━━━━━━━\n"
                 f"{'◎ SOL' if chain == 'SOL' else 'Ξ ETH'} Contract\n"
                 f"\n`{address}`\n"
-                f"\n🔗 [Axiom]({axiom_url})" + f" | [Padre]({padre_url})" + f" | [GMGN]({gmgn_url})" +
+                f"\n🔗 [Axiom]({axiom_url}) | [Padre]({padre_url}) | [GMGN]({gmgn_url})"
                 f"{context_block}"
             )
             image_url = ""
@@ -384,7 +304,6 @@ try:
     class DiscordScraper(discord.Client):
         def __init__(self):
             super().__init__(self_bot=True, chunk_guilds_at_startup=False)
-            self._channel_cache = {}
 
         async def on_ready(self):
             logger.info(f"✅ Discord self-bot connected as: {self.user}")
@@ -398,21 +317,19 @@ try:
 
             store.add_message(message.content, source="discord")
 
-            # Skip bots and blocked usernames
             if message.author.bot:
                 return
-            sender_name = message.author.display_name or message.author.name or "Unknown"
+
+            sender_name  = message.author.display_name or message.author.name or "Unknown"
             if sender_name.lower() in BLOCKED_NAMES or (message.author.name or "").lower() in BLOCKED_NAMES:
                 return
-            group_name  = getattr(message.guild, "name", "Discord") if message.guild else "Discord"
+
+            group_name   = getattr(message.guild, "name", "Discord") if message.guild else "Discord"
             channel_name = getattr(message.channel, "name", "")
             if channel_name:
                 group_name = f"{group_name} #{channel_name}"
 
-            # Wait briefly then grab 2 messages before
-            prev_messages = []
-
-            await handle_ca_ping(message.content, sender_name, group_name, prev_messages)
+            await handle_ca_ping(message.content, sender_name, group_name)
 
 except ImportError:
     logger.warning("discord.py-self not installed — Discord scraper disabled")
