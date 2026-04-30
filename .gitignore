@@ -3,4 +3,4 @@ data/
 src/__pycache__/
 __pycache__/
 *.pyc
-*.session
+*.sessionmemory.md

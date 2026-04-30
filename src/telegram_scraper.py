@@ -347,7 +347,7 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
                 for e in stored_entries:
                     peak_mc_stored = max(peak_mc_stored, e.get("peak_mc", 0))
                 best_mc = peak_mc_stored if peak_mc_stored > 0 else current_mc
-                if c > 0 and best_mc > 0:
+                if mc > 0 and best_mc > 0:
                     mult = best_mc / mc
                     mult_str = f"({mult:.1f}x)" if mult >= 1.1 else ""
                 else:
