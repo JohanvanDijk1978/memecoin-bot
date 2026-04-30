@@ -43,22 +43,23 @@ def axiom_link(addr, ticker):
     return f"[${ticker}](https://axiom.trade/t/{addr}?chain={chain})"
 
 
-async def fetch_current_mcap(address: str) -> float:
-    """Fetch current market cap from Dexscreener."""
+async def fetch_token_data(session: aiohttp.ClientSession, address: str) -> dict:
+    """Fetch current market cap and ticker from Dexscreener."""
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    return 0
-                data = await resp.json()
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return {"mcap": 0, "ticker": ""}
+            data = await resp.json()
         pairs = data.get("pairs", [])
         if not pairs:
-            return 0
+            return {"mcap": 0, "ticker": ""}
         best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
-        return float(best.get("marketCap", 0) or 0)
+        mcap = float(best.get("marketCap", 0) or 0)
+        ticker = best.get("baseToken", {}).get("symbol", "")
+        return {"mcap": mcap, "ticker": ticker}
     except Exception:
-        return 0
+        return {"mcap": 0, "ticker": ""}
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,13 +156,16 @@ async def pump_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"No CAs detected in the last {hours}h.")
         return
 
-    # Fetch current mcap for CAs without peak_mc
-    fetch_needed = [c for c in candidates if not c["peak_mc"]]
-    if fetch_needed:
-        tasks = [fetch_current_mcap(c["address"]) for c in fetch_needed]
+    # Fetch current mcap + ticker for all CAs concurrently
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_token_data(session, c["address"]) for c in candidates]
         results = await asyncio.gather(*tasks)
-        for c, current_mc in zip(fetch_needed, results):
-            c["peak_mc"] = current_mc
+
+    for c, result in zip(candidates, results):
+        if not c["peak_mc"]:
+            c["peak_mc"] = result["mcap"]
+        if not c["ticker"]:
+            c["ticker"] = result["ticker"]
 
     # Calculate multiplier and sort
     for c in candidates:
@@ -172,25 +176,25 @@ async def pump_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Format message
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    lines = [f"👤 *Coins that pumped in the last {hours}h*\n"]
+    lines = [f"🪙 *Coins that pumped in the last {hours}h*\n"]
 
     for i, c in enumerate(top10):
         medal = medals[i] if i < len(medals) else f"{i+1}."
-        ticker = c.get("ticker") or "???"
+        ticker = c.get("ticker") or ""
         addr = c["address"]
-        first_mc = fmt_mc(c["first_mc"])
         mult = c["multiplier"]
         group = c["group_name"]
         sender = c["sender_name"]
+        called_time = time.strftime("%H:%M", time.localtime(c["timestamp"]))
 
-        if ticker and ticker != "???":
+        if ticker:
             link = axiom_link(addr, ticker)
         else:
             chain = "eth" if addr.startswith("0x") else "sol"
             link = f"[{addr[:8]}...](https://axiom.trade/t/{addr}?chain={chain})"
 
         lines.append(
-            f"{medal} {link} — *{fmt_mc(c['peak_mc'] or c['first_mc'])}* — {group} — {sender} — {first_mc} (*{mult:.1f}x*)"
+            f"{medal} {link} — *{fmt_mc(c['peak_mc'] or c['first_mc'])}* — {group} — {sender} — {fmt_mc(c['first_mc'])} (*{mult:.1f}x*) — {called_time}"
         )
 
     await query.edit_message_text(
@@ -300,4 +304,14 @@ def build_bot_app() -> Application:
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
     app.add_handler(CommandHandler("pump", cmd_pump))
     app.add_handler(CallbackQueryHandler(pump_callback, pattern="^pump_"))
+
+    async def set_commands(application):
+        from telegram import BotCommand
+        await application.bot.set_my_commands([
+            BotCommand("status", "Check bot status and uptime"),
+            BotCommand("leaderboard", "Show group and user leaderboard"),
+            BotCommand("pump", "Top pumping coins by timeframe"),
+        ])
+
+    app.post_init = set_commands
     return app
