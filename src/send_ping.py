@@ -10,7 +10,7 @@ import logging
 import aiohttp
 from dotenv import load_dotenv
 
-load_dotenv('/root/memecoin-bot/.env')
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
