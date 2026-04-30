@@ -18,6 +18,11 @@ kill $(pgrep -f main.py)
 cd /root/memecoin-bot
 nohup python3 main.py > data/bot.log 2>&1 &
 
+Coding Agent:
+
+nohup python3 /root/coding-agent/agent.py >> /root/coding-agent/agent.log 2>&1 &
+echo "Agent started"
+
 ### Test scripts
 
 - Test Discord
