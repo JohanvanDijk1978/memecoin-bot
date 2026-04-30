@@ -383,7 +383,7 @@ try:
 
     class DiscordScraper(discord.Client):
         def __init__(self):
-            super().__init__(self_bot=True)
+            super().__init__(self_bot=True, chunk_guilds_at_startup=False)
             self._channel_cache = {}
 
         async def on_ready(self):
