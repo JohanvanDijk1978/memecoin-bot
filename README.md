@@ -12,6 +12,8 @@ And paste the contents of /root/memecoin-bot-new/memory.md so I have full contex
 
 cat /root/memecoin-bot-new/memory.md
 
+/root/deploy.sh
+
 - Run Github
   git add .
   git commit -m "what you changed"
@@ -19,7 +21,7 @@ cat /root/memecoin-bot-new/memory.md
 - Kill the previous session and run the bot
 
 kill $(pgrep -f main.py)
-cd /root/memecoin-bot
+cd /root/memecoin-bot-new
 nohup python3 main.py > data/bot.log 2>&1 &
 
 Coding Agent:
