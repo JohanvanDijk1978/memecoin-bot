@@ -5,10 +5,13 @@ Telegram bot.
 """
 
 import os
+import json
 import logging
 import time
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import asyncio
+import aiohttp
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,13 +19,46 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-ALLOWED_USERS = {1768528319,6717838435}  # replace with your Telegram ID
+ALLOWED_USERS = {1768528319, 6717838435}
 
 START_TIME = time.time()
+
+CA_HISTORY_FILE = "data/ca_history.json"
 
 
 def is_allowed(update: Update) -> bool:
     return update.effective_user.id in ALLOWED_USERS
+
+
+def fmt_mc(mc):
+    if mc >= 1_000_000:
+        return f"${mc/1_000_000:.1f}M"
+    if mc >= 1_000:
+        return f"${mc/1_000:.0f}K"
+    return f"${mc:.0f}"
+
+
+def axiom_link(addr, ticker):
+    chain = "eth" if addr.startswith("0x") else "sol"
+    return f"[${ticker}](https://axiom.trade/t/{addr}?chain={chain})"
+
+
+async def fetch_current_mcap(address: str) -> float:
+    """Fetch current market cap from Dexscreener."""
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return 0
+                data = await resp.json()
+        pairs = data.get("pairs", [])
+        if not pairs:
+            return 0
+        best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        return float(best.get("marketCap", 0) or 0)
+    except Exception:
+        return 0
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -34,7 +70,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes, seconds = divmod(rem, 60)
     uptime_str = f"{hours}h {minutes}m {seconds}s"
 
-    # Check log for recent activity
     try:
         with open("data/bot.log", "r") as f:
             lines = f.readlines()[-50:]
@@ -52,6 +87,116 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{dc} Discord Scraper\n"
         f"{mir} Mirror",
         parse_mode="Markdown",
+    )
+
+
+async def cmd_pump(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1h", callback_data="pump_1"),
+            InlineKeyboardButton("6h", callback_data="pump_6"),
+            InlineKeyboardButton("12h", callback_data="pump_12"),
+            InlineKeyboardButton("24h", callback_data="pump_24"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "📊 *Pump Tracker*\nChoose a timeframe:",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
+
+
+async def pump_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id not in ALLOWED_USERS:
+        return
+
+    hours = int(query.data.split("_")[1])
+    cutoff = time.time() - (hours * 3600)
+
+    await query.edit_message_text(f"⏳ Fetching top pumps for last {hours}h...")
+
+    # Load CA history
+    try:
+        with open(CA_HISTORY_FILE, "r") as f:
+            ca_history = json.load(f)
+    except Exception as e:
+        await query.edit_message_text(f"❌ Could not load CA history: {e}")
+        return
+
+    # Collect CAs called within the timeframe
+    candidates = []
+    for address, entries in ca_history.items():
+        if not isinstance(entries, list):
+            entries = [entries]
+        for entry in entries:
+            ts = entry.get("timestamp", 0)
+            if ts >= cutoff:
+                first_mc = entry.get("market_cap") or entry.get("first_mc") or 0
+                if first_mc and first_mc > 0:
+                    candidates.append({
+                        "address": address,
+                        "first_mc": first_mc,
+                        "peak_mc": entry.get("peak_mc", 0),
+                        "ticker": entry.get("ticker", ""),
+                        "group_name": entry.get("group_name", "Unknown"),
+                        "sender_name": entry.get("sender_name", "Unknown"),
+                        "timestamp": ts,
+                    })
+                break  # only take first detection per CA
+
+    if not candidates:
+        await query.edit_message_text(f"No CAs detected in the last {hours}h.")
+        return
+
+    # Fetch current mcap for CAs without peak_mc
+    fetch_needed = [c for c in candidates if not c["peak_mc"]]
+    if fetch_needed:
+        tasks = [fetch_current_mcap(c["address"]) for c in fetch_needed]
+        results = await asyncio.gather(*tasks)
+        for c, current_mc in zip(fetch_needed, results):
+            c["peak_mc"] = current_mc
+
+    # Calculate multiplier and sort
+    for c in candidates:
+        peak = c["peak_mc"] or c["first_mc"]
+        c["multiplier"] = peak / c["first_mc"] if c["first_mc"] > 0 else 0
+
+    top10 = sorted(candidates, key=lambda x: x["multiplier"], reverse=True)[:10]
+
+    # Format message
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    lines = [f"👤 *Coins that pumped in the last {hours}h*\n"]
+
+    for i, c in enumerate(top10):
+        medal = medals[i] if i < len(medals) else f"{i+1}."
+        ticker = c.get("ticker") or "???"
+        addr = c["address"]
+        first_mc = fmt_mc(c["first_mc"])
+        mult = c["multiplier"]
+        group = c["group_name"]
+        sender = c["sender_name"]
+
+        if ticker and ticker != "???":
+            link = axiom_link(addr, ticker)
+        else:
+            chain = "eth" if addr.startswith("0x") else "sol"
+            link = f"[{addr[:8]}...](https://axiom.trade/t/{addr}?chain={chain})"
+
+        lines.append(
+            f"{medal} {link} — *{fmt_mc(c['peak_mc'] or c['first_mc'])}* — {group} — {sender} — {first_mc} (*{mult:.1f}x*)"
+        )
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
 
@@ -148,8 +293,11 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
 
+
 def build_bot_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
+    app.add_handler(CommandHandler("pump", cmd_pump))
+    app.add_handler(CallbackQueryHandler(pump_callback, pattern="^pump_"))
     return app
