@@ -40,7 +40,17 @@ def fmt_mc(mc):
 
 def axiom_link(addr, ticker):
     chain = "eth" if addr.startswith("0x") else "sol"
-    return f"[${ticker}](https://axiom.trade/t/{addr}?chain={chain})"
+    return f"[${escape_md(ticker)}](https://axiom.trade/t/{addr}?chain={chain})"
+
+
+def escape_md(s) -> str:
+    """Escape Telegram legacy-Markdown special chars in dynamic strings."""
+    if not s:
+        return ""
+    s = str(s)
+    for ch in ("\\", "_", "*", "`", "[", "]"):
+        s = s.replace(ch, "\\" + ch)
+    return s
 
 
 async def fetch_token_data(session: aiohttp.ClientSession, address: str) -> dict:
@@ -156,10 +166,20 @@ async def pump_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"No CAs detected in the last {hours}h.")
         return
 
-    # Fetch current mcap + ticker for all CAs concurrently
+    # Fetch current mcap + ticker for all CAs concurrently (capped to avoid Dexscreener overload on 24h)
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_token_data(session, c["address"]) for c in candidates]
-        results = await asyncio.gather(*tasks)
+        sem = asyncio.Semaphore(20)
+
+        async def fetch_with_sem(addr):
+            async with sem:
+                return await fetch_token_data(session, addr)
+
+        tasks = [fetch_with_sem(c["address"]) for c in candidates]
+        try:
+            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=60)
+        except asyncio.TimeoutError:
+            logger.warning(f"/pump {hours}h: Dexscreener fetch timed out with {len(candidates)} candidates")
+            results = [{"mcap": 0, "ticker": ""} for _ in candidates]
 
     for c, result in zip(candidates, results):
         if not c["peak_mc"]:
@@ -194,14 +214,22 @@ async def pump_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             link = f"[{addr[:8]}...](https://axiom.trade/t/{addr}?chain={chain})"
 
         lines.append(
-            f"{medal} {link} — *{fmt_mc(c['peak_mc'] or c['first_mc'])}* — {group} — {sender} — {fmt_mc(c['first_mc'])} (*{mult:.1f}x*) — {called_time}"
+            f"{medal} {link} — *{fmt_mc(c['peak_mc'] or c['first_mc'])}* — {escape_md(group)} — {escape_md(sender)} — {fmt_mc(c['first_mc'])} (*{mult:.1f}x*) — {called_time}"
         )
 
-    await query.edit_message_text(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
+    text = "\n".join(lines)
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.warning(f"/pump {hours}h: Markdown edit failed ({e}); retrying as plain text")
+        plain = text
+        for ch in ("\\_", "\\*", "\\`", "\\[", "\\]", "*"):
+            plain = plain.replace(ch, ch[-1] if ch.startswith("\\") else "")
+        await query.edit_message_text(plain, disable_web_page_preview=True)
 
 
 async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
