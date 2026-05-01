@@ -49,17 +49,9 @@ async def run_telegram_scraper():
 
 
 async def run_discord_scraper():
-    """Start the Discord self-bot scraper."""
-    discord_token = os.getenv("DISCORD_SELF_TOKEN", "")
-    if not discord_token:
-        logger.warning("⚠️  DISCORD_SELF_TOKEN not set — Discord scraper skipped")
-        return
-
-    from src.discord_scraper import DiscordScraper
-    client = DiscordScraper()
-
-    client = DiscordScraper()
-    await client.start(discord_token)
+    """Start the Discord self-bot scrapers."""
+    from src.discord_scraper import run_discord_scraper as _run
+    await _run()
     
 
 

@@ -25,6 +25,11 @@ CHANNEL_IDS_RAW = os.getenv("DISCORD_CHANNEL_IDS", "")
 CHANNEL_IDS: List[int] = [
     int(cid.strip()) for cid in CHANNEL_IDS_RAW.split(",") if cid.strip().isdigit()
 ]
+DISCORD_TOKEN_2    = os.getenv("DISCORD_SELF_TOKEN_2", "")
+CHANNEL_IDS_2_RAW  = os.getenv("DISCORD_CHANNEL_IDS_2", "")
+CHANNEL_IDS_2: List[int] = [
+    int(cid.strip()) for cid in CHANNEL_IDS_2_RAW.split(",") if cid.strip().isdigit()
+]
 
 # Track pinged addresses: address -> {time, groups: dict}
 _recent_pings: dict = {}
@@ -302,15 +307,17 @@ try:
     import discord
 
     class DiscordScraper(discord.Client):
-        def __init__(self):
+        def __init__(self, channel_ids: List[int] = None):
             super().__init__(self_bot=True, chunk_guilds_at_startup=False)
+            self._channel_ids = channel_ids or CHANNEL_IDS
+            self._channel_cache = {}
 
         async def on_ready(self):
             logger.info(f"✅ Discord self-bot connected as: {self.user}")
-            logger.info(f"📡 Monitoring {len(CHANNEL_IDS)} Discord channel(s)")
+            logger.info(f"📡 Monitoring {len(self._channel_ids)} Discord channel(s)")
 
         async def on_message(self, message):
-            if message.channel.id not in CHANNEL_IDS:
+            if message.channel.id not in self._channel_ids:
                 return
             if not message.content:
                 return
@@ -337,15 +344,25 @@ except ImportError:
 
 
 async def run_discord_scraper():
-    if not DISCORD_TOKEN:
-        logger.warning("⚠️ DISCORD_SELF_TOKEN not set — Discord scraper disabled")
-        return
-    if not CHANNEL_IDS:
-        logger.warning("⚠️ DISCORD_CHANNEL_IDS not set — Discord scraper disabled")
-        return
     if DiscordScraper is None:
         logger.warning("⚠️ discord.py-self not installed — Discord scraper disabled")
         return
 
-    client = DiscordScraper()
-    await client.start(DISCORD_TOKEN)
+    tasks = []
+
+    if DISCORD_TOKEN and CHANNEL_IDS:
+        client1 = DiscordScraper(CHANNEL_IDS)
+        tasks.append(client1.start(DISCORD_TOKEN))
+        logger.info(f"🤖 Account 1: monitoring {len(CHANNEL_IDS)} channel(s)")
+    else:
+        logger.warning("⚠️ DISCORD_SELF_TOKEN or DISCORD_CHANNEL_IDS not set — account 1 skipped")
+
+    if DISCORD_TOKEN_2 and CHANNEL_IDS_2:
+        client2 = DiscordScraper(CHANNEL_IDS_2)
+        tasks.append(client2.start(DISCORD_TOKEN_2))
+        logger.info(f"🤖 Account 2: monitoring {len(CHANNEL_IDS_2)} channel(s)")
+    else:
+        logger.warning("⚠️ DISCORD_SELF_TOKEN_2 or DISCORD_CHANNEL_IDS_2 not set — account 2 skipped")
+
+    if tasks:
+        await asyncio.gather(*tasks)
