@@ -23,7 +23,7 @@
 ## Deploy process
 
 - Edit in VS Code → git add/commit/push → webhook auto-pulls → bot + agent restart (NO manual pull needed)
-- .env is NOT in git — deploy via: scp C:\Users\mzshu\Downloads\memebot\.env root@209.250.245.16:/root/memecoin-bot-new/.env
+- .env is NOT in git — deploy via: scp C:\Users\mzshu\Desktop\Projects\memebot\.env root@209.250.245.16:/root/memecoin-bot-new/.env
 - Deploy script: /root/deploy.sh
 - Deploy logs: /root/deploy.log
 - Bot logs: tail -f /root/memecoin-bot-new/data/bot.log
