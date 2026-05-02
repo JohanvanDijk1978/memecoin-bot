@@ -1,5 +1,7 @@
 # Bot scripts
 
+ssh root@209.250.245.16
+
 ## Commands
 
 git pull origin main
@@ -10,9 +12,12 @@ When you come back, start the conversation with:
 
 And paste the contents of /root/memecoin-bot-new/memory.md so I have full context instantly.
 
-cat /root/memecoin-bot-new/memory.md
-
-/root/deploy.sh
+- Read only
+  cat /root/memecoin-bot-new/memory.md
+- Edit
+  nano /root/memecoin-bot-new/.env
+- Pulls from github and deploys the bot
+  /root/deploy.sh
 
 - Run Github
   git add .
