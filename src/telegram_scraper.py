@@ -51,6 +51,7 @@ def clean_text(text: str) -> str:
 # send_ping imported from shared module
 from .send_ping import send_ping
 from .mirror import mirror_message, get_group_link
+from .filtered_forward import maybe_forward
 
 
 async def fetch_token_quick(address: str, chain: str) -> dict:
@@ -400,6 +401,8 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
             image_url = ""
 
         await send_ping(msg, image_url)
+        # Side-channel: forward to filtered channel if group + mc match. Fire-and-forget.
+        asyncio.create_task(maybe_forward(msg, image_url, group_name, mc, address))
 
 
 class TelegramScraper:

@@ -39,6 +39,7 @@ PING_COOLDOWN = 600  # 10 minutes
 BLOCKED_NAMES = {"rickburpbot", "rick"}
 
 from .send_ping import send_ping
+from .filtered_forward import maybe_forward
 
 
 async def fetch_token_quick(address: str, chain: str) -> dict:
@@ -301,6 +302,8 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str):
             image_url = ""
 
         await send_ping(msg, image_url)
+        # Side-channel: forward to filtered channel if group + mc match. Fire-and-forget.
+        asyncio.create_task(maybe_forward(msg, image_url, group_name, mc, address))
 
 
 try:

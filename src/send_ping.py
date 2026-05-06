@@ -19,9 +19,10 @@ ALERT_GROUP = os.getenv("TELEGRAM_ALERT_GROUP", os.getenv("YOUR_TELEGRAM_USER_ID
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
-async def send_ping(text: str, image_url: str = ""):
-    if not BOT_TOKEN or not ALERT_GROUP:
-        logger.warning("BOT_TOKEN or ALERT_GROUP not set")
+async def send_ping(text: str, image_url: str = "", chat_id: str = ""):
+    target = chat_id or ALERT_GROUP
+    if not BOT_TOKEN or not target:
+        logger.warning("BOT_TOKEN or chat_id not set")
         return
     try:
         async with aiohttp.ClientSession() as session:
@@ -29,7 +30,7 @@ async def send_ping(text: str, image_url: str = ""):
                 resp = await session.post(
                     f"{TELEGRAM_API}/sendPhoto",
                     json={
-                        "chat_id": ALERT_GROUP,
+                        "chat_id": target,
                         "photo": image_url,
                         "caption": text,
                         "parse_mode": "Markdown",
@@ -41,7 +42,7 @@ async def send_ping(text: str, image_url: str = ""):
                     await session.post(
                         f"{TELEGRAM_API}/sendMessage",
                         json={
-                            "chat_id": ALERT_GROUP,
+                            "chat_id": target,
                             "text": text,
                             "parse_mode": "Markdown",
                             "disable_web_page_preview": True,
@@ -52,7 +53,7 @@ async def send_ping(text: str, image_url: str = ""):
                 await session.post(
                     f"{TELEGRAM_API}/sendMessage",
                     json={
-                        "chat_id": ALERT_GROUP,
+                        "chat_id": target,
                         "text": text,
                         "parse_mode": "Markdown",
                         "disable_web_page_preview": True,
