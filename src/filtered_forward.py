@@ -83,17 +83,23 @@ async def maybe_forward(
     """Forward to the filtered channel iff group is watched, mc < ceiling,
     and this CA hasn't been forwarded before. Safe to call from any scraper —
     silently no-ops when the filter doesn't match or FILTERED_CHANNEL_ID is unset."""
+    logger.info(f"[filt] maybe_forward called: addr={address!r} group={group_name!r} mc={market_cap!r} chan_set={bool(FILTERED_CHANNEL_ID)}")
     if not FILTERED_CHANNEL_ID or not address:
+        logger.info(f"[filt] bail: chan_set={bool(FILTERED_CHANNEL_ID)} address_set={bool(address)}")
         return
     if address in _seen:
+        logger.info(f"[filt] bail: already seen {address}")
         return
     if not is_watched_group(group_name):
+        logger.info(f"[filt] bail: group not watched: {group_name!r}")
         return
     try:
         mc = float(market_cap or 0)
     except (TypeError, ValueError):
+        logger.info(f"[filt] bail: mc not floatable: {market_cap!r}")
         return
     if mc <= 0 or mc >= MC_CEILING:
+        logger.info(f"[filt] bail: mc out of range: ${mc:,.0f} (ceiling ${MC_CEILING:,})")
         return
 
     # Mark seen BEFORE the network call so concurrent detections don't double-fire.
@@ -103,6 +109,6 @@ async def maybe_forward(
 
     try:
         await send_ping(text, image_url, chat_id=FILTERED_CHANNEL_ID)
-        logger.info(f"Filtered forward: {address} from '{group_name}' mc=${mc:,.0f}")
+        logger.info(f"[filt] FORWARDED: {address} from '{group_name}' mc=${mc:,.0f}")
     except Exception as e:
-        logger.warning(f"Filtered forward failed for {address}: {e}")
+        logger.warning(f"[filt] forward failed for {address}: {e}")
