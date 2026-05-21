@@ -434,14 +434,16 @@ class TelegramScraper:
         @self.client.on(events.NewMessage(chats=self._group_entities))
         async def on_new_message(event: events.NewMessage.Event):
             msg: Message = event.message
-            if not msg.text and not msg.message:
-                return
             text_content = msg.text or msg.message or ""
+            has_photo = bool(getattr(msg, "photo", None))
+            # Skip only if there's nothing to mirror at all (no text AND no photo).
+            if not text_content and not has_photo:
+                return
             chat = await event.get_chat()
             group_name = getattr(chat, "title", str(event.chat_id))
-            
 
-            store.add_message(msg.text, source="telegram")  # group/sender added after sender resolved
+
+            store.add_message(text_content, source="telegram")  # group/sender added after sender resolved
 
             try:
                 sender: User    = await event.get_sender()
@@ -468,7 +470,25 @@ class TelegramScraper:
                             reply_sender = f"{first} {last}".strip() or "Unknown"
                     except Exception:
                         pass
-                mirror_link = await mirror_message(msg.text, group_name, sender_name, sender_username, reply_text=reply_text, reply_sender=reply_sender)
+
+                # Download attached photo (if any) so we can upload via Bot API multipart.
+                # Telethon photos have no public URL — the Bot API can't fetch them by reference.
+                image_bytes = None
+                if has_photo:
+                    try:
+                        image_bytes = await msg.download_media(file=bytes)
+                    except Exception as e:
+                        logger.warning(f"Photo download failed: {e}")
+
+                mirror_link = await mirror_message(
+                    text_content,
+                    group_name,
+                    sender_name,
+                    sender_username,
+                    image_bytes=image_bytes,
+                    reply_text=reply_text,
+                    reply_sender=reply_sender,
+                )
             except Exception:
                 mirror_link = ""
            
@@ -481,7 +501,7 @@ class TelegramScraper:
 
             # Full detail store call is done inside handle_ca_ping with MC
 
-            await handle_ca_ping(msg.text, sender_name, sender_username, group_name, prev_messages, mirror_link=mirror_link)
+            await handle_ca_ping(text_content, sender_name, sender_username, group_name, prev_messages, mirror_link=mirror_link)
 
         logger.info("👂 Listening — instant CA pings enabled")
         await self.client.run_until_disconnected()

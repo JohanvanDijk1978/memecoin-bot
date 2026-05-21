@@ -69,7 +69,23 @@ def get_topic_id(group_name: str) -> int:
     return GROUP_TOPIC_MAP.get(group_name.lower().strip(), TOPIC_MAIN)
 
 
-async def mirror_message(text: str, group_name: str, sender_name: str, sender_username: str = "", image_url: str = "", reply_text: str = None, reply_sender: str = None) -> str:
+async def mirror_message(
+    text: str,
+    group_name: str,
+    sender_name: str,
+    sender_username: str = "",
+    image_url: str = "",
+    image_bytes: bytes = None,
+    reply_text: str = None,
+    reply_sender: str = None,
+) -> str:
+    """Mirror a message to the topic channel.
+
+    image_url   — public URL the Bot API can fetch (used by CA ping flow that pulls
+                  token logos from Dexscreener).
+    image_bytes — raw image bytes (used by the Telegram scraper to mirror photos
+                  attached to alpha-group messages — those have no public URL).
+    """
     if not BOT_TOKEN or not MIRROR_GROUP:
         return ""
 
@@ -87,7 +103,25 @@ async def mirror_message(text: str, group_name: str, sender_name: str, sender_us
 
     async with aiohttp.ClientSession() as session:
         try:
-            if image_url:
+            if image_bytes:
+                # Multipart upload — required because Telethon-sourced photos have
+                # no public URL the Bot API can fetch on its own.
+                form = aiohttp.FormData()
+                form.add_field("chat_id", str(MIRROR_GROUP))
+                form.add_field("message_thread_id", str(topic_id))
+                form.add_field("caption", formatted_text[:1024])
+                form.add_field("parse_mode", "Markdown")
+                form.add_field(
+                    "photo", image_bytes,
+                    filename="photo.jpg",
+                    content_type="image/jpeg",
+                )
+                resp = await session.post(
+                    f"{TELEGRAM_API}/sendPhoto",
+                    data=form,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                )
+            elif image_url:
                 resp = await session.post(
                     f"{TELEGRAM_API}/sendPhoto",
                     json={
@@ -112,6 +146,8 @@ async def mirror_message(text: str, group_name: str, sender_name: str, sender_us
                     timeout=aiohttp.ClientTimeout(total=10),
                 )
             data = await resp.json()
+            if not data.get("ok"):
+                logger.warning(f"Mirror send not ok: {data}")
             msg_id = data.get("result", {}).get("message_id")
             if msg_id:
                 return f"https://t.me/c/3963742680/{topic_id}/{msg_id}"
