@@ -213,14 +213,10 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str) ->
     """Returns True on successful send, False otherwise."""
     caption = _format_alert(profile, market, event_type)
     header_url = profile.get("header")
-    icon_url   = profile.get("icon")
 
-    photos = [u for u in (header_url, icon_url) if u]
     try:
-        if len(photos) >= 2:
-            await send_media_group(CHANNEL_ID, photos, caption=caption)
-        elif len(photos) == 1:
-            await send_ping(caption, image_url=photos[0], chat_id=CHANNEL_ID)
+        if header_url:
+            await send_ping(caption, image_url=header_url, chat_id=CHANNEL_ID)
         else:
             await send_ping(caption, chat_id=CHANNEL_ID)
         return True
