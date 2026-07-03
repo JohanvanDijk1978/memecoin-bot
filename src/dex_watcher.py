@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
 CHANNEL_ID          = os.getenv("DEX_UPDATES_CHANNEL_ID", "")
-POLL_SECONDS        = int(os.getenv("DEX_WATCHER_POLL_SECONDS", "45"))
+POLL_SECONDS        = int(os.getenv("DEX_WATCHER_POLL_SECONDS", "30"))
 MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_MIN_AGE_HOURS", "24"))
 INITIAL_DELAY_SECS  = 60  # warmup before first poll
 
