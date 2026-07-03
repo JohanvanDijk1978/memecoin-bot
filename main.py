@@ -85,15 +85,18 @@ async def main():
         logger.error(f"❌ Missing required env vars: {', '.join(missing)}")
         sys.exit(1)
 
+    from src.dex_watcher import run_dex_watcher
+
     results = await asyncio.gather(
         run_telegram_scraper(),
         run_discord_scraper(),
         run_bot(),
         run_cleanup_loop(),
+        run_dex_watcher(),
         return_exceptions=True,
     )
 
-    for name, result in zip(["telegram_scraper", "discord_scraper", "bot", "cleanup"], results):
+    for name, result in zip(["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher"], results):
         if isinstance(result, Exception):
             logger.error(f"❌ {name} crashed: {result}", exc_info=result)
 
