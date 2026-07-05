@@ -152,12 +152,17 @@ async def _fetch_pair_data(session: aiohttp.ClientSession, address: str) -> Opti
         if not pairs:
             return None
         best = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0))
+        # For age, use the oldest pool across all pools — not the highest-liquidity one.
+        # A 289-day-old token can have a fresh pool spun up (migration, CTO revival)
+        # that would make the token look artificially young if we used its timestamp.
+        created_times = [int(p.get("pairCreatedAt") or 0) for p in pairs if p.get("pairCreatedAt")]
+        oldest_pair_ms = min(created_times) if created_times else int(best.get("pairCreatedAt") or 0)
         return {
             "symbol":         (best.get("baseToken") or {}).get("symbol") or "?",
             "market_cap":     float(best.get("marketCap") or 0),
             "fdv":            float(best.get("fdv") or 0),
             "liquidity_usd":  float((best.get("liquidity") or {}).get("usd") or 0),
-            "pair_created_ms": int(best.get("pairCreatedAt") or 0),
+            "pair_created_ms": oldest_pair_ms,
         }
     except Exception as e:
         logger.warning(f"dex_watcher: pair fetch failed for {address}: {e}")
