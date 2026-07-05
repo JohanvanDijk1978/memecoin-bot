@@ -245,12 +245,13 @@ async def _process_feed(session: aiohttp.ClientSession, feed: list, event_type: 
         age_h = _age_hours((market or {}).get("pair_created_ms") if market else None)
 
         if age_h is None:
+            # Don't mark seen — pair data may become available on a later poll.
             logger.info(f"dex_watcher: skip {address} ({event_type}) — no age data")
-            _seen[seen_key] = time.time()  # don't retry every 45s
             continue
         if age_h < MIN_AGE_HOURS:
+            # Don't mark seen — the token will age past the threshold eventually
+            # and we want it to fire when it does (e.g. later paid update at 24h+).
             logger.info(f"dex_watcher: skip {address} ({event_type}) — {age_h:.1f}h < {MIN_AGE_HOURS}h")
-            _seen[seen_key] = time.time()
             continue
 
         ok = await _send_alert(profile, market, event_type)
