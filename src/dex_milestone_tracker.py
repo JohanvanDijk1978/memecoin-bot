@@ -32,7 +32,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
-POLL_SECONDS       = int(os.getenv("MILESTONE_POLL_SECONDS", "180"))
+POLL_SECONDS       = int(os.getenv("MILESTONE_POLL_SECONDS", "60"))
 TTL_DAYS           = int(os.getenv("MILESTONE_TTL_DAYS", "30"))
 INITIAL_DELAY_SECS = 90  # let dex_watcher's first burst settle before we poll
 
