@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
 CHANNEL_ID          = os.getenv("DEX_UPDATES_CHANNEL_ID", "")
+DISCORD_WEBHOOK     = os.getenv("DEX_UPDATES_DISCORD_WEBHOOK", "")
 POLL_SECONDS        = int(os.getenv("DEX_WATCHER_POLL_SECONDS", "30"))
 MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_MIN_AGE_HOURS", "24"))
 INITIAL_DELAY_SECS  = 60  # warmup before first poll
@@ -214,10 +215,89 @@ def _format_alert(profile: dict, market: Optional[dict], event_type: str) -> str
     return body
 
 
+def _format_discord_embed(profile: dict, market: Optional[dict], event_type: str) -> dict:
+    """Build a Discord embed dict for the same event that Telegram gets. Uses
+    Discord's native embed formatting — no Markdown escaping here since embeds
+    aren't parsed as Telegram legacy-Markdown."""
+    address = profile.get("tokenAddress", "")
+    symbol  = (market or {}).get("symbol") or "?"
+    mcap    = (market or {}).get("market_cap") or (market or {}).get("fdv") or 0
+    liq     = (market or {}).get("liquidity_usd") or 0
+    created = (market or {}).get("pair_created_ms") or 0
+
+    is_cto = event_type == "cto"
+    title  = "🔁 Community Takeover Claimed" if is_cto else "🆕 Paid Dexscreener Update Detected"
+    color  = 0x8B5CF6 if is_cto else 0x22C55E  # purple for CTO, green for profile
+
+    lines = [
+        f"**Token:** ${symbol}",
+        f"**CA:** `{address}`",
+        f"**Market Cap:** {_fmt_usd(mcap)}",
+        f"**Liquidity:** {_fmt_usd(liq)}",
+        f"**Token Age:** {_fmt_age(created)}",
+    ]
+    if is_cto and profile.get("claimDate"):
+        lines.append(f"**Claimed:** {profile['claimDate']}")
+
+    description = (profile.get("description") or "").strip()
+    if description:
+        lines.append("")
+        lines.append(f"*{description[:300]}*")
+
+    links = profile.get("links") or []
+    link_lines = []
+    for l in links:
+        url = l.get("url")
+        if not url:
+            continue
+        label = l.get("label") or l.get("type") or "link"
+        link_lines.append(f"• [{label}]({url})")
+    if link_lines:
+        lines.append("")
+        lines.extend(link_lines)
+
+    embed = {
+        "title": title,
+        "description": "\n".join(lines)[:4096],
+        "url": f"https://dexscreener.com/solana/{address}",
+        "color": color,
+    }
+    header_url = profile.get("header")
+    if header_url:
+        embed["image"] = {"url": header_url}
+    return embed
+
+
+async def _notify_discord(embed: dict) -> None:
+    """Fire-and-forget Discord webhook post. Silent no-op if DEX_UPDATES_DISCORD_WEBHOOK
+    isn't set. Logs on failure but never raises — must not block the Telegram path."""
+    if not DISCORD_WEBHOOK:
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                DISCORD_WEBHOOK,
+                json={"username": "Dex Updates", "embeds": [embed]},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            # Discord returns 204 No Content on success, 200 with a message JSON on
+            # ?wait=true. Anything else is a failure worth logging.
+            if resp.status not in (200, 204):
+                body = await resp.text()
+                logger.warning(f"dex_watcher: Discord webhook returned {resp.status}: {body[:200]}")
+    except Exception as e:
+        logger.warning(f"dex_watcher: Discord webhook failed: {e}")
+
+
 async def _send_alert(profile: dict, market: Optional[dict], event_type: str) -> bool:
-    """Returns True on successful send, False otherwise."""
+    """Returns True on successful Telegram send, False otherwise. Discord posts
+    happen in parallel as fire-and-forget — a Discord failure doesn't affect the
+    seen-mark decision."""
     caption = _format_alert(profile, market, event_type)
     header_url = profile.get("header")
+
+    # Kick off Discord in the background — doesn't block the Telegram send.
+    asyncio.create_task(_notify_discord(_format_discord_embed(profile, market, event_type)))
 
     try:
         if header_url:
@@ -281,7 +361,8 @@ async def run_dex_watcher() -> None:
 
     logger.info(
         f"📡 dex_watcher armed — poll={POLL_SECONDS}s, "
-        f"min_age={MIN_AGE_HOURS}h, seen_size={len(_seen)}"
+        f"min_age={MIN_AGE_HOURS}h, discord={'on' if DISCORD_WEBHOOK else 'off'}, "
+        f"seen_size={len(_seen)}"
     )
 
     await asyncio.sleep(INITIAL_DELAY_SECS)
