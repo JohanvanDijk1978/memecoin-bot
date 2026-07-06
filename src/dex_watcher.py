@@ -268,46 +268,122 @@ def _format_discord_embed(profile: dict, market: Optional[dict], event_type: str
     return embed
 
 
-async def _notify_discord(embed: dict) -> None:
-    """Fire-and-forget Discord webhook post. Silent no-op if DEX_UPDATES_DISCORD_WEBHOOK
-    isn't set. Logs on failure but never raises — must not block the Telegram path."""
+def _webhook_wait_url(url: str) -> str:
+    """Append wait=true so Discord returns the created message JSON (needed to
+    capture the message_id for milestone replies)."""
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}wait=true"
+
+
+async def _notify_discord(embed: dict) -> Optional[str]:
+    """Post to the Discord webhook. Returns the created message_id on success, or
+    None. Silent no-op if DEX_UPDATES_DISCORD_WEBHOOK isn't set. Logs on failure
+    but never raises."""
     if not DISCORD_WEBHOOK:
-        return
+        return None
     try:
         async with aiohttp.ClientSession() as session:
             resp = await session.post(
-                DISCORD_WEBHOOK,
+                _webhook_wait_url(DISCORD_WEBHOOK),
                 json={"username": "Dex Updates", "embeds": [embed]},
                 timeout=aiohttp.ClientTimeout(total=10),
             )
-            # Discord returns 204 No Content on success, 200 with a message JSON on
-            # ?wait=true. Anything else is a failure worth logging.
             if resp.status not in (200, 204):
                 body = await resp.text()
                 logger.warning(f"dex_watcher: Discord webhook returned {resp.status}: {body[:200]}")
+                return None
+            if resp.status == 204:
+                return None  # shouldn't happen with wait=true, but guard anyway
+            data = await resp.json()
+            return str(data.get("id")) if data.get("id") else None
     except Exception as e:
         logger.warning(f"dex_watcher: Discord webhook failed: {e}")
+        return None
+
+
+async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
+    """Send the alert to the Telegram dex updates channel. Returns the created
+    message_id on success, or None. Uses sendPhoto when a banner URL is present,
+    falls back to sendMessage if the photo request fails or no banner exists."""
+    if not (os.getenv("TELEGRAM_BOT_TOKEN") and CHANNEL_ID):
+        return None
+    telegram_api = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            if image_url:
+                resp = await session.post(
+                    f"{telegram_api}/sendPhoto",
+                    json={
+                        "chat_id": CHANNEL_ID,
+                        "photo": image_url,
+                        "caption": caption[:1024],
+                        "parse_mode": "Markdown",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
+                )
+                data = await resp.json()
+                if data.get("ok"):
+                    return int(data["result"]["message_id"])
+                # Photo failed (bad URL, unreachable CDN). Fall back to text.
+                logger.info(f"dex_watcher: sendPhoto failed ({data.get('description')}), falling back to text")
+
+            resp = await session.post(
+                f"{telegram_api}/sendMessage",
+                json={
+                    "chat_id": CHANNEL_ID,
+                    "text": caption[:4096],
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": True,
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            data = await resp.json()
+            if data.get("ok"):
+                return int(data["result"]["message_id"])
+            logger.warning(f"dex_watcher: sendMessage not ok: {data}")
+            return None
+    except Exception as e:
+        logger.warning(f"dex_watcher: Telegram send failed: {e}")
+        return None
 
 
 async def _send_alert(profile: dict, market: Optional[dict], event_type: str) -> bool:
-    """Returns True on successful Telegram send, False otherwise. Discord posts
-    happen in parallel as fire-and-forget — a Discord failure doesn't affect the
-    seen-mark decision."""
-    caption = _format_alert(profile, market, event_type)
-    header_url = profile.get("header")
+    """Send the alert to Telegram (and Discord if configured), capture message IDs,
+    and register the token with the milestone tracker. Returns True if the
+    Telegram send succeeded (used to decide whether to mark seen)."""
+    caption    = _format_alert(profile, market, event_type)
+    header_url = profile.get("header") or ""
+    address    = profile.get("tokenAddress", "")
 
-    # Kick off Discord in the background — doesn't block the Telegram send.
-    asyncio.create_task(_notify_discord(_format_discord_embed(profile, market, event_type)))
+    market_dict = market or {}
+    initial_mc = float(market_dict.get("market_cap") or market_dict.get("fdv") or 0)
+    symbol     = market_dict.get("symbol") or ""
 
-    try:
-        if header_url:
-            await send_ping(caption, image_url=header_url, chat_id=CHANNEL_ID)
-        else:
-            await send_ping(caption, chat_id=CHANNEL_ID)
-        return True
-    except Exception as e:
-        logger.warning(f"dex_watcher: alert send failed for {profile.get('tokenAddress')}: {e}")
+    # Fire Telegram + Discord in parallel — matched to their existing sync semantics.
+    tg_task = asyncio.create_task(_send_telegram_alert(caption, header_url))
+    dc_task = asyncio.create_task(_notify_discord(_format_discord_embed(profile, market, event_type)))
+    tg_msg_id, dc_msg_id = await asyncio.gather(tg_task, dc_task)
+
+    if tg_msg_id is None and dc_msg_id is None:
+        # Nothing landed anywhere — let the caller retry on the next poll.
         return False
+
+    # Register with milestone tracker if we have valid initial state + at least
+    # one message to reply to.
+    try:
+        from .dex_milestone_tracker import register_token
+        register_token(
+            address=address,
+            initial_mc=initial_mc,
+            ticker=symbol,
+            name=(market_dict.get("name") or ""),
+            tg_message_id=tg_msg_id,
+            dc_message_id=dc_msg_id,
+        )
+    except Exception as e:
+        logger.warning(f"dex_watcher: milestone register failed for {address}: {e}")
+
+    return tg_msg_id is not None
 
 
 # ── Per-poll processing ───────────────────────────────────────────────────

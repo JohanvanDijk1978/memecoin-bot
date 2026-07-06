@@ -86,6 +86,7 @@ async def main():
         sys.exit(1)
 
     from src.dex_watcher import run_dex_watcher
+    from src.dex_milestone_tracker import run_milestone_tracker
 
     results = await asyncio.gather(
         run_telegram_scraper(),
@@ -93,10 +94,14 @@ async def main():
         run_bot(),
         run_cleanup_loop(),
         run_dex_watcher(),
+        run_milestone_tracker(),
         return_exceptions=True,
     )
 
-    for name, result in zip(["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher"], results):
+    for name, result in zip(
+        ["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher", "milestone_tracker"],
+        results,
+    ):
         if isinstance(result, Exception):
             logger.error(f"❌ {name} crashed: {result}", exc_info=result)
 
