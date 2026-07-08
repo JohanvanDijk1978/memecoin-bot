@@ -139,6 +139,36 @@ async def _fetch_feed(session: aiohttp.ClientSession, url: str) -> list:
         return []
 
 
+# pump.fun API — used as a fallback when Dexscreener doesn't populate
+# `pairCreatedAt` (common for bonding-curve tokens). Cache successful lookups
+# for the process lifetime — token creation times don't change.
+PUMPFUN_URL = "https://frontend-api-v3.pump.fun/coins/{address}"
+_pumpfun_cache: dict = {}
+
+
+async def _fetch_pumpfun_created(session: aiohttp.ClientSession, address: str) -> int:
+    """Return the pump.fun creation timestamp in ms, or 0 if unavailable.
+    Silent on 404 (not a pump.fun mint) — those are expected for non-pumpfun tokens."""
+    cached = _pumpfun_cache.get(address)
+    if cached:
+        return cached
+    try:
+        async with session.get(
+            PUMPFUN_URL.format(address=address),
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                return 0
+            data = await resp.json()
+        ts = int(data.get("created_timestamp") or 0)
+        if ts:
+            _pumpfun_cache[address] = ts
+        return ts
+    except Exception as e:
+        logger.warning(f"dex_watcher: pump.fun fetch failed for {address}: {e}")
+        return 0
+
+
 async def _fetch_pair_data(session: aiohttp.ClientSession, address: str) -> Optional[dict]:
     """Grab market data for a token (best pair by liquidity). Returns None on failure."""
     try:
@@ -158,6 +188,13 @@ async def _fetch_pair_data(session: aiohttp.ClientSession, address: str) -> Opti
         # that would make the token look artificially young if we used its timestamp.
         created_times = [int(p.get("pairCreatedAt") or 0) for p in pairs if p.get("pairCreatedAt")]
         oldest_pair_ms = min(created_times) if created_times else int(best.get("pairCreatedAt") or 0)
+
+        # Fallback: bonding-curve pump.fun pairs often have no pairCreatedAt.
+        # Ask pump.fun directly. This covers pre-graduation tokens and post-
+        # graduation tokens whose Dex metadata is incomplete.
+        if oldest_pair_ms == 0:
+            oldest_pair_ms = await _fetch_pumpfun_created(session, address)
+
         return {
             "symbol":         (best.get("baseToken") or {}).get("symbol") or "?",
             "market_cap":     float(best.get("marketCap") or 0),
