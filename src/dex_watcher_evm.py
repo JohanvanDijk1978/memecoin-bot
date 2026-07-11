@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 CHANNEL_ID          = os.getenv("DEX_UPDATES_EVM_CHANNEL_ID", "")
 DISCORD_WEBHOOK     = os.getenv("DEX_UPDATES_EVM_DISCORD_WEBHOOK", "")
 POLL_SECONDS        = int(os.getenv("DEX_WATCHER_EVM_POLL_SECONDS", "30"))
-MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_EVM_MIN_AGE_HOURS", "0"))
+MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_EVM_MIN_AGE_HOURS", "12"))
 INITIAL_DELAY_SECS  = 60
 
 _CHAINS_RAW = os.getenv("DEX_WATCHER_EVM_CHAINS", "ethereum,bsc,robinhood")
@@ -207,7 +207,10 @@ def _format_alert_tg(profile: dict, market: Optional[dict], event_type: str, cha
 
     description = (profile.get("description") or "").strip()
     if description:
-        body += f"\n_{_escape_md(description[:300])}_\n"
+        # Collapse whitespace — see dex_watcher.py note about multi-line italic
+        # parse errors in Telegram legacy Markdown.
+        desc_flat = " ".join(description.split())
+        body += f"\n_{_escape_md(desc_flat[:300])}_\n"
 
     links = profile.get("links") or []
     link_lines = []

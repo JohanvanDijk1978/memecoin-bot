@@ -234,7 +234,11 @@ def _format_alert(profile: dict, market: Optional[dict], event_type: str) -> str
 
     description = (profile.get("description") or "").strip()
     if description:
-        body += f"\n_{_escape_md(description[:300])}_\n"
+        # Collapse whitespace: Telegram legacy Markdown doesn't reliably parse
+        # multi-line italic entities, and unbalanced newlines inside `_..._`
+        # will cause the whole sendPhoto/sendMessage to fail with a parse error.
+        desc_flat = " ".join(description.split())
+        body += f"\n_{_escape_md(desc_flat[:300])}_\n"
 
     links = profile.get("links") or []
     link_lines = []
@@ -420,7 +424,10 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str) ->
     except Exception as e:
         logger.warning(f"dex_watcher: milestone register failed for {address}: {e}")
 
-    return tg_msg_id is not None
+    # Mark seen as long as ANY platform got the alert. Otherwise a broken
+    # Telegram markdown parse (or any per-platform failure) would loop forever,
+    # spamming the platform that DOES work.
+    return True
 
 
 # ── Per-poll processing ───────────────────────────────────────────────────
