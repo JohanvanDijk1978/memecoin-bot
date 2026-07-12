@@ -11,7 +11,7 @@ import json
 import os
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # ── Regex patterns ────────────────────────────────────────────────────────────
 SOL_ADDRESS_RE = re.compile(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b')
 ETH_ADDRESS_RE = re.compile(r'\b0x[a-fA-F0-9]{40}\b')
-TICKER_RE      = re.compile(r'\$([A-Z]{2,10})\b')
 
 HISTORY_FILE = "data/ca_history.json"
 
@@ -34,17 +33,6 @@ class Mention:
     group_name: str = ""
     sender_name: str = ""
     market_cap: float = 0.0
-
-
-@dataclass
-class CoinSignal:
-    address: str
-    chain: str
-    mention_count: int = 0
-    sources: List[str] = field(default_factory=list)
-    first_seen: float = 0.0
-    last_seen: float = 0.0
-    tickers: List[str] = field(default_factory=list)
 
 
 class MentionStore:
@@ -143,35 +131,6 @@ class MentionStore:
                 market_cap=market_cap,
             )
             self._mentions[addr].append(mention)
-
-    def get_signals(self, since_hours: float) -> List[CoinSignal]:
-        cutoff = time.time() - since_hours * 3600
-        signals: Dict[str, CoinSignal] = {}
-
-        for addr, mentions in self._mentions.items():
-            if addr.startswith("CA:"):
-                continue
-            recent = [m for m in mentions if m.timestamp >= cutoff]
-            if not recent:
-                continue
-
-            chain = recent[0].chain
-            tickers = []
-            for m in recent:
-                tickers += TICKER_RE.findall(m.raw_text)
-
-            sig = CoinSignal(
-                address=addr,
-                chain=chain,
-                mention_count=len(recent),
-                sources=list({m.source for m in recent}),
-                first_seen=min(m.timestamp for m in recent),
-                last_seen=max(m.timestamp for m in recent),
-                tickers=list(set(tickers)),
-            )
-            signals[addr] = sig
-
-        return sorted(signals.values(), key=lambda s: s.mention_count, reverse=True)
 
     def get_scan_stats(self, address: str) -> tuple:
         """Return (total_scans, unique_groups) for a CA."""

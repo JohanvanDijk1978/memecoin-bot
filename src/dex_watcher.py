@@ -18,7 +18,8 @@ Design notes:
 - Silent no-op when DEX_UPDATES_CHANNEL_ID isn't set — lets the module load
   before the .env is updated.
 - Persistent dedup at data/dex_watcher_seen.json with 30-day TTL prune on load.
-- Uses shared send_ping / send_media_group helpers — no Bot API URL logic here.
+- Talks to the Bot API directly (not via send_ping) because it needs to
+  capture message_id for milestone_tracker replies.
 """
 
 import os
@@ -31,7 +32,9 @@ from typing import Optional
 import aiohttp
 from dotenv import load_dotenv
 
-from .send_ping import send_ping, send_media_group
+# NOTE: this watcher used to route through send_ping / send_media_group but was
+# refactored to talk to the Bot API directly so it could capture message_id
+# for milestone replies. Kept as a reminder — do not re-add the import.
 
 load_dotenv()
 logger = logging.getLogger(__name__)

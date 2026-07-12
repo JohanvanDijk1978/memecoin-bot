@@ -5,32 +5,9 @@ Mirrors all messages from alpha groups to topic channels using the bot.
 """
 
 import os
-import re
 import logging
 import aiohttp
 from dotenv import load_dotenv
-
-SOL_ADDRESS_RE = re.compile(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b')
-ETH_ADDRESS_RE = re.compile(r'\b0x[a-fA-F0-9]{40}\b')
-
-
-"""Wrap any CA addresses in backticks so they are tap-to-copy in Telegram. Dont need for now, if we need it for 
-later also add wrap_cas_in_backticks{text}"""
-"""def wrap_cas_in_backticks(text: str) -> str:
-    result = text
-    seen = set()
-    for m in SOL_ADDRESS_RE.finditer(text):
-        addr = m.group()
-        if addr not in seen:
-            seen.add(addr)
-            result = result.replace(addr, f"`{addr}`")
-    for m in ETH_ADDRESS_RE.finditer(text):
-        addr = m.group()
-        if addr not in seen:
-            seen.add(addr)
-            result = result.replace(addr, f"`{addr}`")
-    return result
-"""
 
 load_dotenv()
 logger = logging.getLogger(__name__)

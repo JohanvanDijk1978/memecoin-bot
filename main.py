@@ -1,12 +1,14 @@
 """
 main.py
 ───────
-Entrypoint — runs all three components concurrently:
+Entrypoint — runs all the bot's async loops concurrently:
   1. Telegram user account scraper (Telethon)
-  2. Discord self-bot scraper
-  3. Telegram bot (for your /briefing commands)
-
-Also runs an hourly cleanup of old mentions.
+  2. Discord self-bot scraper (two accounts)
+  3. Telegram bot for command handlers (/status, /leaderboard, /pump)
+  4. Hourly cleanup of old mentions
+  5. Dexscreener paid-boost + CTO watcher (Solana)
+  6. Dexscreener paid-boost + CTO watcher (EVM: Ethereum, BSC, Robinhood)
+  7. Milestone tracker replying to dex-update posts at 2x/3x/5x/10x/+5x
 """
 
 import asyncio
@@ -56,13 +58,13 @@ async def run_discord_scraper():
 
 
 async def run_bot():
-    """Start the Telegram bot that handles your /briefing commands."""
+    """Start the Telegram bot that handles /status, /leaderboard, /pump."""
     from src.bot import build_bot_app
     app = build_bot_app()
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    logger.info("✅ Telegram briefing bot started — send /briefing to get started")
+    logger.info("✅ Telegram bot started — commands: /status, /leaderboard, /pump")
 
     # Keep running until cancelled
     try:

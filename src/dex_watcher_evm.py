@@ -30,7 +30,9 @@ from typing import Optional
 import aiohttp
 from dotenv import load_dotenv
 
-from .send_ping import send_ping
+# NOTE: EVM watcher talks to the Bot API directly (see _send_telegram_alert
+# below) so it can capture message_id for milestone_tracker replies. No
+# send_ping import needed.
 
 load_dotenv()
 logger = logging.getLogger(__name__)
