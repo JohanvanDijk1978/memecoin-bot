@@ -420,6 +420,7 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str) ->
             name=(market_dict.get("name") or ""),
             tg_message_id=tg_msg_id,
             dc_message_id=dc_msg_id,
+            chain="solana",
         )
     except Exception as e:
         logger.warning(f"dex_watcher: milestone register failed for {address}: {e}")

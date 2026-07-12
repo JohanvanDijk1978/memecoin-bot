@@ -37,11 +37,24 @@ TTL_DAYS           = int(os.getenv("MILESTONE_TTL_DAYS", "30"))
 INITIAL_DELAY_SECS = 90  # let dex_watcher's first burst settle before we poll
 
 BOT_TOKEN       = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHANNEL_ID      = os.getenv("DEX_UPDATES_CHANNEL_ID", "")
-DISCORD_WEBHOOK = os.getenv("DEX_UPDATES_DISCORD_WEBHOOK", "")
 TELEGRAM_API    = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 MILESTONES_FILE = "data/dex_milestones.json"
+
+
+def _channel_for_chain(chain: str) -> str:
+    """Route milestone replies to the same channel that the original alert
+    used, based on the chain."""
+    if chain == "solana":
+        return os.getenv("DEX_UPDATES_CHANNEL_ID", "")
+    # ethereum / bsc / robinhood / any other EVM chain
+    return os.getenv("DEX_UPDATES_EVM_CHANNEL_ID", "")
+
+
+def _webhook_for_chain(chain: str) -> str:
+    if chain == "solana":
+        return os.getenv("DEX_UPDATES_DISCORD_WEBHOOK", "")
+    return os.getenv("DEX_UPDATES_EVM_DISCORD_WEBHOOK", "")
 
 
 def _milestones_ordered() -> List[int]:
@@ -84,13 +97,17 @@ def register_token(
     name: str = "",
     tg_message_id: Optional[int] = None,
     dc_message_id: Optional[str] = None,
+    chain: str = "solana",
 ) -> None:
-    """Register a token for milestone tracking. Called by dex_watcher after
-    successfully sending its initial alert. No-op if:
+    """Register a token for milestone tracking. Called by dex_watcher /
+    dex_watcher_evm after successfully sending its initial alert. No-op if:
       - address is falsy
       - initial_mc is missing / invalid / <= 0
       - the token is already being tracked (first alert wins)
       - both message IDs are missing (nothing to reply to)
+
+    `chain` is used to route milestone replies to the correct Telegram
+    channel / Discord webhook (Solana vs EVM).
     """
     if not address:
         return
@@ -112,13 +129,14 @@ def register_token(
         "name":        name or "",
         "tg_msg_id":   tg_message_id,
         "dc_msg_id":   dc_message_id,
+        "chain":       chain or "solana",
         "posted_at":   time.time(),
         "hit":         [],  # milestones already announced
     }
     _save(_state)
     logger.info(
         f"milestone_tracker: registered {address} (${initial_mc:,.0f}, "
-        f"tg={tg_message_id}, dc={dc_message_id})"
+        f"chain={chain}, tg={tg_message_id}, dc={dc_message_id})"
     )
 
 
@@ -185,14 +203,19 @@ def _format_update(ticker: str, name: str, multiplier: int,
 
 
 # ── Reply senders ─────────────────────────────────────────────────────────
-async def _reply_telegram(session: aiohttp.ClientSession, text: str, reply_to: Optional[int]) -> None:
-    if not (BOT_TOKEN and CHANNEL_ID and reply_to):
+async def _reply_telegram(
+    session: aiohttp.ClientSession,
+    text: str,
+    reply_to: Optional[int],
+    channel_id: str,
+) -> None:
+    if not (BOT_TOKEN and channel_id and reply_to):
         return
     try:
         resp = await session.post(
             f"{TELEGRAM_API}/sendMessage",
             json={
-                "chat_id": CHANNEL_ID,
+                "chat_id": channel_id,
                 "text": text,
                 "reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": True},
                 "disable_web_page_preview": True,
@@ -206,12 +229,17 @@ async def _reply_telegram(session: aiohttp.ClientSession, text: str, reply_to: O
         logger.warning(f"milestone_tracker: TG reply failed: {e}")
 
 
-async def _reply_discord(session: aiohttp.ClientSession, text: str, reply_to: Optional[str]) -> None:
-    if not (DISCORD_WEBHOOK and reply_to):
+async def _reply_discord(
+    session: aiohttp.ClientSession,
+    text: str,
+    reply_to: Optional[str],
+    webhook_url: str,
+) -> None:
+    if not (webhook_url and reply_to):
         return
     try:
         resp = await session.post(
-            DISCORD_WEBHOOK,
+            webhook_url,
             json={
                 "content": text,
                 "username": "Dex Updates",
@@ -258,9 +286,12 @@ async def _process(session: aiohttp.ClientSession) -> int:
             entry["initial_mc"],
             current_mc,
         )
+        chain = entry.get("chain", "solana")  # legacy entries default to solana
+        channel_id = _channel_for_chain(chain)
+        webhook    = _webhook_for_chain(chain)
         await asyncio.gather(
-            _reply_telegram(session, text, entry.get("tg_msg_id")),
-            _reply_discord(session, text, entry.get("dc_msg_id")),
+            _reply_telegram(session, text, entry.get("tg_msg_id"), channel_id),
+            _reply_discord(session, text, entry.get("dc_msg_id"), webhook),
         )
 
         # Mark ALL milestones up to and including this one as hit — so if we
@@ -281,15 +312,23 @@ async def _process(session: aiohttp.ClientSession) -> int:
 
 # ── Public entry point ────────────────────────────────────────────────────
 async def run_milestone_tracker() -> None:
-    if not (BOT_TOKEN and CHANNEL_ID):
+    sol_channel = _channel_for_chain("solana")
+    evm_channel = _channel_for_chain("ethereum")
+    if not BOT_TOKEN or not (sol_channel or evm_channel):
         logger.info(
-            "milestone_tracker: TELEGRAM_BOT_TOKEN or DEX_UPDATES_CHANNEL_ID missing — feature disabled"
+            "milestone_tracker: TELEGRAM_BOT_TOKEN and at least one of "
+            "DEX_UPDATES_CHANNEL_ID / DEX_UPDATES_EVM_CHANNEL_ID must be set — feature disabled"
         )
         return
 
+    sources = []
+    if sol_channel:
+        sources.append("solana")
+    if evm_channel:
+        sources.append("evm")
     logger.info(
         f"📈 milestone_tracker armed — poll={POLL_SECONDS}s, ttl={TTL_DAYS}d, "
-        f"tracked={len(_state)}, discord={'on' if DISCORD_WEBHOOK else 'off'}"
+        f"tracked={len(_state)}, sources={sources}"
     )
     await asyncio.sleep(INITIAL_DELAY_SECS)
 

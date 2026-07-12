@@ -279,40 +279,120 @@ def _format_discord_embed(profile: dict, market: Optional[dict], event_type: str
 
 
 # ── Discord posting ───────────────────────────────────────────────────────
-async def _notify_discord(embed: dict) -> None:
+def _webhook_wait_url(url: str) -> str:
+    """Append wait=true so Discord returns the created message JSON (needed to
+    capture the message_id for milestone replies)."""
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}wait=true"
+
+
+async def _notify_discord(embed: dict) -> Optional[str]:
+    """Post to the Discord webhook. Returns the created message_id on success,
+    or None. Silent no-op if DEX_UPDATES_EVM_DISCORD_WEBHOOK isn't set."""
     if not DISCORD_WEBHOOK:
-        return
+        return None
     try:
         async with aiohttp.ClientSession() as session:
             resp = await session.post(
-                DISCORD_WEBHOOK,
+                _webhook_wait_url(DISCORD_WEBHOOK),
                 json={"username": "Dex Updates (EVM)", "embeds": [embed]},
                 timeout=aiohttp.ClientTimeout(total=10),
             )
             if resp.status not in (200, 204):
                 body = await resp.text()
                 logger.warning(f"dex_watcher_evm: Discord webhook {resp.status}: {body[:200]}")
+                return None
+            if resp.status == 204:
+                return None
+            data = await resp.json()
+            return str(data.get("id")) if data.get("id") else None
     except Exception as e:
         logger.warning(f"dex_watcher_evm: Discord webhook failed: {e}")
+        return None
+
+
+async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
+    """Send the alert to the EVM Telegram channel and return the created
+    message_id, or None on failure. sendPhoto with caption when a banner exists,
+    plain sendMessage fallback otherwise."""
+    if not (os.getenv("TELEGRAM_BOT_TOKEN") and CHANNEL_ID):
+        return None
+    telegram_api = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            if image_url:
+                resp = await session.post(
+                    f"{telegram_api}/sendPhoto",
+                    json={
+                        "chat_id": CHANNEL_ID,
+                        "photo": image_url,
+                        "caption": caption[:1024],
+                        "parse_mode": "Markdown",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
+                )
+                data = await resp.json()
+                if data.get("ok"):
+                    return int(data["result"]["message_id"])
+                logger.info(f"dex_watcher_evm: sendPhoto failed ({data.get('description')}), falling back to text")
+
+            resp = await session.post(
+                f"{telegram_api}/sendMessage",
+                json={
+                    "chat_id": CHANNEL_ID,
+                    "text": caption[:4096],
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": True,
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            data = await resp.json()
+            if data.get("ok"):
+                return int(data["result"]["message_id"])
+            logger.warning(f"dex_watcher_evm: sendMessage not ok: {data}")
+            return None
+    except Exception as e:
+        logger.warning(f"dex_watcher_evm: Telegram send failed: {e}")
+        return None
 
 
 # ── Alert send ────────────────────────────────────────────────────────────
 async def _send_alert(profile: dict, market: Optional[dict], event_type: str, chain: str) -> bool:
     caption    = _format_alert_tg(profile, market, event_type, chain)
-    header_url = profile.get("header")
+    header_url = profile.get("header") or ""
+    address    = profile.get("tokenAddress", "")
 
-    # Discord in parallel — fire-and-forget.
-    asyncio.create_task(_notify_discord(_format_discord_embed(profile, market, event_type, chain)))
+    market_dict = market or {}
+    initial_mc = float(market_dict.get("market_cap") or market_dict.get("fdv") or 0)
+    symbol     = market_dict.get("symbol") or ""
 
-    try:
-        if header_url:
-            await send_ping(caption, image_url=header_url, chat_id=CHANNEL_ID)
-        else:
-            await send_ping(caption, chat_id=CHANNEL_ID)
-        return True
-    except Exception as e:
-        logger.warning(f"dex_watcher_evm: alert send failed for {profile.get('tokenAddress')}: {e}")
+    # Fire Telegram + Discord in parallel; we need message IDs from both for
+    # milestone reply routing later.
+    tg_task = asyncio.create_task(_send_telegram_alert(caption, header_url))
+    dc_task = asyncio.create_task(_notify_discord(_format_discord_embed(profile, market, event_type, chain)))
+    tg_msg_id, dc_msg_id = await asyncio.gather(tg_task, dc_task)
+
+    if tg_msg_id is None and dc_msg_id is None:
         return False
+
+    # Register for milestone tracking on the EVM channel/webhook.
+    try:
+        from .dex_milestone_tracker import register_token
+        register_token(
+            address=address,
+            initial_mc=initial_mc,
+            ticker=symbol,
+            name=(market_dict.get("name") or ""),
+            tg_message_id=tg_msg_id,
+            dc_message_id=dc_msg_id,
+            chain=chain,
+        )
+    except Exception as e:
+        logger.warning(f"dex_watcher_evm: milestone register failed for {address}: {e}")
+
+    # Same rationale as Solana watcher: mark seen when ANY platform got the
+    # alert. Otherwise a per-content failure on one side loops forever.
+    return True
 
 
 # ── Per-feed processing ───────────────────────────────────────────────────
