@@ -145,6 +145,7 @@ async def _fetch_current_mc(session: aiohttp.ClientSession, address: str) -> Opt
     """Fetch current market cap for the token's top-liquidity pair. None on failure."""
     url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
     try:
+        await dex_wait()
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status != 200:
                 return None
@@ -182,12 +183,7 @@ def _milestones_up_to(threshold: int) -> List[int]:
 
 
 # ── Formatting ────────────────────────────────────────────────────────────
-def _fmt_usd(n: float) -> str:
-    if n >= 1_000_000:
-        return f"${n/1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"${n/1_000:.0f}K"
-    return f"${n:.0f}"
+from .utils import fmt_usd as _fmt_usd, dex_wait
 
 
 def _format_update(ticker: str, name: str, multiplier: int,

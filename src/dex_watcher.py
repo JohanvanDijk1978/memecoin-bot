@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 # NOTE: this watcher used to route through send_ping / send_media_group but was
 # refactored to talk to the Bot API directly so it could capture message_id
 # for milestone replies. Kept as a reminder — do not re-add the import.
+from .utils import escape_md as _escape_md, fmt_usd as _fmt_usd, fmt_age as _fmt_age, age_hours as _age_hours, dex_wait
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -80,54 +81,11 @@ _seen: dict = _load_seen()
 _save_lock = asyncio.Lock()
 
 
-def _escape_md(s) -> str:
-    """Legacy-Markdown escape for dynamic content. Matches bot.py's escape_md."""
-    if not s:
-        return ""
-    s = str(s)
-    for ch in ("\\", "_", "*", "`", "[", "]"):
-        s = s.replace(ch, "\\" + ch)
-    return s
-
-
-def _fmt_usd(n) -> str:
-    if n is None or n == 0:
-        return "n/a"
-    try:
-        n = float(n)
-    except (TypeError, ValueError):
-        return "n/a"
-    if n >= 1_000_000:
-        return f"${n/1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"${n/1_000:.0f}K"
-    return f"${n:.0f}"
-
-
-def _fmt_age(pair_created_ms: Optional[int]) -> str:
-    if not pair_created_ms:
-        return "unknown"
-    delta_secs = time.time() - (pair_created_ms / 1000)
-    if delta_secs < 0:
-        return "unknown"
-    days, rem = divmod(int(delta_secs), 86400)
-    hours = rem // 3600
-    if days:
-        return f"{days}d {hours}h"
-    minutes = (rem % 3600) // 60
-    return f"{hours}h {minutes}m"
-
-
-def _age_hours(pair_created_ms: Optional[int]) -> Optional[float]:
-    if not pair_created_ms:
-        return None
-    return (time.time() - pair_created_ms / 1000) / 3600.0
-
-
 # ── Dexscreener client ────────────────────────────────────────────────────
 async def _fetch_feed(session: aiohttp.ClientSession, url: str) -> list:
     """GET a Dexscreener paid feed. Returns [] on any error (logged)."""
     try:
+        await dex_wait()
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status != 200:
                 logger.warning(f"dex_watcher: feed {url} returned {resp.status}")
@@ -175,6 +133,7 @@ async def _fetch_pumpfun_created(session: aiohttp.ClientSession, address: str) -
 async def _fetch_pair_data(session: aiohttp.ClientSession, address: str) -> Optional[dict]:
     """Grab market data for a token (best pair by liquidity). Returns None on failure."""
     try:
+        await dex_wait()
         async with session.get(
             TOKENS_URL.format(address=address),
             timeout=aiohttp.ClientTimeout(total=10),

@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+from src.utils import escape_md, fmt_usd, dex_wait
+
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
 ALLOWED_USERS = {1768528319, 6717838435,7801901063}
@@ -25,17 +27,13 @@ START_TIME = time.time()
 
 CA_HISTORY_FILE = "data/ca_history.json"
 
+# fmt_mc is the pre-existing name callers use throughout this module. Keep it
+# as an alias so we don't have to churn every call site.
+fmt_mc = fmt_usd
+
 
 def is_allowed(update: Update) -> bool:
     return update.effective_user.id in ALLOWED_USERS
-
-
-def fmt_mc(mc):
-    if mc >= 1_000_000:
-        return f"${mc/1_000_000:.1f}M"
-    if mc >= 1_000:
-        return f"${mc/1_000:.0f}K"
-    return f"${mc:.0f}"
 
 
 def axiom_link(addr, ticker):
@@ -43,20 +41,11 @@ def axiom_link(addr, ticker):
     return f"[${escape_md(ticker)}](https://axiom.trade/t/{addr}?chain={chain})"
 
 
-def escape_md(s) -> str:
-    """Escape Telegram legacy-Markdown special chars in dynamic strings."""
-    if not s:
-        return ""
-    s = str(s)
-    for ch in ("\\", "_", "*", "`", "[", "]"):
-        s = s.replace(ch, "\\" + ch)
-    return s
-
-
 async def fetch_token_data(session: aiohttp.ClientSession, address: str) -> dict:
     """Fetch current market cap and ticker from Dexscreener."""
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+        await dex_wait()
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status != 200:
                 return {"mcap": 0, "ticker": ""}
@@ -248,14 +237,8 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣"]
 
-    def fmt_mc(mc):
-        if mc >= 1_000_000: return f"${mc/1_000_000:.1f}M"
-        if mc >= 1_000: return f"${mc/1_000:.0f}K"
-        return f"${mc:.0f}"
-
-    def axiom_link(addr, ticker):
-        chain = "eth" if addr.startswith("0x") else "sol"
-        return f"[${ticker}](https://axiom.trade/t/{addr}?chain={chain})"
+    # fmt_mc and axiom_link are module-level (from utils + defined at top of file)
+    # — no local shadows needed.
 
     sorted_groups = sorted(
         group_stats.items(),

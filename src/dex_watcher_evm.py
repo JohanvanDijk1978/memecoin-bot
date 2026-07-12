@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 # NOTE: EVM watcher talks to the Bot API directly (see _send_telegram_alert
 # below) so it can capture message_id for milestone_tracker replies. No
 # send_ping import needed.
+from .utils import escape_md as _escape_md, fmt_usd as _fmt_usd, fmt_age as _fmt_age, age_hours as _age_hours, dex_wait
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -82,47 +83,8 @@ _save_lock = asyncio.Lock()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
-def _escape_md(s) -> str:
-    if not s:
-        return ""
-    s = str(s)
-    for ch in ("\\", "_", "*", "`", "[", "]"):
-        s = s.replace(ch, "\\" + ch)
-    return s
-
-
-def _fmt_usd(n) -> str:
-    if n is None or n == 0:
-        return "n/a"
-    try:
-        n = float(n)
-    except (TypeError, ValueError):
-        return "n/a"
-    if n >= 1_000_000:
-        return f"${n/1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"${n/1_000:.0f}K"
-    return f"${n:.0f}"
-
-
-def _fmt_age(pair_created_ms: Optional[int]) -> str:
-    if not pair_created_ms:
-        return "unknown"
-    delta_secs = time.time() - (pair_created_ms / 1000)
-    if delta_secs < 0:
-        return "unknown"
-    days, rem = divmod(int(delta_secs), 86400)
-    hours = rem // 3600
-    if days:
-        return f"{days}d {hours}h"
-    minutes = (rem % 3600) // 60
-    return f"{hours}h {minutes}m"
-
-
-def _age_hours(pair_created_ms: Optional[int]) -> Optional[float]:
-    if not pair_created_ms:
-        return None
-    return (time.time() - pair_created_ms / 1000) / 3600.0
+# escape_md / fmt_usd / fmt_age / age_hours all live in src/utils.py now and
+# are imported at the top of this module.
 
 
 def _chain_pretty(chain: str) -> str:
@@ -137,6 +99,7 @@ def _chain_pretty(chain: str) -> str:
 # ── Dexscreener client ────────────────────────────────────────────────────
 async def _fetch_feed(session: aiohttp.ClientSession, url: str) -> list:
     try:
+        await dex_wait()
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status != 200:
                 logger.warning(f"dex_watcher_evm: feed {url} returned {resp.status}")
@@ -153,6 +116,7 @@ async def _fetch_feed(session: aiohttp.ClientSession, url: str) -> list:
 async def _fetch_pair_data(session: aiohttp.ClientSession, address: str) -> Optional[dict]:
     """Best-liquidity pair market data. Returns None on failure."""
     try:
+        await dex_wait()
         async with session.get(
             TOKENS_URL.format(address=address),
             timeout=aiohttp.ClientTimeout(total=10),

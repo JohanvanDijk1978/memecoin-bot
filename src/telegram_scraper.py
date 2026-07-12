@@ -58,6 +58,8 @@ async def fetch_token_quick(address: str, chain: str) -> dict:
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+            from .utils import dex_wait
+            await dex_wait()
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status != 200:
                     return {}
