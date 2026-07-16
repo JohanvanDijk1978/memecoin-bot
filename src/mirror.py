@@ -55,18 +55,22 @@ async def mirror_message(
     image_bytes: bytes = None,
     reply_text: str = None,
     reply_sender: str = None,
+    topic_id: int = None,
 ) -> str:
     """Mirror a message to the topic channel.
 
     image_url   — public URL the Bot API can fetch (used by CA ping flow that pulls
-                  token logos from Dexscreener).
+                  token logos from Dexscreener, and by Discord mirror for CDN URLs).
     image_bytes — raw image bytes (used by the Telegram scraper to mirror photos
                   attached to alpha-group messages — those have no public URL).
+    topic_id    — override the group-name → topic lookup. Used by the Discord
+                  channel mirror where the source isn't a Telegram group name.
     """
     if not BOT_TOKEN or not MIRROR_GROUP:
         return ""
 
-    topic_id = get_topic_id(group_name)
+    if topic_id is None:
+        topic_id = get_topic_id(group_name)
 
     if sender_username:
         sender_display = f"*{sender_name}* (@{sender_username})"

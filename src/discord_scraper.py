@@ -31,6 +31,29 @@ CHANNEL_IDS_2: List[int] = [
     int(cid.strip()) for cid in CHANNEL_IDS_2_RAW.split(",") if cid.strip().isdigit()
 ]
 
+# ── Mirror config: pipe a specific Discord channel → a Telegram topic ─────
+# Both must be set for the mirror to activate. Silent no-op if either is 0.
+DISCORD_MIRROR_CHANNEL_ID = int(os.getenv("DISCORD_MIRROR_CHANNEL_ID", "0") or 0)
+DISCORD_MIRROR_TOPIC_ID   = int(os.getenv("DISCORD_MIRROR_TOPIC_ID", "0") or 0)
+
+# Dedup — if both Discord accounts happen to see the same channel, both
+# on_message handlers fire. Without this we'd double-post to Telegram.
+_mirror_seen: dict = {}  # message_id -> timestamp
+_MIRROR_DEDUP_TTL = 600  # 10 min is plenty; message IDs never repeat
+
+
+def _mirror_dedup(msg_id: int) -> bool:
+    """Return True if this message ID was already mirrored (within TTL)."""
+    now = import_time.time()
+    stale = [k for k, ts in _mirror_seen.items() if ts < now - _MIRROR_DEDUP_TTL]
+    for k in stale:
+        _mirror_seen.pop(k, None)
+    if msg_id in _mirror_seen:
+        return True
+    _mirror_seen[msg_id] = now
+    return False
+
+
 # Track pinged addresses: address -> {time, groups: dict}
 _recent_pings: dict = {}
 PING_COOLDOWN = 600  # 10 minutes
@@ -40,6 +63,7 @@ BLOCKED_NAMES = {"rickburpbot", "rick"}
 
 from .send_ping import send_ping
 from .filtered_forward import maybe_forward
+from .mirror import mirror_message
 
 
 async def fetch_token_quick(address: str, chain: str) -> dict:
@@ -322,6 +346,33 @@ try:
             logger.info(f"📡 Monitoring {len(self._channel_ids)} Discord channel(s)")
 
         async def on_message(self, message):
+            # Mirror path: forward EVERY message from the configured Discord
+            # channel into the configured Telegram topic. Runs independently
+            # of the scraper path so it fires even for image-only messages.
+            if (
+                DISCORD_MIRROR_CHANNEL_ID
+                and DISCORD_MIRROR_TOPIC_ID
+                and message.channel.id == DISCORD_MIRROR_CHANNEL_ID
+                and not message.author.bot
+                and not _mirror_dedup(message.id)
+            ):
+                try:
+                    sender = message.author.display_name or message.author.name or "Unknown"
+                    img_url = ""
+                    for att in (message.attachments or []):
+                        if (att.content_type or "").startswith("image/"):
+                            img_url = att.url
+                            break
+                    asyncio.create_task(mirror_message(
+                        text=message.content or "",
+                        group_name="",  # unused when topic_id is passed explicitly
+                        sender_name=sender,
+                        image_url=img_url,
+                        topic_id=DISCORD_MIRROR_TOPIC_ID,
+                    ))
+                except Exception as e:
+                    logger.warning(f"discord mirror failed for msg {message.id}: {e}")
+
             if message.channel.id not in self._channel_ids:
                 return
             if not message.content:
