@@ -363,8 +363,10 @@ try:
                         if (att.content_type or "").startswith("image/"):
                             img_url = att.url
                             break
+                    # Use clean_content so <@ID>, <#ID>, <@&roleID> get resolved
+                    # to @displayname / #channel / @role instead of raw IDs.
                     asyncio.create_task(mirror_message(
-                        text=message.content or "",
+                        text=message.clean_content or "",
                         group_name="",  # unused when topic_id is passed explicitly
                         sender_name=sender,
                         image_url=img_url,
