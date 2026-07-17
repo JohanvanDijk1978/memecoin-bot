@@ -173,10 +173,10 @@ def _format_alert_tg(profile: dict, market: Optional[dict], event_type: str, cha
 
     description = (profile.get("description") or "").strip()
     if description:
-        # Collapse whitespace — see dex_watcher.py note about multi-line italic
-        # parse errors in Telegram legacy Markdown.
+        # See dex_watcher.py note: no italic wrap on user-supplied text because
+        # Telegram legacy Markdown doesn't honor `\_` escapes inside entities.
         desc_flat = " ".join(description.split())
-        body += f"\n_{_escape_md(desc_flat[:300])}_\n"
+        body += f"\n{_escape_md(desc_flat[:300])}\n"
 
     links = profile.get("links") or []
     link_lines = []

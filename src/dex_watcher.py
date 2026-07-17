@@ -196,11 +196,12 @@ def _format_alert(profile: dict, market: Optional[dict], event_type: str) -> str
 
     description = (profile.get("description") or "").strip()
     if description:
-        # Collapse whitespace: Telegram legacy Markdown doesn't reliably parse
-        # multi-line italic entities, and unbalanced newlines inside `_..._`
-        # will cause the whole sendPhoto/sendMessage to fail with a parse error.
+        # Flatten whitespace AND drop the italic wrap. Telegram legacy Markdown
+        # does NOT honor `\_` escapes *inside* an entity — so wrapping
+        # user-supplied text in `_..._` is unsafe whenever it contains `_`.
+        # Symptom was "Can't find end of the entity starting at byte offset N".
         desc_flat = " ".join(description.split())
-        body += f"\n_{_escape_md(desc_flat[:300])}_\n"
+        body += f"\n{_escape_md(desc_flat[:300])}\n"
 
     links = profile.get("links") or []
     link_lines = []
