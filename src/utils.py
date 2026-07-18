@@ -135,20 +135,19 @@ def chain_display_name(chain_id: str) -> str:
     return _CHAIN_DISPLAY.get(chain_id.lower(), chain_id.title())
 
 
-def axiom_url(chain_id: str, address: str) -> str:
-    """Axiom.trade URL for the chain, or empty string if Axiom doesn't support it."""
-    cid = (chain_id or "").lower()
-    if cid == "solana":
-        return f"https://axiom.trade/t/{address}"
+def basedbot_url(chain_id: str, address: str) -> str:
+    """BasedBot web-app URL for the chain, or empty string if we don't know
+    BasedBot's slug for the chain. Add new slugs here as they're confirmed."""
     slug = {
-        "ethereum": "eth",
-        "bsc":      "bnb",
-        "base":     "base",
-        "arbitrum": "arb",
-    }.get(cid)
+        "solana":    "sol",
+        "robinhood": "robinhood",
+        "ethereum":  "eth",
+        "bsc":       "bnb",
+        "base":      "base",
+    }.get((chain_id or "").lower())
     if not slug:
         return ""
-    return f"https://axiom.trade/t/{address}?chain={slug}"
+    return f"https://basedbot.app/token/{slug}/{address}"
 
 
 def padre_url(chain_id: str, address: str) -> str:
@@ -183,11 +182,11 @@ def dexscreener_url(chain_id: str, address: str) -> str:
 
 def build_trading_links(chain_id: str, address: str) -> str:
     """Return a ' | '-joined markdown string of trading-tool links appropriate
-    for the chain. Always includes Dexscreener as universal fallback. Silently
+    for the chain. Always includes DexScreener as universal fallback. Silently
     omits tools that don't support the chain."""
     links = []
-    if u := axiom_url(chain_id, address):
-        links.append(f"[Axiom]({u})")
+    if u := basedbot_url(chain_id, address):
+        links.append(f"[BasedBot]({u})")
     if u := padre_url(chain_id, address):
         links.append(f"[Padre]({u})")
     if u := gmgn_url(chain_id, address):
