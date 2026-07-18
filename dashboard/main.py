@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.11"              # bump together with VERSION in static/app.js
+VERSION = "1.12"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -81,6 +81,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tokens (
           address TEXT PRIMARY KEY,
           chain TEXT NOT NULL,
+          chain_id TEXT DEFAULT '',
           ticker TEXT DEFAULT '',
           current_mc REAL DEFAULT 0,
           peak_mc_dash REAL DEFAULT 0,
@@ -92,10 +93,12 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         """)
-        try:  # migration for DBs created before v1.08
-            c.execute("ALTER TABLE calls ADD COLUMN sender_id TEXT NOT NULL DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        for mig in ("ALTER TABLE calls ADD COLUMN sender_id TEXT NOT NULL DEFAULT ''",   # v1.08
+                    "ALTER TABLE tokens ADD COLUMN chain_id TEXT DEFAULT ''"):           # v1.12
+            try:
+                c.execute(mig)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 # ---------------------------------------------------------------- ingest
 
@@ -173,7 +176,8 @@ async def poll_batch(client: httpx.AsyncClient, addresses: list[str]):
         sym = (p.get("baseToken") or {}).get("symbol", "")
         key = addr.lower()
         if key and mc and (key not in best or liq > best[key]["liq"]):
-            best[key] = {"mc": mc, "ticker": sym, "liq": liq}
+            best[key] = {"mc": mc, "ticker": sym, "liq": liq,
+                         "chain_id": (p.get("chainId") or "").lower()}
     now = time.time()
     with db() as c:
         for a in addresses:
@@ -186,9 +190,11 @@ async def poll_batch(client: httpx.AsyncClient, addresses: list[str]):
                 c.execute("""
                   UPDATE tokens SET current_mc=?, ticker=CASE WHEN ticker='' THEN ? ELSE ticker END,
                     peak_mc_dash=MAX(peak_mc_dash, ?), miss_count=0, last_checked=?,
-                    peak_at=CASE WHEN ? > peak_mc_dash THEN ? ELSE peak_at END
+                    peak_at=CASE WHEN ? > peak_mc_dash THEN ? ELSE peak_at END,
+                    chain_id=?
                   WHERE address=?
-                """, (hit["mc"], hit["ticker"], hit["mc"], now, hit["mc"], now, a))
+                """, (hit["mc"], hit["ticker"], hit["mc"], now, hit["mc"], now,
+                      hit["chain_id"], a))
             else:
                 c.execute("""
                   UPDATE tokens SET miss_count=miss_count+1, last_checked=?,
@@ -250,6 +256,7 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
     sql = """
       SELECT c.*, t.current_mc, t.peak_mc_dash, t.peak_at, t.dead,
              CASE WHEN t.ticker!='' THEN t.ticker ELSE c.ticker END AS tick,
+             IFNULL(t.chain_id,'') AS dex_chain,
              CASE WHEN c.sender_id!='' THEN c.sender_id ELSE c.sender_name END AS caller_key,
              MAX(c.first_mc, c.peak_mc_bot, IFNULL(t.peak_mc_dash,0)) AS eff_peak
       FROM calls c LEFT JOIN tokens t ON t.address = c.address WHERE 1=1
@@ -345,7 +352,7 @@ def leaderboard(rows, key, display=None):
             "consistency": consistency(rs),
             "last_active": max(r["called_at"] for r in rs),
             "best_call": {"ticker": best["tick"], "address": best["address"],
-                          "mult": round(best["mult"], 2),
+                          "chain_id": best["dex_chain"], "mult": round(best["mult"], 2),
                           "peak_mc": round(best["eff_peak"])} if best else None,
         })
         out.append(a)
@@ -411,6 +418,7 @@ def overview(days: float = 30, chain: str = ""):
                 continue
             seen.add(r["address"])
             movers.append({"ticker": r["tick"], "address": r["address"], "chain": r["chain"],
+                           "chain_id": r["dex_chain"],
                            "mult": round(r["mult"], 2), "first_mc": r["first_mc"],
                            "current_mc": r["current_mc"], "group": r["group_name"],
                            "caller": r["sender_name"], "caller_key": r["caller_key"],
@@ -491,6 +499,7 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
     rows = rows[(page - 1) * per: page * per]
     return {"total": total, "page": page,
             "rows": [{"address": r["address"], "ticker": r["tick"], "chain": r["chain"],
+                      "chain_id": r["dex_chain"],
                       "group": r["group_name"], "caller": r["sender_name"],
                       "caller_key": r["caller_key"], "source": r["source"],
                       "first_mc": r["first_mc"], "eff_peak": r["eff_peak"],
@@ -512,13 +521,24 @@ def token_detail(address: str):
                    "mc_at_call": r["first_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,
                    "scan_count": r["scan_count"], "called_at": r["called_at"]} for r in calls],
         "earliest": calls[0]["sender_name"] if calls else None,
-        "links": {
-            "dexscreener": f"https://dexscreener.com/{'ethereum' if address.startswith('0x') else 'solana'}/{address}",
-            "padre": f"https://trade.padre.gg/trade/{'eth' if address.startswith('0x') else 'solana'}/{address}",
-            "gmgn": f"https://gmgn.ai/{'eth' if address.startswith('0x') else 'sol'}/token/{address}",
-            "axiom": f"https://axiom.trade/t/{address}",
-        },
+        "links": token_links(address, (dict(tok).get("chain_id") if tok else "") or ""),
     }
+
+
+def token_links(address: str, chain_id: str = "") -> dict:
+    """Trading links via the best-liquidity pair's real chain (Dexscreener
+    chainId); falls back to the 0x-heuristic. Slug maps mirror src/utils.py."""
+    cid = chain_id or ("ethereum" if address.startswith("0x") else "solana")
+    padre = {"solana": "solana", "ethereum": "eth", "bsc": "bnb", "base": "base"}.get(cid)
+    gmgn = {"solana": "sol", "ethereum": "eth", "bsc": "bsc", "base": "base"}.get(cid)
+    links = {"dexscreener": f"https://dexscreener.com/{cid}/{address}"}
+    if padre:
+        links["padre"] = f"https://trade.padre.gg/trade/{padre}/{address}"
+    if gmgn:
+        links["gmgn"] = f"https://gmgn.ai/{gmgn}/token/{address}"
+    if cid in ("solana", "ethereum", "base"):
+        links["axiom"] = f"https://axiom.trade/t/{address}"
+    return links
 
 
 def profile(rows):
@@ -535,6 +555,7 @@ def profile(rows):
     worst = sorted(with_mult, key=lambda r: r["mult"])[:5]
     mcs = [r["first_mc"] for r in rows if r["first_mc"]]
     fmt = lambda r: {"ticker": r["tick"], "address": r["address"],
+                     "chain_id": r["dex_chain"],
                      "mult": round(r["mult"], 2) if r["mult"] else None,
                      "peak_mc": round(r["eff_peak"]) if r["mult"] else None,
                      "group": r["group_name"], "caller": r["sender_name"],

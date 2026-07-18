@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.11"; // bump together with VERSION in main.py
+const VERSION = "1.12"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -38,9 +38,14 @@ const ago = (ts) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 const chainBadge = (c) => `<span class="badge ${c.toLowerCase()}">${c}</span>`;
-const padre = (a) => `https://trade.padre.gg/trade/${a.startsWith("0x") ? "eth" : "solana"}/${a}`;
+const padre = (a, cid) => {
+  // real chain of the highest-liquidity pool when known (slug map mirrors utils.py)
+  const slug = { solana: "solana", ethereum: "eth", bsc: "bnb", base: "base" }[cid]
+    || (a.startsWith("0x") ? "eth" : "solana");
+  return `https://trade.padre.gg/trade/${slug}/${a}`;
+};
 const tokenLink = (t) =>
-  `<a href="${padre(t.address)}" target="_blank" rel="noopener"><b>${t.ticker ? "$" + esc(t.ticker) : t.address.slice(0, 6) + "…"}</b></a>` +
+  `<a href="${padre(t.address, t.chain_id)}" target="_blank" rel="noopener"><b>${t.ticker ? "$" + esc(t.ticker) : t.address.slice(0, 6) + "…"}</b></a>` +
   ` <a href="#/token/${t.address}" title="details" style="color:var(--dim)">ⓘ</a>`;
 
 /* sortable table: cols = [{key,label,num,fmt,sortVal}] */
@@ -105,7 +110,7 @@ const lbCols = (nameLabel, href) => [
   { key: "med_mult", label: "Med ×", num: true, fmt: (r) => fmtMult(r.med_mult) },
   { key: "consistency", label: "Score", num: true, fmt: (r) => `<b>${r.consistency.toFixed(2)}</b>` },
   { key: "best_call", label: "Best call", sortVal: (r) => r.best_call?.mult ?? 0,
-    fmt: (r) => r.best_call ? `${tokenLink({ ticker: r.best_call.ticker, address: r.best_call.address })} ${multPeak(r.best_call.mult, r.best_call.peak_mc)}` : "—" },
+    fmt: (r) => r.best_call ? `${tokenLink(r.best_call)} ${multPeak(r.best_call.mult, r.best_call.peak_mc)}` : "—" },
   { key: "last_active", label: "Active", num: true, fmt: (r) => `<span style="color:var(--muted)">${ago(r.last_active)}</span>` },
 ];
 
