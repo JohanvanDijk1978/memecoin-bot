@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.17"              # bump together with VERSION in static/app.js
+VERSION = "1.18"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -537,7 +537,8 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
 async def _live_refresh(address: str) -> dict:
     """Single-token live Dexscreener fetch: update stored mcap/peak/chain
     (best-liquidity pair, same rules as the poller) and return banner/socials."""
-    out = {"banner": "", "image": "", "socials": [], "websites": []}
+    out = {"banner": "", "image": "", "socials": [], "websites": [],
+           "pair": "", "chain_id": ""}
     try:
         async with httpx.AsyncClient(headers={"User-Agent": "memedash/1.0"}) as client:
             r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}",
@@ -557,6 +558,9 @@ async def _live_refresh(address: str) -> dict:
                 out["image"] = info.get("imageUrl") or ""
                 out["socials"] = info.get("socials") or []
                 out["websites"] = info.get("websites") or []
+        if best:  # chart embed works even for thin pools
+            out["pair"] = best.get("pairAddress") or ""
+            out["chain_id"] = (best.get("chainId") or "").lower()
         if best and best_liq >= MIN_LIQ_USD:
             mc = best.get("marketCap") or best.get("fdv") or 0
             now = time.time()
