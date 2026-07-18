@@ -23,7 +23,7 @@
 ## Deploy process
 
 - Edit in VS Code → git add/commit/push → webhook auto-pulls → bot + agent restart (NO manual pull needed)
-- .env is NOT in git — deploy via: scp C:\Users\mzshu\Desktop\Projects\memebot\.env root@209.250.245.16:/root/memecoin-bot-new/.env
+- .env is NOT in git — deploy via: scp C:\Users\mzshu\Downloads\memebot\.env root@209.250.245.16:/root/memecoin-bot-new/.env
 - Deploy script: /root/deploy.sh
 - Deploy logs: /root/deploy.log
 - Bot logs: tail -f /root/memecoin-bot-new/data/bot.log
@@ -35,13 +35,14 @@
 - Bot: /root/memecoin-bot-new/main.py
 - Coding agent: /root/coding-agent/agent.py
 - Webhook: systemctl status webhook (port 9000)
-- Both restart on reboot via /etc/rc.local
+- Bot auto-starts on reboot via systemd; agent via /etc/rc.local
 
 ## Preferences
 
 - Always VS Code solutions, never terminal-only edits
-- Never use pm2, always use nohup
-- Use pkill -f "python3 main.py" for clean restarts
+- Bot runs under systemd as memebot.service (/etc/systemd/system/memebot.service) — restart with `systemctl restart memebot`, status with `systemctl status memebot`
+- NEVER pkill the bot — systemd re-spawns it and you'll fight the supervisor
+- Coding agent (agent.py) still runs via nohup, not systemd. Never pm2.
 - Keep code clean and simple
 - Emoji: use 🪙 for coins, not 👤
 
@@ -63,13 +64,16 @@
 - src/mention_store.py — stores CA history in data/ca_history.json
 - src/send_ping.py — sends alerts to Telegram (uses load_dotenv(), NOT hardcoded path)
 - src/mirror.py — mirrors messages to topic channel
-- src/dexscreener.py — fetches token data from Dexscreener API
-- main.py — entrypoint, runs all scrapers + bot + cleanup + peak tracker
+- src/utils.py — shared helpers, Dex rate limiter, dedupe (dexscreener.py was pruned in 353f4d9)
+- src/dex_watcher.py / dex_watcher_evm.py — Dexscreener watchers (Solana / EVM)
+- src/dex_milestone_tracker.py — milestone alerts
+- src/filtered_forward.py — filter channel forwarding
+- main.py — entrypoint, runs all scrapers + bot + cleanup (no peak tracker)
 
 ## Background jobs (in main.py)
 
 - run_cleanup_loop() — prunes old mentions every 1h
-- run_peak_tracker() — checks all CAs from last 24h every 30min, updates peak_mc in ca_history.json
+- There is NO peak tracker (implemented in d6050f4, rolled back to 990d05a same day). peak_mc only updates when the same CA is re-posted in the same group — leaderboard understates pumps that aren't re-shared.
 - run_discord_scraper() — now delegates entirely to discord_scraper.py's run_discord_scraper()
 
 ## Discord scraper (two accounts)
@@ -117,11 +121,12 @@
 - GROUP IDs must be cast to int() in Telethon
 - /etc/webhook.conf must point to /root/memecoin-bot-new
 - deploy.sh logs to /root/deploy.log for debugging
-- Use pkill -f "python3 main.py" not kill $(pgrep) for clean restarts
+- Restart bot with systemctl restart memebot — pkill no longer works (systemd re-spawns); switched after a 10h silent outage under nohup
 - API key must be created after credits are added to Anthropic account
 - send_ping.py must use load_dotenv() not hardcoded path
 - Coding agent rate limits on large files — keep requests focused
 - mirror.py must not call wrap_cas_in_backticks (commented out) — causes NameError
+- dex_watcher(_evm) _send_telegram_alert: sendPhoto and the sendMessage fallback were in ONE try — a sendPhoto timeout skipped the text fallback entirely, so alerts landed on Discord but never Telegram (seen was marked, no retry). Fixed 2026-07-18: sendPhoto has its own try, sendMessage retries once on 429, plain-text (no parse_mode) last resort.
 - current_mc in telegram_scraper was wrong variable name — should be mc
 - sender_name=sender was wrong — should be sender_name=sender_name in store.add_message calls
 - group_name was undefined in on_new_message — fixed with event.get_chat()
@@ -133,7 +138,7 @@
 - Monitors Telegram groups + Discord channels for contract addresses
 - Filters and ranks by mcap, volume via Dexscreener
 - Sends instant CA pings with full token data
-- Tracks peak mcap every 30 minutes
+- No background peak tracking — peak_mc updates only on same-group re-posts
 - Mirror feature forwards all messages to topic channel
 - Blocked users: Rick (shows in mirror but not CA channel)
 - Two Discord accounts running simultaneously

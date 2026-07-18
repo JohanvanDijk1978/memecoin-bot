@@ -284,9 +284,12 @@ async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
     if not (os.getenv("TELEGRAM_BOT_TOKEN") and CHANNEL_ID):
         return None
     telegram_api = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            if image_url:
+    async with aiohttp.ClientSession() as session:
+        # sendPhoto gets its OWN try: a timeout here (Telegram fetching the
+        # Dexscreener CDN banner) must not kill the text fallback below.
+        # That gap is how alerts landed on Discord but never on Telegram.
+        if image_url:
+            try:
                 resp = await session.post(
                     f"{telegram_api}/sendPhoto",
                     json={
@@ -301,24 +304,37 @@ async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
                 if data.get("ok"):
                     return int(data["result"]["message_id"])
                 logger.info(f"dex_watcher_evm: sendPhoto failed ({data.get('description')}), falling back to text")
+            except Exception as e:
+                logger.info(f"dex_watcher_evm: sendPhoto errored ({e}), falling back to text")
 
-            resp = await session.post(
-                f"{telegram_api}/sendMessage",
-                json={
-                    "chat_id": CHANNEL_ID,
-                    "text": caption[:4096],
-                    "parse_mode": "Markdown",
-                    "disable_web_page_preview": True,
-                },
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
-            data = await resp.json()
-            if data.get("ok"):
-                return int(data["result"]["message_id"])
-            logger.warning(f"dex_watcher_evm: sendMessage not ok: {data}")
-            return None
-    except Exception as e:
-        logger.warning(f"dex_watcher_evm: Telegram send failed: {e}")
+        # sendMessage: first with Markdown, then plain text as a last resort so
+        # a parse error can never fully drop the alert. One retry on 429.
+        for extra in ({"parse_mode": "Markdown"}, {}):
+            payload = {
+                "chat_id": CHANNEL_ID,
+                "text": caption[:4096],
+                "disable_web_page_preview": True,
+                **extra,
+            }
+            try:
+                for attempt in (1, 2):
+                    resp = await session.post(
+                        f"{telegram_api}/sendMessage",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    )
+                    data = await resp.json()
+                    if data.get("ok"):
+                        return int(data["result"]["message_id"])
+                    if data.get("error_code") == 429 and attempt == 1:
+                        wait = int((data.get("parameters") or {}).get("retry_after", 3))
+                        logger.info(f"dex_watcher_evm: sendMessage 429, retrying in {wait}s")
+                        await asyncio.sleep(min(wait, 30) + 1)
+                        continue
+                    break
+                logger.warning(f"dex_watcher_evm: sendMessage not ok ({'md' if extra else 'plain'}): {data}")
+            except Exception as e:
+                logger.warning(f"dex_watcher_evm: sendMessage failed ({'md' if extra else 'plain'}): {e}")
         return None
 
 
