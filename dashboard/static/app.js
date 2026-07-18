@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.18"; // bump together with VERSION in main.py
+const VERSION = "1.19"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -252,8 +252,8 @@ const pages = {
         ${item("First called", d.calls[0] ? ago(d.calls[0].called_at) : "—")}
       </div>
       ${info.pair && info.chain_id ? `<div class="panel" style="margin-bottom:18px;padding:0;overflow:hidden">
-        <iframe src="https://dexscreener.com/${esc(info.chain_id)}/${esc(info.pair)}?embed=1&theme=dark&trades=0&info=0"
-          style="width:100%;height:420px;border:0;display:block" loading="lazy"></iframe>
+        <iframe src="https://dexscreener.com/${esc(info.chain_id)}/${esc(info.pair)}?embed=1&theme=dark&trades=1&tabs=1&info=0"
+          style="width:100%;height:720px;border:0;display:block" loading="lazy"></iframe>
       </div>` : `<div class="panel" style="margin-bottom:18px"><div class="empty">No live pool found — chart unavailable.</div></div>`}
       <div class="panel" style="margin-bottom:18px">
         <div class="tabs">
