@@ -205,17 +205,27 @@ async def _reply_telegram(
     reply_to: Optional[int],
     channel_id: str,
 ) -> None:
-    if not (BOT_TOKEN and channel_id and reply_to):
+    """Post a milestone update to Telegram. Thread as a reply when reply_to is
+    known; post as a standalone message otherwise. The standalone path exists
+    because some legacy entries have tg_msg_id=None (their original alert failed
+    to land on Telegram due to a Markdown parse error) — we still want to see
+    the milestone even if we can't attach it to an original post."""
+    if not (BOT_TOKEN and channel_id):
         return
     try:
+        payload = {
+            "chat_id": channel_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if reply_to:
+            payload["reply_parameters"] = {
+                "message_id": reply_to,
+                "allow_sending_without_reply": True,
+            }
         resp = await session.post(
             f"{TELEGRAM_API}/sendMessage",
-            json={
-                "chat_id": channel_id,
-                "text": text,
-                "reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": True},
-                "disable_web_page_preview": True,
-            },
+            json=payload,
             timeout=aiohttp.ClientTimeout(total=10),
         )
         data = await resp.json()
