@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.09"; // bump together with VERSION in main.py
+const VERSION = "1.10"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -364,7 +364,7 @@ document.addEventListener("keydown", (e) => {
         seen.add(key);
         return `<div class="live-row ${isNew ? "new" : ""}"><span class="t">${ago(r.called_at)}</span>
           ${tokenLink(r)} <span style="color:var(--muted)">${fmtMc(r.first_mc)}</span>
-          <span class="who">${esc(r.caller)} · ${esc(r.group)}</span></div>`;
+          <span class="who"><a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a> · ${esc(r.group)}</span></div>`;
       }).join("") || `<div class="empty">No calls yet.</div>`;
       first = false;
     } catch { /* keep last content on transient errors */ }
