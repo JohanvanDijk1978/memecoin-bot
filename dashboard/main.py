@@ -197,11 +197,18 @@ async def peak_loop():
                       ORDER BY last_checked ASC LIMIT 240
                     """, (now, ACTIVE_WINDOW, now, STALE_RECHECK)).fetchall()
                 addrs = [r["address"] for r in rows]
-                for i in range(0, len(addrs), DEX_BATCH):
-                    await poll_batch(client, addrs[i:i + DEX_BATCH])
+                # SOL: batched. EVM: one address per request — Dexscreener's
+                # multi-address endpoint silently drops EVM addrs in mixed
+                # batches; single-address is the form the bot uses everywhere.
+                sol = [a for a in addrs if not a.startswith("0x")]
+                evm = [a for a in addrs if a.startswith("0x")]
+                batches = [sol[i:i + DEX_BATCH] for i in range(0, len(sol), DEX_BATCH)]
+                batches += [[a] for a in evm]
+                for b in batches:
+                    await poll_batch(client, b)
                     await asyncio.sleep(DEX_DELAY)
                 if addrs:
-                    log.info(f"peak poll: {len(addrs)} tokens")
+                    log.info(f"peak poll: {len(addrs)} tokens ({len(evm)} evm)")
                 with db() as c:
                     c.execute("INSERT OR REPLACE INTO meta VALUES ('last_peak_poll', ?)", (str(time.time()),))
             except Exception as e:
