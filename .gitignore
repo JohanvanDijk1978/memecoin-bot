@@ -1,5 +1,6 @@
 .env
 data/
+dashboard/data/
 src/__pycache__/
 __pycache__/
 *.pyc

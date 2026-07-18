@@ -1,0 +1,13 @@
+[Unit]
+Description=memedash - memecoin-bot analytics dashboard
+After=network.target
+
+[Service]
+WorkingDirectory=/root/memecoin-bot-new/dashboard
+ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8080
+Environment=DASH_PASSWORD=CHANGE_ME
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

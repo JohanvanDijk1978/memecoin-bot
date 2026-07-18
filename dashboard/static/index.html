@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memedash 🪙</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<style>
+:root{
+  --bg:#0a0b0f; --bg2:#101218; --bg3:#161923; --border:#232734; --border2:#2e3342;
+  --text:#e6e8ee; --muted:#8b90a0; --dim:#5c6070;
+  --accent:#7c6cff; --green:#3fdd8f; --red:#ff5c6c; --amber:#ffb547;
+  --font:'Inter',-apple-system,'Segoe UI',sans-serif;
+  --mono:'JetBrains Mono','SF Mono',Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:dark}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13.5px;line-height:1.5}
+a{color:inherit;text-decoration:none}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
+
+.layout{display:flex;min-height:100vh}
+.sidebar{width:200px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);
+  padding:16px 10px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
+.logo{font-weight:700;font-size:15px;padding:6px 10px 18px;letter-spacing:.3px}
+.logo span{color:var(--accent)}
+.nav a{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:7px;
+  color:var(--muted);font-weight:500;margin-bottom:2px}
+.nav a:hover{background:var(--bg3);color:var(--text)}
+.nav a.active{background:var(--bg3);color:var(--text);box-shadow:inset 2px 0 0 var(--accent)}
+.nav .key{margin-left:auto;font-size:10px;color:var(--dim);border:1px solid var(--border);
+  border-radius:4px;padding:0 4px}
+.health{margin-top:auto;padding:8px 10px;font-size:11px;color:var(--dim)}
+.health .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-right:5px}
+
+.main{flex:1;min-width:0;padding:20px 26px 60px}
+.topbar{display:flex;gap:10px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
+.topbar h1{font-size:17px;font-weight:600;margin-right:auto}
+select,input[type=text],input[type=number]{background:var(--bg3);border:1px solid var(--border);
+  color:var(--text);border-radius:7px;padding:6px 10px;font-family:inherit;font-size:12.5px;outline:none}
+select:focus,input:focus{border-color:var(--accent)}
+input[type=text]{width:220px}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:18px}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
+.card .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.card .v{font-size:21px;font-weight:650;margin-top:2px;font-variant-numeric:tabular-nums}
+.card .v small{font-size:12px;color:var(--muted);font-weight:400}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}.sidebar{display:none}}
+.panel{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px}
+.panel h3{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.chart{height:240px}
+
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;text-align:left;
+  padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;user-select:none;white-space:nowrap}
+th:hover{color:var(--text)}
+th.sorted{color:var(--accent)}
+td{padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:220px}
+tr:hover td{background:var(--bg3)}
+tr.click{cursor:pointer}
+.num{text-align:right}
+th.num{text-align:right}
+.pos{color:var(--green)}.neg{color:var(--red)}.warn{color:var(--amber)}
+.mono{font-family:var(--mono);font-size:12px}
+.badge{display:inline-block;background:var(--bg3);border:1px solid var(--border);border-radius:5px;
+  padding:1px 7px;font-size:11px;color:var(--muted)}
+.badge.sol{color:#9d7cff;border-color:#3a2f5e}.badge.eth{color:#7cb6ff;border-color:#2b3e5e}
+.mult{font-weight:600}
+.pager{display:flex;gap:8px;align-items:center;margin-top:12px;color:var(--muted);font-size:12px}
+.pager button{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;
+  padding:5px 12px;cursor:pointer}
+.pager button:disabled{opacity:.4;cursor:default}
+.empty{color:var(--dim);padding:30px;text-align:center}
+.crumb{color:var(--muted);font-size:12px;margin-bottom:4px}
+.crumb a{color:var(--accent)}
+.links a{margin-right:10px;color:var(--accent);font-size:12px}
+.loading{color:var(--dim);padding:40px;text-align:center}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="logo">meme<span>dash</span> 🪙</div>
+    <nav class="nav" id="nav">
+      <a href="#/" data-page="overview">Overview<span class="key">1</span></a>
+      <a href="#/callers" data-page="callers">Callers<span class="key">2</span></a>
+      <a href="#/groups" data-page="groups">Groups<span class="key">3</span></a>
+      <a href="#/calls" data-page="calls">Explorer<span class="key">4</span></a>
+      <a href="#/sources" data-page="sources">Sources<span class="key">5</span></a>
+    </nav>
+    <div class="health" id="health"><span class="dot"></span>connecting…</div>
+  </aside>
+  <main class="main">
+    <div class="topbar" id="topbar">
+      <h1 id="title">Overview</h1>
+      <select id="f-days">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="0">All time</option>
+      </select>
+      <select id="f-chain">
+        <option value="">All chains</option>
+        <option value="SOL">Solana</option>
+        <option value="ETH">ETH</option>
+      </select>
+      <input type="text" id="f-search" placeholder="Search token / caller / group  ( / )">
+    </div>
+    <div id="view"><div class="loading">Loading…</div></div>
+  </main>
+</div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
