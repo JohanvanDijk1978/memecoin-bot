@@ -305,7 +305,8 @@ async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
                     return int(data["result"]["message_id"])
                 logger.info(f"dex_watcher_evm: sendPhoto failed ({data.get('description')}), falling back to text")
             except Exception as e:
-                logger.info(f"dex_watcher_evm: sendPhoto errored ({e}), falling back to text")
+                # !r: TimeoutError stringifies to "" — repr keeps the class name
+                logger.info(f"dex_watcher_evm: sendPhoto errored ({e!r}), falling back to text")
 
         # sendMessage: first with Markdown, then plain text as a last resort so
         # a parse error can never fully drop the alert. One retry on 429.
@@ -334,7 +335,7 @@ async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
                     break
                 logger.warning(f"dex_watcher_evm: sendMessage not ok ({'md' if extra else 'plain'}): {data}")
             except Exception as e:
-                logger.warning(f"dex_watcher_evm: sendMessage failed ({'md' if extra else 'plain'}): {e}")
+                logger.warning(f"dex_watcher_evm: sendMessage failed ({'md' if extra else 'plain'}): {e!r}")
         return None
 
 
