@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.07"; // bump together with VERSION in main.py
+const VERSION = "1.08"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -96,7 +96,7 @@ function kpis(a) {
 
 /* shared leaderboard columns */
 const lbCols = (nameLabel, href) => [
-  { key: "name", label: nameLabel, fmt: (r) => `<a href="${href}${encodeURIComponent(r.name)}"><b>${esc(r.name)}</b></a>` },
+  { key: "name", label: nameLabel, fmt: (r) => `<a href="${href}${encodeURIComponent(r.key ?? r.name)}"><b>${esc(r.name)}</b></a>` },
   { key: "calls", label: "Calls", num: true },
   { key: "hit2", label: "≥2×", num: true, fmt: (r) => fmtPct(r.hit2) },
   { key: "hit5", label: "≥5×", num: true, fmt: (r) => fmtPct(r.hit5) },
@@ -137,7 +137,7 @@ const pages = {
       { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.mult * r.first_mc) },
       { key: "first_mc", label: "Called at", num: true, fmt: (r) => fmtMc(r.first_mc) },
       { key: "current_mc", label: "Now", num: true, fmt: (r) => fmtMc(r.current_mc) },
-      { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller)}">${esc(r.caller)}</a>` },
+      { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group" },
       { key: "called_at", label: "When", num: true, fmt: (r) => `<span style="color:var(--muted)">${ago(r.called_at)}</span>` },
     ], d.top_movers, { defaultSort: "mult" }));
@@ -153,7 +153,7 @@ const pages = {
     const rows = await api("groups", { days: state.days, chain: state.chain });
     const cols = lbCols("Group", "#/group/");
     cols.splice(9, 0, { key: "active_callers", label: "Callers", num: true },
-      { key: "top_caller", label: "Top caller", fmt: (r) => r.top_caller ? `<a href="#/caller/${encodeURIComponent(r.top_caller)}">${esc(r.top_caller)}</a>` : "—" });
+      { key: "top_caller", label: "Top caller", fmt: (r) => r.top_caller ? `<a href="#/caller/${encodeURIComponent(r.top_caller_key ?? r.top_caller)}">${esc(r.top_caller)}</a>` : "—" });
     view.innerHTML = `<div class="panel"><h3>${rows.length} groups</h3><div id="t"></div></div>`;
     $("t").append(table(cols, rows, { defaultSort: "consistency" }));
   },
@@ -196,7 +196,7 @@ const pages = {
       { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.eff_peak) },
       { key: "first_mc", label: "Called at", num: true, fmt: (r) => fmtMc(r.first_mc) },
       { key: "current_mc", label: "Now", num: true, fmt: (r) => r.dead ? `<span class="neg">dead</span>` : fmtMc(r.current_mc) },
-      { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller)}">${esc(r.caller)}</a>` },
+      { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },
       { key: "source", label: "Src", fmt: (r) => `<span class="badge">${esc(r.source)}</span>` },
       { key: "scan_count", label: "Scans", num: true },
@@ -215,7 +215,7 @@ const pages = {
         <span style="float:right" class="links">${links}</span></h3><div id="t"></div></div>`;
     $("t").append(table([
       { key: "called_at", label: "When", fmt: (r) => new Date(r.called_at * 1000).toLocaleString() },
-      { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller)}">${esc(r.caller)}</a>` },
+      { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },
       { key: "source", label: "Src", fmt: (r) => `<span class="badge">${esc(r.source)}</span>` },
       { key: "mc_at_call", label: "MC at call", num: true, fmt: (r) => fmtMc(r.mc_at_call) },
@@ -261,7 +261,10 @@ async function profilePage(kind, name) {
   const callCols = [
     { key: "ticker", label: "Token", fmt: tokenLink },
     { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.peak_mc) },
-    { key: kind === "caller" ? "group" : "caller", label: kind === "caller" ? "Group" : "Caller" },
+    { key: kind === "caller" ? "group" : "caller", label: kind === "caller" ? "Group" : "Caller",
+      fmt: (r) => kind === "caller"
+        ? `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>`
+        : `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
     { key: "called_at", label: "When", num: true, fmt: (r) => `<span style="color:var(--muted)">${ago(r.called_at)}</span>` },
   ];
   $("best").append(table(callCols, d.best, { defaultSort: "mult" }));
@@ -273,7 +276,7 @@ async function profilePage(kind, name) {
     ], d.groups));
   } else {
     $("side").append(table([
-      { key: "name", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.name)}">${esc(r.name)}</a>` },
+      { key: "name", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.key ?? r.name)}">${esc(r.name)}</a>` },
       { key: "calls", label: "Calls", num: true },
       { key: "hit2", label: "≥2×", num: true, fmt: (r) => fmtPct(r.hit2) },
       { key: "avg_mult", label: "Avg ×", num: true, fmt: (r) => fmtMult(r.avg_mult) },

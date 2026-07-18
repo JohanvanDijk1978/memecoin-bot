@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.07"              # bump together with VERSION in static/app.js
+VERSION = "1.08"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -65,6 +65,7 @@ def init_db():
           chain TEXT NOT NULL,
           group_name TEXT NOT NULL DEFAULT '',
           sender_name TEXT NOT NULL DEFAULT '',
+          sender_id TEXT NOT NULL DEFAULT '',
           source TEXT NOT NULL DEFAULT '',
           ticker TEXT DEFAULT '',
           first_mc REAL DEFAULT 0,
@@ -91,6 +92,10 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         """)
+        try:  # migration for DBs created before v1.08
+            c.execute("ALTER TABLE calls ADD COLUMN sender_id TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 # ---------------------------------------------------------------- ingest
 
@@ -116,15 +121,16 @@ def ingest_history() -> int:
             for e in entries:
                 first_mc = e.get("first_mc") or e.get("market_cap") or 0
                 c.execute("""
-                  INSERT INTO calls (address, chain, group_name, sender_name, source,
+                  INSERT INTO calls (address, chain, group_name, sender_name, sender_id, source,
                                      ticker, first_mc, peak_mc_bot, scan_count, called_at)
-                  VALUES (?,?,?,?,?,?,?,?,?,?)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?)
                   ON CONFLICT(address, group_name) DO UPDATE SET
                     peak_mc_bot = MAX(peak_mc_bot, excluded.peak_mc_bot),
                     scan_count  = excluded.scan_count,
-                    ticker      = CASE WHEN calls.ticker='' THEN excluded.ticker ELSE calls.ticker END
+                    ticker      = CASE WHEN calls.ticker='' THEN excluded.ticker ELSE calls.ticker END,
+                    sender_id   = CASE WHEN calls.sender_id='' THEN excluded.sender_id ELSE calls.sender_id END
                 """, (address, chain, e.get("group_name", ""), e.get("sender_name", ""),
-                      e.get("source", ""), e.get("ticker") or "", first_mc,
+                      e.get("sender_id", ""), e.get("source", ""), e.get("ticker") or "", first_mc,
                       e.get("peak_mc") or 0, e.get("scan_count", 1), e.get("timestamp", 0)))
                 n += 1
             first_seen = min((e.get("timestamp", 0) for e in entries), default=0)
@@ -244,6 +250,7 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
     sql = """
       SELECT c.*, t.current_mc, t.peak_mc_dash, t.peak_at, t.dead,
              CASE WHEN t.ticker!='' THEN t.ticker ELSE c.ticker END AS tick,
+             CASE WHEN c.sender_id!='' THEN c.sender_id ELSE c.sender_name END AS caller_key,
              MAX(c.first_mc, c.peak_mc_bot, IFNULL(t.peak_mc_dash,0)) AS eff_peak
       FROM calls c LEFT JOIN tokens t ON t.address = c.address WHERE 1=1
     """
@@ -252,8 +259,9 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
         sql += " AND c.called_at >= ?"; args.append(time.time() - days * 86400)
     if chain:
         sql += " AND c.chain = ?"; args.append(chain)
-    if caller:
-        sql += " AND c.sender_name = ?"; args.append(caller)
+    if caller:  # canonical: sender_id ("dc:.."/"tg:..") when recorded, else legacy name
+        sql += " AND (CASE WHEN c.sender_id!='' THEN c.sender_id ELSE c.sender_name END) = ?"
+        args.append(caller)
     if group:
         sql += " AND c.group_name = ?"; args.append(group)
     if source:
@@ -297,17 +305,24 @@ def consistency(rows):
     return round(hit * math.log(len(mults) + 1) / math.log(51), 3)  # 50 calls → full weight
 
 
-def leaderboard(rows, key):
+def leaderboard(rows, key, display=None):
+    """Group rows by `key` (an identity, e.g. caller_key). If `display` is set,
+    the shown name is taken from the group's most recent row — so callers are
+    matched by ID but labelled with their latest display name."""
     groups: dict[str, list] = {}
     for r in rows:
         k = r[key] or "(unknown)"
         groups.setdefault(k, []).append(r)
     out = []
-    for name, rs in groups.items():
+    for k, rs in groups.items():
         a = agg(rs)
         best = max((r for r in rs if r["mult"]), key=lambda r: r["mult"], default=None)
+        label = k
+        if display:
+            label = max(rs, key=lambda r: r["called_at"])[display] or k
         a.update({
-            "name": name,
+            "name": label,
+            "key": k,
             "consistency": consistency(rs),
             "last_active": max(r["called_at"] for r in rs),
             "best_call": {"ticker": best["tick"], "address": best["address"],
@@ -315,7 +330,8 @@ def leaderboard(rows, key):
                           "peak_mc": round(best["eff_peak"])} if best else None,
         })
         out.append(a)
-    out.sort(key=lambda x: (x["consistency"], x["calls"]), reverse=True)
+    # deterministic: consistency desc, calls desc, then key as stable tiebreak
+    out.sort(key=lambda x: (-x["consistency"], -x["calls"], x["key"]))
     return out
 
 # ---------------------------------------------------------------- app / auth
@@ -378,7 +394,8 @@ def overview(days: float = 30, chain: str = ""):
             movers.append({"ticker": r["tick"], "address": r["address"], "chain": r["chain"],
                            "mult": round(r["mult"], 2), "first_mc": r["first_mc"],
                            "current_mc": r["current_mc"], "group": r["group_name"],
-                           "caller": r["sender_name"], "called_at": r["called_at"]})
+                           "caller": r["sender_name"], "caller_key": r["caller_key"],
+                           "called_at": r["called_at"]})
             if len(movers) >= 10:
                 break
         out["top_movers"] = movers
@@ -390,7 +407,8 @@ def overview(days: float = 30, chain: str = ""):
 def callers(days: float = 0, chain: str = "", min_calls: int = 2):
     def build():
         rows = fetch_calls(days=days, chain=chain)
-        return [r for r in leaderboard(rows, "sender_name") if r["calls"] >= min_calls]
+        return [r for r in leaderboard(rows, "caller_key", display="sender_name")
+                if r["calls"] >= min_calls]
     return cached(f"callers:{days}:{chain}:{min_calls}", build)
 
 
@@ -403,12 +421,19 @@ def groups(days: float = 0, chain: str = ""):
         for r in rows:
             by_group.setdefault(r["group_name"] or "(unknown)", []).append(r)
         for b in boards:
-            senders: dict[str, int] = {}
+            counts: dict[str, int] = {}
+            latest: dict[str, tuple] = {}  # key -> (called_at, display name)
             for r in by_group[b["name"]]:
-                if r["sender_name"]:
-                    senders[r["sender_name"]] = senders.get(r["sender_name"], 0) + 1
-            b["top_caller"] = max(senders, key=senders.get) if senders else ""
-            b["active_callers"] = len(senders)
+                k = r["caller_key"]
+                if not k:
+                    continue
+                counts[k] = counts.get(k, 0) + 1
+                if k not in latest or r["called_at"] > latest[k][0]:
+                    latest[k] = (r["called_at"], r["sender_name"])
+            top = max(counts, key=lambda k: (counts[k], k)) if counts else ""
+            b["top_caller"] = latest[top][1] if top else ""
+            b["top_caller_key"] = top
+            b["active_callers"] = len(counts)
         return boards
     return cached(f"groups:{days}:{chain}", build)
 
@@ -447,7 +472,8 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
     rows = rows[(page - 1) * per: page * per]
     return {"total": total, "page": page,
             "rows": [{"address": r["address"], "ticker": r["tick"], "chain": r["chain"],
-                      "group": r["group_name"], "caller": r["sender_name"], "source": r["source"],
+                      "group": r["group_name"], "caller": r["sender_name"],
+                      "caller_key": r["caller_key"], "source": r["source"],
                       "first_mc": r["first_mc"], "eff_peak": r["eff_peak"],
                       "current_mc": r["current_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,
                       "scan_count": r["scan_count"], "called_at": r["called_at"],
@@ -462,7 +488,8 @@ def token_detail(address: str):
     calls.sort(key=lambda r: r["called_at"])
     return {
         "token": dict(tok) if tok else None,
-        "calls": [{"group": r["group_name"], "caller": r["sender_name"], "source": r["source"],
+        "calls": [{"group": r["group_name"], "caller": r["sender_name"],
+                   "caller_key": r["caller_key"], "source": r["source"],
                    "mc_at_call": r["first_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,
                    "scan_count": r["scan_count"], "called_at": r["called_at"]} for r in calls],
         "earliest": calls[0]["sender_name"] if calls else None,
@@ -491,7 +518,8 @@ def profile(rows):
     fmt = lambda r: {"ticker": r["tick"], "address": r["address"],
                      "mult": round(r["mult"], 2) if r["mult"] else None,
                      "peak_mc": round(r["eff_peak"]) if r["mult"] else None,
-                     "group": r["group_name"], "caller": r["sender_name"], "called_at": r["called_at"]}
+                     "group": r["group_name"], "caller": r["sender_name"],
+                     "caller_key": r["caller_key"], "called_at": r["called_at"]}
     return {"summary": agg(rows), "consistency": consistency(rows), "monthly": months,
             "chains": chains, "typical_mcap": round(statistics.median(mcs)) if mcs else 0,
             "best": [fmt(r) for r in best], "worst": [fmt(r) for r in worst],
@@ -513,7 +541,7 @@ def caller_profile(name: str):
 def group_profile(name: str):
     rows = fetch_calls(group=name)
     p = profile(rows)
-    p["top_callers"] = leaderboard(rows, "sender_name")[:10]
+    p["top_callers"] = leaderboard(rows, "caller_key", display="sender_name")[:10]
     return p
 
 

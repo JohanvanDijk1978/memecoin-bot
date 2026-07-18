@@ -227,7 +227,7 @@ async def fetch_ath(address: str, chain: str, current_price: float, current_fdv:
 
 import time as import_time
 
-async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_messages, mirror_link=""):
+async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_messages, mirror_link="", sender_id=""):
     found = []
     for m in SOL_ADDRESS_RE.finditer(text):
         found.append((m.group(), "SOL"))
@@ -279,7 +279,7 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
             if group_name not in existing["groups"]:
                 existing["groups"][group_name] = mc_str
                 # Store this group's scan for history
-                store.add_message(f"CA:{address}", source="telegram", group_name=group_name, sender_name=sender_name, market_cap=mc, ticker=token.get("symbol", "") if token else "")
+                store.add_message(f"CA:{address}", source="telegram", group_name=group_name, sender_name=sender_name, market_cap=mc, ticker=token.get("symbol", "") if token else "", sender_id=sender_id)
                 groups_str = " | ".join(f"{g}({m})" for g, m in existing["groups"].items())
                 token_name = token.get("name", "") if token else ""
                 ticker = f"${token.get('symbol', '')}" if token else ""
@@ -293,7 +293,7 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
             # Always fall through to send the full ping too
         else:
             # Store detailed mention with MC for history tracking
-            store.add_message(f"CA:{address}", source="telegram", group_name=group_name, sender_name=sender_name, market_cap=mc, ticker=token.get("symbol", "") if token else "")
+            store.add_message(f"CA:{address}", source="telegram", group_name=group_name, sender_name=sender_name, market_cap=mc, ticker=token.get("symbol", "") if token else "", sender_id=sender_id)
             _recent_pings[address] = {"time": now, "groups": {group_name: mc_str}}
 
         icon   = chain_emoji.get(chain, "🔗")
@@ -470,9 +470,11 @@ class TelegramScraper:
                 last            = getattr(sender, "last_name", "") or ""
                 sender_name     = f"{first} {last}".strip() or "Unknown"
                 sender_username = getattr(sender, "username", "") or ""
+                sender_id       = f"tg:{sender.id}" if getattr(sender, "id", None) else ""
             except Exception:
                 sender_name     = "Unknown"
                 sender_username = ""
+                sender_id       = ""
 
             # Mirror every message to topic channel
             try:
@@ -520,7 +522,7 @@ class TelegramScraper:
 
             # Full detail store call is done inside handle_ca_ping with MC
 
-            await handle_ca_ping(text_content, sender_name, sender_username, group_name, prev_messages, mirror_link=mirror_link)
+            await handle_ca_ping(text_content, sender_name, sender_username, group_name, prev_messages, mirror_link=mirror_link, sender_id=sender_id)
 
         logger.info("👂 Listening — instant CA pings enabled")
         await self.client.run_until_disconnected()

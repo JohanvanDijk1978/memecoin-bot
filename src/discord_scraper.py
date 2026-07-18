@@ -178,7 +178,7 @@ async def fetch_ath(address: str, chain: str, current_price: float, current_fdv:
         return 0, 0
 
 
-async def handle_ca_ping(text: str, sender_name: str, group_name: str):
+async def handle_ca_ping(text: str, sender_name: str, group_name: str, sender_id: str = ""):
     found = []
     for m in SOL_ADDRESS_RE.finditer(text):
         found.append((m.group(), "SOL"))
@@ -223,7 +223,7 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str):
         if existing and now - existing["time"] < PING_COOLDOWN:
             if group_name not in existing["groups"]:
                 existing["groups"][group_name] = mc_str
-                store.add_message(f"CA:{address}", source="discord", group_name=group_name, sender_name=sender_name, market_cap=mc)
+                store.add_message(f"CA:{address}", source="discord", group_name=group_name, sender_name=sender_name, market_cap=mc, sender_id=sender_id)
                 groups_str = " | ".join(f"{g}({m})" for g, m in existing["groups"].items())
                 token_name = token.get("name", "") if token else ""
                 ticker = f"${token.get('symbol', '')}" if token else ""
@@ -235,7 +235,7 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str):
                     f"`{address}`"
                 )
         else:
-            store.add_message(f"CA:{address}", source="discord", group_name=group_name, sender_name=sender_name, market_cap=mc)
+            store.add_message(f"CA:{address}", source="discord", group_name=group_name, sender_name=sender_name, market_cap=mc, sender_id=sender_id)
             _recent_pings[address] = {"time": now, "groups": {group_name: mc_str}}
 
         # ATH suffix
@@ -406,7 +406,8 @@ try:
             if channel_name:
                 group_name = f"{group_name} #{channel_name}"
 
-            await handle_ca_ping(message.content, sender_name, group_name)
+            sender_id = f"dc:{message.author.id}" if getattr(message.author, "id", None) else ""
+            await handle_ca_ping(message.content, sender_name, group_name, sender_id=sender_id)
 
 except ImportError:
     logger.warning("discord.py-self not installed — Discord scraper disabled")
