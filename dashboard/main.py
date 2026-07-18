@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.02"              # bump together with VERSION in static/app.js
+VERSION = "1.03"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -311,7 +311,8 @@ def leaderboard(rows, key):
             "consistency": consistency(rs),
             "last_active": max(r["called_at"] for r in rs),
             "best_call": {"ticker": best["tick"], "address": best["address"],
-                          "mult": round(best["mult"], 2)} if best else None,
+                          "mult": round(best["mult"], 2),
+                          "peak_mc": round(best["eff_peak"])} if best else None,
         })
         out.append(a)
     out.sort(key=lambda x: (x["consistency"], x["calls"]), reverse=True)
@@ -488,6 +489,7 @@ def profile(rows):
     mcs = [r["first_mc"] for r in rows if r["first_mc"]]
     fmt = lambda r: {"ticker": r["tick"], "address": r["address"],
                      "mult": round(r["mult"], 2) if r["mult"] else None,
+                     "peak_mc": round(r["eff_peak"]) if r["mult"] else None,
                      "group": r["group_name"], "caller": r["sender_name"], "called_at": r["called_at"]}
     return {"summary": agg(rows), "consistency": consistency(rows), "monthly": months,
             "chains": chains, "typical_mcap": round(statistics.median(mcs)) if mcs else 0,

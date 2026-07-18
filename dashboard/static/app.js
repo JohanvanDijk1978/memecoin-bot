@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.02"; // bump together with VERSION in main.py
+const VERSION = "1.03"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -29,6 +29,8 @@ const fmtMc = (v) => !v ? "—" : v >= 1e9 ? `$${(v / 1e9).toFixed(2)}B` : v >= 
 const fmtMult = (m) => m == null ? `<span class="mono" style="color:var(--dim)">—</span>`
   : `<span class="mult ${m >= 2 ? "pos" : m < 1 ? "neg" : ""}">${m.toFixed(2)}×</span>`;
 const fmtPct = (p) => `<span class="${p >= 50 ? "pos" : p >= 25 ? "warn" : ""}">${p}%</span>`;
+const multPeak = (m, peak) => fmtMult(m) +
+  (m != null && peak ? ` <span style="color:var(--muted);font-size:11px">${fmtMc(peak)}</span>` : "");
 const ago = (ts) => {
   const s = Date.now() / 1000 - ts;
   if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
@@ -103,7 +105,7 @@ const lbCols = (nameLabel, href) => [
   { key: "med_mult", label: "Med ×", num: true, fmt: (r) => fmtMult(r.med_mult) },
   { key: "consistency", label: "Score", num: true, fmt: (r) => `<b>${r.consistency.toFixed(2)}</b>` },
   { key: "best_call", label: "Best call", sortVal: (r) => r.best_call?.mult ?? 0,
-    fmt: (r) => r.best_call ? `${tokenLink({ ticker: r.best_call.ticker, address: r.best_call.address })} ${fmtMult(r.best_call.mult)}` : "—" },
+    fmt: (r) => r.best_call ? `${tokenLink({ ticker: r.best_call.ticker, address: r.best_call.address })} ${multPeak(r.best_call.mult, r.best_call.peak_mc)}` : "—" },
   { key: "last_active", label: "Active", num: true, fmt: (r) => `<span style="color:var(--muted)">${ago(r.last_active)}</span>` },
 ];
 
@@ -132,7 +134,7 @@ const pages = {
     $("movers").append(table([
       { key: "ticker", label: "Token", fmt: tokenLink },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
-      { key: "mult", label: "Peak ×", num: true, fmt: (r) => fmtMult(r.mult) },
+      { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.mult * r.first_mc) },
       { key: "first_mc", label: "Called at", num: true, fmt: (r) => fmtMc(r.first_mc) },
       { key: "current_mc", label: "Now", num: true, fmt: (r) => fmtMc(r.current_mc) },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller)}">${esc(r.caller)}</a>` },
@@ -191,9 +193,8 @@ const pages = {
     $("t").append(table([
       { key: "ticker", label: "Token", fmt: tokenLink },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
-      { key: "mult", label: "Peak ×", num: true, fmt: (r) => fmtMult(r.mult) },
+      { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.eff_peak) },
       { key: "first_mc", label: "Called at", num: true, fmt: (r) => fmtMc(r.first_mc) },
-      { key: "eff_peak", label: "Peak mc", num: true, fmt: (r) => fmtMc(r.eff_peak) },
       { key: "current_mc", label: "Now", num: true, fmt: (r) => r.dead ? `<span class="neg">dead</span>` : fmtMc(r.current_mc) },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },
@@ -218,7 +219,7 @@ const pages = {
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },
       { key: "source", label: "Src", fmt: (r) => `<span class="badge">${esc(r.source)}</span>` },
       { key: "mc_at_call", label: "MC at call", num: true, fmt: (r) => fmtMc(r.mc_at_call) },
-      { key: "mult", label: "Peak ×", num: true, fmt: (r) => fmtMult(r.mult) },
+      { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.mult * r.mc_at_call) },
       { key: "scan_count", label: "Scans", num: true },
     ], d.calls, { defaultSort: "called_at" }));
 
@@ -262,7 +263,7 @@ async function profilePage(kind, name) {
   });
   const callCols = [
     { key: "ticker", label: "Token", fmt: tokenLink },
-    { key: "mult", label: "Peak ×", num: true, fmt: (r) => fmtMult(r.mult) },
+    { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.peak_mc) },
     { key: kind === "caller" ? "group" : "caller", label: kind === "caller" ? "Group" : "Caller" },
     { key: "called_at", label: "When", num: true, fmt: (r) => `<span style="color:var(--muted)">${ago(r.called_at)}</span>` },
   ];
