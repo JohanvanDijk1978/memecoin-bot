@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.16"              # bump together with VERSION in static/app.js
+VERSION = "1.17"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -534,8 +534,80 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
                       "dead": r["dead"]} for r in rows]}
 
 
+async def _live_refresh(address: str) -> dict:
+    """Single-token live Dexscreener fetch: update stored mcap/peak/chain
+    (best-liquidity pair, same rules as the poller) and return banner/socials."""
+    out = {"banner": "", "image": "", "socials": [], "websites": []}
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": "memedash/1.0"}) as client:
+            r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}",
+                                 timeout=10)
+            r.raise_for_status()
+            pairs = (r.json() or {}).get("pairs") or []
+        best, best_liq = None, -1.0
+        for p in pairs:
+            if (p.get("baseToken") or {}).get("address", "").lower() != address.lower():
+                continue
+            liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
+            if liq > best_liq:
+                best, best_liq = p, liq
+            info = p.get("info") or {}
+            if info and not out["banner"] and not out["socials"]:
+                out["banner"] = info.get("header") or ""
+                out["image"] = info.get("imageUrl") or ""
+                out["socials"] = info.get("socials") or []
+                out["websites"] = info.get("websites") or []
+        if best and best_liq >= MIN_LIQ_USD:
+            mc = best.get("marketCap") or best.get("fdv") or 0
+            now = time.time()
+            with db() as c:
+                c.execute("""
+                  UPDATE tokens SET current_mc=?, ticker=CASE WHEN ticker='' THEN ? ELSE ticker END,
+                    peak_mc_dash=MAX(peak_mc_dash, ?), last_checked=?, miss_count=0,
+                    peak_at=CASE WHEN ? > peak_mc_dash THEN ? ELSE peak_at END, chain_id=?
+                  WHERE address=?
+                """, (mc, (best.get("baseToken") or {}).get("symbol", ""), mc, now, mc, now,
+                      (best.get("chainId") or "").lower(), address))
+            _cache.clear()
+    except Exception as e:
+        log.warning(f"live refresh failed for {address}: {e}")
+    return out
+
+
+SOL_RPC = "https://api.mainnet-beta.solana.com"
+
+
+@app.get("/api/token/{address}/holders")
+async def token_holders(address: str):
+    """Top 20 token accounts via public Solana RPC (free, keyless). EVM chains
+    have no keyless holder API — needs e.g. a Birdeye key."""
+    if address.startswith("0x"):
+        return {"unsupported": True,
+                "reason": "Holder data for EVM chains needs a keyed API (e.g. Birdeye)."}
+    try:
+        async with httpx.AsyncClient() as client:
+            largest = await client.post(SOL_RPC, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTokenLargestAccounts", "params": [address]}, timeout=10)
+            supply = await client.post(SOL_RPC, json={
+                "jsonrpc": "2.0", "id": 2,
+                "method": "getTokenSupply", "params": [address]}, timeout=10)
+        accs = ((largest.json().get("result") or {}).get("value") or [])[:20]
+        total = float((((supply.json().get("result") or {}).get("value") or {})
+                      .get("uiAmount")) or 0)
+        holders = [{"address": a.get("address", ""),
+                    "amount": float(a.get("uiAmount") or 0),
+                    "pct": round(100 * float(a.get("uiAmount") or 0) / total, 2)
+                           if total else None}
+                   for a in accs]
+        return {"unsupported": False, "holders": holders}
+    except Exception as e:
+        return {"unsupported": True, "reason": f"holder lookup failed: {e}"}
+
+
 @app.get("/api/token/{address}")
-def token_detail(address: str):
+async def token_detail(address: str):
+    info = await _live_refresh(address)
     with db() as c:
         tok = c.execute("SELECT * FROM tokens WHERE address=?", (address,)).fetchone()
     tok = dict(tok) if tok else None
@@ -544,7 +616,7 @@ def token_detail(address: str):
     calls = [r for r in fetch_calls() if r["address"] == address]
     calls.sort(key=lambda r: r["called_at"])
     return {
-        "token": tok,
+        "token": tok, "info": info,
         "calls": [{"group": r["group_name"], "caller": r["sender_name"],
                    "caller_key": r["caller_key"], "source": r["source"],
                    "mc_at_call": r["first_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,

@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.16"; // bump together with VERSION in main.py
+const VERSION = "1.17"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -227,13 +227,40 @@ const pages = {
 
   async token(_, addr) {
     const d = await api(`token/${addr}`);
-    const t = d.token ?? {};
+    const t = d.token ?? {}, info = d.info ?? {};
     const links = Object.entries(d.links).map(([k, v]) => `<a href="${v}" target="_blank">${k} ↗</a>`).join("");
+    const socials = [
+      ...(info.websites ?? []).map((w) => ({ label: w.label || "web", url: w.url })),
+      ...(info.socials ?? []).map((s) => ({ label: s.type || "link", url: s.url })),
+    ].filter((s) => s.url);
+    const bannerStyle = info.banner
+      ? `style="background-image:linear-gradient(90deg,rgba(10,11,15,.93),rgba(10,11,15,.55)),url('${esc(info.banner)}');background-size:cover;background-position:center"`
+      : "";
+    const item = (k, v) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`;
     view.innerHTML = `
       <div class="crumb"><a href="#/calls">Explorer</a> / token</div>
-      ${kpisToken(t, d)}
+      <div class="cards">
+        <div class="card" ${bannerStyle}>
+          <div class="k">Token</div>
+          <div class="v">${info.image ? `<img src="${esc(info.image)}" style="width:22px;height:22px;border-radius:50%;vertical-align:-4px;margin-right:6px">` : ""}${t.ticker ? "$" + esc(t.ticker) : addr.slice(0, 8)} ${chainBadge(t.chain ?? "?")}</div>
+          <div class="socials">${socials.map((s) => `<a href="${esc(s.url)}" target="_blank">${esc(s.label)}</a>`).join(" · ") || `<span style="color:var(--dim)">no socials</span>`}</div>
+        </div>
+        <div class="card"><div class="k">Current MC <button id="mc-refresh" title="refresh from Dexscreener">↻</button></div>
+          <div class="v">${t.dead ? `<span class="neg">dead</span>` : fmtMc(t.current_mc)}</div></div>
+        ${item("Peak (observed)", fmtMc(Math.max(t.peak_mc_dash ?? 0, ...d.calls.map((c) => c.mc_at_call ?? 0))))}
+        ${item("Groups called", d.calls.length)}
+        ${item("First called", d.calls[0] ? ago(d.calls[0].called_at) : "—")}
+      </div>
+      <div class="panel" style="margin-bottom:18px">
+        <div class="tabs">
+          <button class="tab active" data-tab="holders">Holders</button>
+          <button class="tab" data-tab="traders">Top traders</button>
+        </div>
+        <div id="tabbody"><div class="loading">Loading…</div></div>
+      </div>
       <div class="panel"><h3>Call timeline — earliest caller: <b style="color:var(--text)">${esc(d.earliest ?? "?")}</b>
         <span style="float:right" class="links">${links}</span></h3><div id="t"></div></div>`;
+    $("mc-refresh").onclick = () => render();  // page reload re-fetches live from Dexscreener
     $("t").append(table([
       { key: "called_at", label: "When", fmt: (r) => new Date(r.called_at * 1000).toLocaleString() },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
@@ -244,16 +271,29 @@ const pages = {
       { key: "scan_count", label: "Scans", num: true },
     ], d.calls, { defaultSort: "called_at" }));
 
-    function kpisToken(t, d) {
-      const item = (k, v) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`;
-      return `<div class="cards">
-        ${item("Token", `${t.ticker ? "$" + esc(t.ticker) : addr.slice(0, 8)} ${chainBadge(t.chain ?? "?")}`)}
-        ${item("Current MC", t.dead ? `<span class="neg">dead</span>` : fmtMc(t.current_mc))}
-        ${item("Peak (observed)", fmtMc(Math.max(t.peak_mc_dash ?? 0, ...d.calls.map((c) => c.mc_at_call ?? 0))))}
-        ${item("Groups called", d.calls.length)}
-        ${item("First called", d.calls[0] ? ago(d.calls[0].called_at) : "—")}
-      </div>`;
-    }
+    const showTab = async (which) => {
+      document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === which));
+      const body = $("tabbody");
+      if (which === "traders") {
+        body.innerHTML = `<div class="empty">Per-wallet trader stats aren't in any keyless API — see
+          <a href="${d.links.gmgn ?? "#"}" target="_blank" style="color:var(--accent)">GMGN ↗</a> or
+          <a href="${d.links.axiom ?? "#"}" target="_blank" style="color:var(--accent)">Axiom ↗</a>.
+          Add a Birdeye API key to embed them here.</div>`;
+        return;
+      }
+      body.innerHTML = `<div class="loading">Loading…</div>`;
+      const h = await api(`token/${addr}/holders`);
+      if (h.unsupported) { body.innerHTML = `<div class="empty">${esc(h.reason ?? "unavailable")}</div>`; return; }
+      body.innerHTML = "";
+      body.append(table([
+        { key: "rank", label: "#", num: true },
+        { key: "address", label: "Token account", fmt: (r) => `<a class="mono" href="https://solscan.io/account/${r.address}" target="_blank">${r.address.slice(0, 4)}…${r.address.slice(-4)}</a>` },
+        { key: "amount", label: "Amount", num: true, fmt: (r) => r.amount >= 1e6 ? (r.amount / 1e6).toFixed(2) + "M" : Math.round(r.amount).toLocaleString() },
+        { key: "pct", label: "% supply", num: true, fmt: (r) => r.pct == null ? "—" : `<span class="${r.pct >= 5 ? "warn" : ""}">${r.pct}%</span>` },
+      ], h.holders.map((r, i) => ({ ...r, rank: i + 1 })), { defaultSort: "amount" }));
+    };
+    document.querySelectorAll(".tab").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
+    showTab("holders");
   },
 
   async caller(_, name) { await profilePage("caller", name); },
