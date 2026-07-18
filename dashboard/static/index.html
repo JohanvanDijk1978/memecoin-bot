@@ -80,6 +80,22 @@ th.num{text-align:right}
 .crumb a{color:var(--accent)}
 .links a{margin-right:10px;color:var(--accent);font-size:12px}
 .loading{color:var(--dim);padding:40px;text-align:center}
+
+#live{position:fixed;z-index:50;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;
+  box-shadow:0 8px 30px rgba(0,0,0,.55);display:flex;flex-direction:column;
+  resize:both;overflow:hidden;min-width:240px;min-height:36px}
+#live-head{display:flex;align-items:center;gap:7px;padding:7px 10px;cursor:grab;user-select:none;
+  border-bottom:1px solid var(--border);font-size:11px;font-weight:600;letter-spacing:.5px;color:var(--muted);touch-action:none}
+#live-head .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{50%{opacity:.25}}
+#live-body{flex:1;overflow-y:auto;padding:3px 0}
+.live-row{display:flex;gap:7px;align-items:baseline;padding:4px 10px;font-size:12px;white-space:nowrap;overflow:hidden}
+.live-row .t{color:var(--dim);font-size:11px;flex-shrink:0;min-width:34px}
+.live-row .who{color:var(--muted);overflow:hidden;text-overflow:ellipsis}
+.live-row.new{animation:flash 2.5s}
+@keyframes flash{0%{background:rgba(124,108,255,.3)}100%{background:transparent}}
+#live-collapse{margin-left:auto;cursor:pointer;background:none;border:none;color:var(--muted);font-size:13px;padding:0 2px}
+#live-collapse:hover{color:var(--text)}
 </style>
 </head>
 <body>
@@ -116,6 +132,6 @@ th.num{text-align:right}
     <div id="view"><div class="loading">Loading…</div></div>
   </main>
 </div>
-<script type="module" src="/static/app.js?v=1.06"></script>
+<script type="module" src="/static/app.js?v=1.07"></script>
 </body>
 </html>

@@ -34,7 +34,7 @@ HISTORY_FILE = Path(os.environ.get("HISTORY_FILE", BASE_DIR.parent / "data" / "c
 DB_FILE = Path(os.environ.get("DASH_DB", BASE_DIR / "data" / "dash.db"))
 DASH_PASSWORD = os.environ.get("DASH_PASSWORD", "")
 
-INGEST_INTERVAL = 60          # s
+INGEST_INTERVAL = 20          # s (kept tight so the live CA feed feels live)
 PEAK_INTERVAL = 300           # s between poll rounds
 ACTIVE_WINDOW = 48 * 3600     # poll tokens called within this window
 STALE_RECHECK = 24 * 3600     # older tokens: once a day
@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.06"              # bump together with VERSION in static/app.js
+VERSION = "1.07"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 

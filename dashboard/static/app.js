@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.06"; // bump together with VERSION in main.py
+const VERSION = "1.07"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -307,6 +307,67 @@ document.addEventListener("keydown", (e) => {
   const map = { 1: "#/", 2: "#/callers", 3: "#/groups", 4: "#/calls", 5: "#/sources" };
   if (map[e.key]) location.hash = map[e.key];
 });
+
+/* ---------------- live CA feed: floating, draggable, resizable ---------------- */
+(function liveFeed() {
+  const ls = (k, v) => v === undefined
+    ? JSON.parse(localStorage.getItem("live_" + k) ?? "null")
+    : localStorage.setItem("live_" + k, JSON.stringify(v));
+  const el = document.createElement("div");
+  el.id = "live";
+  el.innerHTML = `<div id="live-head"><span class="dot"></span>LIVE CA FEED
+    <button id="live-collapse" title="collapse">—</button></div>
+    <div id="live-body"><div class="empty">Loading…</div></div>`;
+  document.body.append(el);
+  const head = el.querySelector("#live-head"), body = el.querySelector("#live-body"),
+    btn = el.querySelector("#live-collapse");
+
+  const pos = ls("pos") ?? { x: innerWidth - 380, y: innerHeight - 330 };
+  const size = ls("size") ?? { w: 360, h: 290 };
+  let collapsed = ls("col") ?? false;
+  const apply = () => {
+    el.style.left = Math.max(0, Math.min(pos.x, innerWidth - 80)) + "px";
+    el.style.top = Math.max(0, Math.min(pos.y, innerHeight - 36)) + "px";
+    el.style.width = size.w + "px";
+    el.style.height = collapsed ? "auto" : size.h + "px";
+    el.style.resize = collapsed ? "none" : "both";
+    body.style.display = collapsed ? "none" : "";
+    btn.textContent = collapsed ? "+" : "—";
+  };
+  apply();
+  btn.onclick = () => { collapsed = !collapsed; ls("col", collapsed); apply(); };
+
+  head.addEventListener("pointerdown", (e) => {
+    if (e.target === btn) return;
+    e.preventDefault();
+    const sx = e.clientX - pos.x, sy = e.clientY - pos.y;
+    const move = (ev) => { pos.x = ev.clientX - sx; pos.y = ev.clientY - sy; apply(); };
+    const up = () => { removeEventListener("pointermove", move); removeEventListener("pointerup", up); ls("pos", pos); };
+    addEventListener("pointermove", move); addEventListener("pointerup", up);
+  });
+  new ResizeObserver(() => {
+    if (!collapsed && el.offsetWidth) { size.w = el.offsetWidth; size.h = el.offsetHeight; ls("size", size); }
+  }).observe(el);
+
+  const seen = new Set();
+  let first = true;
+  async function refresh() {
+    try {
+      const d = await api("calls", { per: 20 });
+      const rows = d.rows ?? [];
+      body.innerHTML = rows.map((r) => {
+        const key = r.address + "|" + r.group + "|" + r.called_at;
+        const isNew = !first && !seen.has(key);
+        seen.add(key);
+        return `<div class="live-row ${isNew ? "new" : ""}"><span class="t">${ago(r.called_at)}</span>
+          ${tokenLink(r)} <span style="color:var(--muted)">${fmtMc(r.first_mc)}</span>
+          <span class="who">${esc(r.caller)} · ${esc(r.group)}</span></div>`;
+      }).join("") || `<div class="empty">No calls yet.</div>`;
+      first = false;
+    } catch { /* keep last content on transient errors */ }
+  }
+  refresh(); setInterval(refresh, 15000);
+})();
 
 /* health indicator */
 async function health() {
