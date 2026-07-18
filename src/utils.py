@@ -99,3 +99,97 @@ async def dex_wait() -> None:
     api.dexscreener.com. Safe to call from any module — it's a shared
     singleton that serializes all callers."""
     await _dex_limiter.wait()
+
+
+# ── Chain-aware link + label helpers ──────────────────────────────────────
+# Dexscreener's `chainId` string is the source of truth for what chain a token
+# is on. Any `0x...` address might be Ethereum, BSC, Base, Robinhood, Arbitrum,
+# etc. — indistinguishable by address alone. The CA scrapers should call
+# `chain_display_name(token["chain_id"])` etc. to render correctly.
+
+_CHAIN_DISPLAY = {
+    "solana":    "Solana",
+    "ethereum":  "Ethereum",
+    "bsc":       "BNB Chain",
+    "base":      "Base",
+    "robinhood": "Robinhood",
+    "arbitrum":  "Arbitrum",
+    "polygon":   "Polygon",
+    "avalanche": "Avalanche",
+    "unichain":  "Unichain",
+    "hyperevm":  "HyperEVM",
+    "abstract":  "Abstract",
+    "ink":       "Ink",
+    "story":     "Story",
+    "xlayer":    "X Layer",
+    "plasma":    "Plasma",
+    "monad":     "Monad",
+    "megaeth":   "MegaETH",
+    "tempo":     "Tempo",
+}
+
+
+def chain_display_name(chain_id: str) -> str:
+    if not chain_id:
+        return "Unknown"
+    return _CHAIN_DISPLAY.get(chain_id.lower(), chain_id.title())
+
+
+def axiom_url(chain_id: str, address: str) -> str:
+    """Axiom.trade URL for the chain, or empty string if Axiom doesn't support it."""
+    cid = (chain_id or "").lower()
+    if cid == "solana":
+        return f"https://axiom.trade/t/{address}"
+    slug = {
+        "ethereum": "eth",
+        "bsc":      "bnb",
+        "base":     "base",
+        "arbitrum": "arb",
+    }.get(cid)
+    if not slug:
+        return ""
+    return f"https://axiom.trade/t/{address}?chain={slug}"
+
+
+def padre_url(chain_id: str, address: str) -> str:
+    slug = {
+        "solana":   "solana",
+        "ethereum": "eth",
+        "bsc":      "bnb",
+        "base":     "base",
+    }.get((chain_id or "").lower())
+    if not slug:
+        return ""
+    return f"https://trade.padre.gg/trade/{slug}/{address}"
+
+
+def gmgn_url(chain_id: str, address: str) -> str:
+    slug = {
+        "solana":   "sol",
+        "ethereum": "eth",
+        "bsc":      "bsc",
+        "base":     "base",
+    }.get((chain_id or "").lower())
+    if not slug:
+        return ""
+    return f"https://gmgn.ai/{slug}/token/{address}"
+
+
+def dexscreener_url(chain_id: str, address: str) -> str:
+    """Universal fallback — Dexscreener supports every chain in its feed."""
+    return f"https://dexscreener.com/{(chain_id or 'solana').lower()}/{address}"
+
+
+def build_trading_links(chain_id: str, address: str) -> str:
+    """Return a ' | '-joined markdown string of trading-tool links appropriate
+    for the chain. Always includes Dexscreener as universal fallback. Silently
+    omits tools that don't support the chain."""
+    links = []
+    if u := axiom_url(chain_id, address):
+        links.append(f"[Axiom]({u})")
+    if u := padre_url(chain_id, address):
+        links.append(f"[Padre]({u})")
+    if u := gmgn_url(chain_id, address):
+        links.append(f"[GMGN]({u})")
+    links.append(f"[DexScreener]({dexscreener_url(chain_id, address)})")
+    return " | ".join(links)

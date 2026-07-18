@@ -81,10 +81,16 @@ async def fetch_token_quick(address: str, chain: str) -> dict:
             if not pairs:
                 return {}
 
-            chain_map = {"SOL": "solana", "ETH": "ethereum"}
-            chain_id  = chain_map.get(chain, chain.lower())
-            filtered  = [p for p in pairs if p.get("chainId", "").lower() == chain_id] or pairs
-            best      = max(filtered, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+            # Restrict to solana pairs when the address is base58 (SOL). For 0x
+            # addresses, let Dexscreener return whichever EVM chain the token
+            # actually lives on and pick the highest-liquidity pair.
+            if chain == "SOL":
+                filtered = [p for p in pairs if p.get("chainId", "").lower() == "solana"] or pairs
+            else:
+                filtered = pairs
+            best = max(filtered, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+            actual_chain_id = (best.get("chainId") or "").lower()
+            dex_id          = (best.get("dexId") or "").lower()
 
             base = best.get("baseToken", {})
             vol  = best.get("volume", {})
@@ -125,6 +131,8 @@ async def fetch_token_quick(address: str, chain: str) -> dict:
                 "age":        age_str,
                 "ath_mc":     ath_mc,
                 "ath_time":   ath_time,
+                "chain_id":   actual_chain_id,
+                "dex_id":     dex_id,
             }
     except Exception as e:
         logger.warning(f"Quick fetch failed for {address}: {e}")
@@ -202,13 +210,15 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str):
             continue
         _recent_pings[ping_key] = now
 
-        axiom_url = f"https://axiom.trade/t/{address}" if chain == "SOL" else f"https://axiom.trade/t/{address}?chain=eth"
-        padre_url = f"https://trade.padre.gg/trade/solana/{address}" if chain == "SOL" else f"https://trade.padre.gg/trade/eth/{address}"
-        gmgn_url  = f"https://gmgn.ai/sol/token/{address}" if chain == "SOL" else f"https://gmgn.ai/eth/token/{address}"
-
         token  = await fetch_token_quick(address, chain)
         mc     = token.get("market_cap", 0) if token else 0
         mc_str = fmt(mc) if mc else "N/A"
+
+        # Resolve actual chain from Dexscreener's response for correct link
+        # construction (EVM addresses could be on any EVM chain).
+        from .utils import build_trading_links, chain_display_name
+        actual_chain = (token or {}).get("chain_id") or ("solana" if chain == "SOL" else "ethereum")
+        trading_links = build_trading_links(actual_chain, address)
 
         if existing and now - existing["time"] < PING_COOLDOWN:
             if group_name not in existing["groups"]:
@@ -300,29 +310,31 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str):
             price  = token["price"]
             ticker = f"${token['symbol']}" if token.get("symbol") else ""
             name   = token["name"]
-            platform = "Pump" if chain == "SOL" else "ETH"
+            dex_id = token.get("dex_id") or ""
+            platform_label = dex_id.title() if dex_id else chain_display_name(actual_chain)
 
             msg = (
                 f"👤 *{sender_name}* in *{group_name}*\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🪙 *{name}*  | *{fmt2(mc)}* | *{ticker}*\n"
-                f"💊 {'Solana' if chain == 'SOL' else 'Ethereum'} @ {platform}\n"
+                f"💊 {chain_display_name(actual_chain)} @ {platform_label}\n"
                 f"🕐 Age: {token.get('age', '?')}\n"
                 f"💵 USD: `{price:.8f}`\n"
                 f"💎 FDV: *{fmt2(mc)}{fdv_ath_suffix}*\n"
                 f"{scan_line}"
                 f"\n`{address}`\n"
-                f"\n🔗 [Axiom]({axiom_url}) | [Padre]({padre_url}) | [GMGN]({gmgn_url})"
+                f"\n🔗 {trading_links}"
                 f"{context_block}"
             )
             image_url = token.get("image_url", "")
         else:
+            chain_lbl = "◎ SOL" if chain == "SOL" else "Ξ EVM"
             msg = (
                 f"👤 *{sender_name}* in *{group_name}*\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"{'◎ SOL' if chain == 'SOL' else 'Ξ ETH'} Contract\n"
+                f"{chain_lbl} Contract\n"
                 f"\n`{address}`\n"
-                f"\n🔗 [Axiom]({axiom_url}) | [Padre]({padre_url}) | [GMGN]({gmgn_url})"
+                f"\n🔗 {trading_links}"
                 f"{context_block}"
             )
             image_url = ""

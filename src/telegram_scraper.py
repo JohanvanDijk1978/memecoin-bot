@@ -69,10 +69,18 @@ async def fetch_token_quick(address: str, chain: str) -> dict:
             if not pairs:
                 return {}
 
-            chain_map = {"SOL": "solana", "ETH": "ethereum"}
-            chain_id  = chain_map.get(chain, chain.lower())
-            filtered  = [p for p in pairs if p.get("chainId", "").lower() == chain_id] or pairs
-            best      = max(filtered, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+            # If the scraper detected the address as SOL (base58), restrict to
+            # solana pairs. If it was detected as ETH (0x...), let Dexscreener
+            # return whichever EVM chain actually has the token — could be
+            # ethereum, bsc, base, robinhood, arbitrum, etc. We pick the pair
+            # with the most liquidity and use ITS chainId as the source of truth.
+            if chain == "SOL":
+                filtered = [p for p in pairs if p.get("chainId", "").lower() == "solana"] or pairs
+            else:
+                filtered = pairs
+            best = max(filtered, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+            actual_chain_id = (best.get("chainId") or "").lower()
+            dex_id          = (best.get("dexId") or "").lower()
 
             base = best.get("baseToken", {})
             vol  = best.get("volume", {})
@@ -116,6 +124,8 @@ async def fetch_token_quick(address: str, chain: str) -> dict:
                 "age":        age_str,
                 "ath_mc":     ath_mc,
                 "ath_time":   ath_time,
+                "chain_id":   actual_chain_id,   # e.g. "ethereum" / "bsc" / "base" / "robinhood" / "solana"
+                "dex_id":     dex_id,            # e.g. "uniswap", "pancakeswap", "raydium"
             }
     except Exception as e:
         logger.warning(f"Quick fetch failed for {address}: {e}")
@@ -245,12 +255,16 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
             continue
         _recent_pings[ping_key] = now
 
-        axiom_url  = f"https://axiom.trade/t/{address}" if chain == "SOL" else f"https://axiom.trade/t/{address}?chain=eth"
-        padre_url  = f"https://trade.padre.gg/trade/solana/{address}" if chain == "SOL" else f"https://trade.padre.gg/trade/eth/{address}"
-        gmgn_url = f"https://gmgn.ai/sol/token/{address}" if chain == "SOL" else f"https://gmgn.ai/eth/token/{address}"
-
-        # Fetch token data early so we can use MC in multi-group alert
+        # Fetch token data early so we can use MC in multi-group alert AND
+        # know the actual chain (EVM addresses could be any of ethereum, bsc,
+        # base, robinhood, etc. — the regex only tells us "0x-shaped").
         token = await fetch_token_quick(address, chain)
+
+        # Resolve chain from Dexscreener's response when available. Fallback
+        # to the regex-detected chain if the token lookup failed.
+        from .utils import build_trading_links, chain_display_name
+        actual_chain = (token or {}).get("chain_id") or ("solana" if chain == "SOL" else "ethereum")
+        trading_links = build_trading_links(actual_chain, address)
 
         def fmt(n):
             if n >= 1_000_000: return f"${n/1_000_000:.1f}M"
@@ -375,29 +389,32 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
                 return str(n)
 
             chg_icon = "📈" if chg >= 0 else "📉"
-            platform = "Pump" if chain == "SOL" else "ETH"
+            dex_id   = token.get("dex_id") or ""
+            platform_label = dex_id.title() if dex_id else chain_display_name(actual_chain)
 
             msg = (
                 f"👤 {sender} in [{group_name}]({mirror_link or get_group_link(group_name)})\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🪙 *{name}*  | *{fmt2(mc)}* | *{ticker}*\n"
-                f"💊 {'Solana' if chain == 'SOL' else 'Ethereum'} @ {platform}\n"
+                f"💊 {chain_display_name(actual_chain)} @ {platform_label}\n"
                 f"🕐 Age: {token.get('age', '?')}\n"
                 f"💵 USD: `{price:.8f}`\n"
                 f"💎 FDV: *{fmt2(mc)}{fdv_ath_suffix}*\n"
                 f"{scan_line}"
                 f"\n`{address}`\n"
-                f"\n🔗 [Axiom]({axiom_url})" + f" | [Padre]({padre_url})" + f" | [GMGN]({gmgn_url})" +
+                f"\n🔗 {trading_links}"
                 f"{context_block}"
             )
             image_url = token.get("image_url", "")
         else:
+            # No token data — best-effort chain guess from the regex label.
+            chain_lbl = "◎ SOL" if chain == "SOL" else "Ξ EVM"
             msg = (
                 f"👤 {sender} in *{group_name}*\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"{'◎ SOL' if chain == 'SOL' else 'Ξ ETH'} Contract\n"
+                f"{chain_lbl} Contract\n"
                 f"\n`{address}`\n"
-                f"\n🔗 [Axiom]({axiom_url})" + f" | [Padre]({padre_url})" +
+                f"\n🔗 {trading_links}"
                 f"{context_block}"
             )
             image_url = ""
