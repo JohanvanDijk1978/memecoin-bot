@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.14"; // bump together with VERSION in main.py
+const VERSION = "1.16"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -42,7 +42,7 @@ const ago = (ts) => {
 const chainBadge = (c) => `<span class="badge ${c.toLowerCase()}">${c}</span>`;
 const padre = (a, cid) => {
   // real chain of the highest-liquidity pool when known (slug map mirrors utils.py)
-  const slug = { solana: "solana", ethereum: "eth", bsc: "bnb", base: "base" }[cid]
+  const slug = { solana: "solana", ethereum: "eth", bsc: "bsc", base: "base", robinhood: "robinhood" }[cid]
     || (a.startsWith("0x") ? "eth" : "solana");
   return `https://trade.padre.gg/trade/${slug}/${a}`;
 };
@@ -116,28 +116,42 @@ const lbCols = (nameLabel, href) => [
   { key: "last_active", label: "Active", num: true, fmt: (r) => `<span style="color:var(--muted)">${ago(r.last_active)}</span>` },
 ];
 
+/* ---------------- shared live stream (SSE) ---------------- */
+let liveES = null;
+try { liveES = new EventSource("/api/stream"); } catch { /* fallback polling covers it */ }
+liveES?.addEventListener("message", () => ovFeedRefresh());
+setInterval(() => ovFeedRefresh(), 30000);
+
+const SRC_LABELS = { telegram: "TG", discord: "DC", dex_watcher: "DEX SOL", dex_watcher_evm: "DEX EVM" };
+
+async function ovFeedRefresh() {
+  const el = document.getElementById("ovfeed");
+  if (!el) return;  // not on the overview page
+  try {
+    const d = await api("calls", { per: 25, chain: state.chain });
+    el.innerHTML = "";
+    el.append(table([
+      { key: "called_at", label: "When", fmt: (r) => `<span style="color:var(--muted)">${ago(r.called_at)}</span>` },
+      { key: "ticker", label: "Token", fmt: tokenLink },
+      { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
+      { key: "source", label: "Source", fmt: (r) => `<span class="badge">${SRC_LABELS[r.source] ?? esc(r.source)}</span>` },
+      { key: "first_mc", label: "MC at post", num: true, fmt: (r) => fmtMc(r.first_mc) },
+      { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.eff_peak) },
+      { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
+      { key: "group", label: "Group" },
+    ], d.rows));
+  } catch { /* keep last content */ }
+}
+
 /* ---------------- pages ---------------- */
 const pages = {
   async overview() {
     const d = await api("overview", { days: state.days, chain: state.chain });
     view.innerHTML = kpis(d) + `
-      <div class="grid2">
-        <div class="panel"><h3>Calls per day</h3><div class="chart" id="c-day"></div></div>
-        <div class="panel"><h3>Peak multiplier distribution</h3><div class="chart" id="c-hist"></div></div>
-      </div>
+      <div class="panel" style="margin-bottom:18px"><h3>Live feed — group calls · dex watcher sol · dex watcher evm</h3>
+        <div id="ovfeed"><div class="loading">Loading…</div></div></div>
       <div class="panel"><h3>Top movers — ${$("f-days").selectedOptions[0].text.toLowerCase()}</h3><div id="movers"></div></div>`;
-    chart($("c-day"), {
-      xAxis: { type: "category", data: d.per_day.map((x) => x[0].slice(5)), ...axis() },
-      yAxis: { type: "value", ...axis() },
-      series: [{ type: "line", data: d.per_day.map((x) => x[1]), smooth: true, symbol: "none",
-        lineStyle: { color: "#7c6cff", width: 2 },
-        areaStyle: { color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: "rgba(124,108,255,.35)" }, { offset: 1, color: "rgba(124,108,255,0)" }] } } }],
-    });
-    chart($("c-hist"), {
-      xAxis: { type: "category", data: d.histogram.map((h) => h.label), ...axis() },
-      yAxis: { type: "value", ...axis() },
-      series: [{ type: "bar", data: d.histogram.map((h, i) => ({ value: h.count, itemStyle: { color: ["#ff5c6c", "#8b90a0", "#3fdd8f", "#3fdd8f", "#7c6cff", "#ffb547"][i], borderRadius: [4, 4, 0, 0] } })), barWidth: "55%" }],
-    });
+    ovFeedRefresh();
     $("movers").append(table([
       { key: "ticker", label: "Token", fmt: tokenLink },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
@@ -378,10 +392,7 @@ document.addEventListener("keydown", (e) => {
   }
   refresh();
   setInterval(refresh, 30000);  // fallback safety net
-  try {  // server push: refresh the instant new calls are ingested
-    const es = new EventSource("/api/stream");
-    es.onmessage = () => refresh();
-  } catch { /* SSE unavailable — fallback polling covers it */ }
+  liveES?.addEventListener("message", () => refresh());  // instant server push
 })();
 
 /* health indicator */

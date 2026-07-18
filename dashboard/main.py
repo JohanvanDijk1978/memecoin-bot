@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.14"              # bump together with VERSION in static/app.js
+VERSION = "1.16"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -141,6 +141,11 @@ def ingest_history() -> int:
               INSERT INTO tokens (address, chain, first_seen) VALUES (?,?,?)
               ON CONFLICT(address) DO NOTHING
             """, (address, chain, first_seen))
+            # scanner entries carry the real chain — adopt it if we have none yet
+            e_cid = next((e.get("chain_id", "") for e in entries if e.get("chain_id")), "")
+            if e_cid:
+                c.execute("UPDATE tokens SET chain_id=? WHERE address=? AND IFNULL(chain_id,'')=''",
+                          (e_cid.lower(), address))
         c.execute("INSERT OR REPLACE INTO meta VALUES ('history_mtime', ?)", (mtime,))
         c.execute("INSERT OR REPLACE INTO meta VALUES ('last_ingest', ?)", (str(time.time()),))
     _cache.clear()
@@ -225,7 +230,8 @@ async def peak_loop():
                 with db() as c:
                     rows = c.execute("""
                       SELECT address, first_seen, last_checked FROM tokens WHERE dead=0
-                      AND (? - first_seen < ? OR ? - last_checked > ?)
+                      AND (? - first_seen < ? OR ? - last_checked > ?
+                           OR IFNULL(chain_id,'')='')
                       ORDER BY last_checked ASC LIMIT 240
                     """, (now, ACTIVE_WINDOW, now, STALE_RECHECK)).fetchall()
                 addrs = [r["address"] for r in rows]
@@ -296,7 +302,8 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
         if not r["sender_id"]:  # legacy row: adopt the ID if the name maps to exactly one
             r["caller_key"] = aliases.get(r["sender_name"], r["sender_name"])
         r["mult"] = (r["eff_peak"] / r["first_mc"]) if r["first_mc"] else None
-        r["chain_label"] = CHAIN_LABELS.get(r["eff_chain"], r["chain"])
+        r["chain_label"] = CHAIN_LABELS.get(r["eff_chain"]) \
+            or (r["eff_chain"].upper() if r["dex_chain"] else r["chain"])
     if chain:
         rows = [r for r in rows if r["eff_chain"] == chain]
     if caller:
@@ -551,7 +558,8 @@ def token_links(address: str, chain_id: str = "") -> dict:
     """Trading links via the best-liquidity pair's real chain (Dexscreener
     chainId); falls back to the 0x-heuristic. Slug maps mirror src/utils.py."""
     cid = chain_id or ("ethereum" if address.startswith("0x") else "solana")
-    padre = {"solana": "solana", "ethereum": "eth", "bsc": "bnb", "base": "base"}.get(cid)
+    padre = {"solana": "solana", "ethereum": "eth", "bsc": "bsc", "base": "base",
+             "robinhood": "robinhood"}.get(cid)
     gmgn = {"solana": "sol", "ethereum": "eth", "bsc": "bsc", "base": "base"}.get(cid)
     links = {"dexscreener": f"https://dexscreener.com/{cid}/{address}"}
     if padre:

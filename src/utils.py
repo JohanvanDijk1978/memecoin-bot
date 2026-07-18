@@ -142,7 +142,7 @@ def basedbot_url(chain_id: str, address: str) -> str:
         "solana":    "sol",
         "robinhood": "robinhood",
         "ethereum":  "eth",
-        "bsc":       "bnb",
+        "bsc":       "bsc",
         "base":      "base",
     }.get((chain_id or "").lower())
     if not slug:
@@ -154,7 +154,7 @@ def padre_url(chain_id: str, address: str) -> str:
     slug = {
         "solana":    "solana",
         "ethereum":  "eth",
-        "bsc":       "bnb",
+        "bsc":       "bsc",
         "base":      "base",
         "robinhood": "robinhood",
     }.get((chain_id or "").lower())

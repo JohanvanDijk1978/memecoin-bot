@@ -61,7 +61,7 @@ class MentionStore:
         except Exception as e:
             logger.warning(f"Could not save CA history: {e}")
 
-    def add_message(self, text: str, source: str, group_name: str = "", sender_name: str = "", market_cap: float = 0.0, ticker: str = "", sender_id: str = ""):
+    def add_message(self, text: str, source: str, group_name: str = "", sender_name: str = "", market_cap: float = 0.0, ticker: str = "", sender_id: str = "", chain_id: str = ""):
         """Parse a raw message and store any contract address mentions."""
         now = time.time()
 
@@ -102,6 +102,7 @@ class MentionStore:
                     "group_name":  group_name,
                     "sender_name": sender_name,
                     "sender_id":   sender_id,   # "dc:<id>" / "tg:<id>"; "" for legacy entries
+                    "chain_id":    chain_id,    # dexscreener chainId when the source knows it
                     "market_cap":  market_cap,
                     "first_mc":    market_cap,
                     "peak_mc":     market_cap,

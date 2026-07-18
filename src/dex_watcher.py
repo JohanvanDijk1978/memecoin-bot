@@ -394,7 +394,8 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str) ->
         from .mention_store import store
         store.add_message(f"CA:{address}", source="dex_watcher",
                           group_name="DEX Watcher (SOL)", sender_name="scanner",
-                          market_cap=initial_mc, ticker=symbol, sender_id="scan:sol")
+                          market_cap=initial_mc, ticker=symbol, sender_id="scan:sol",
+                          chain_id="solana")
     except Exception as e:
         logger.warning(f"dex_watcher: history record failed for {address}: {e}")
 

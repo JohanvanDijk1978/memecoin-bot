@@ -364,7 +364,8 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str, ch
         from .mention_store import store
         store.add_message(f"CA:{address}", source="dex_watcher_evm",
                           group_name="DEX Watcher (EVM)", sender_name="scanner",
-                          market_cap=initial_mc, ticker=symbol, sender_id="scan:evm")
+                          market_cap=initial_mc, ticker=symbol, sender_id="scan:evm",
+                          chain_id=(chain or "").lower())
     except Exception as e:
         logger.warning(f"dex_watcher_evm: history record failed for {address}: {e}")
 
