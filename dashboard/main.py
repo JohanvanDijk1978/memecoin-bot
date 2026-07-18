@@ -449,6 +449,7 @@ def token_detail(address: str):
         "earliest": calls[0]["sender_name"] if calls else None,
         "links": {
             "dexscreener": f"https://dexscreener.com/{'ethereum' if address.startswith('0x') else 'solana'}/{address}",
+            "padre": f"https://trade.padre.gg/trade/{'eth' if address.startswith('0x') else 'solana'}/{address}",
             "gmgn": f"https://gmgn.ai/{'eth' if address.startswith('0x') else 'sol'}/token/{address}",
             "axiom": f"https://axiom.trade/t/{address}",
         },

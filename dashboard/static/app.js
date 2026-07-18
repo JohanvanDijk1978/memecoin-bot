@@ -35,7 +35,10 @@ const ago = (ts) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 const chainBadge = (c) => `<span class="badge ${c.toLowerCase()}">${c}</span>`;
-const tokenLink = (t) => `<a class="click" href="#/token/${t.address}"><b>${esc(t.ticker || t.address.slice(0, 6) + "…")}</b></a>`;
+const padre = (a) => `https://trade.padre.gg/trade/${a.startsWith("0x") ? "eth" : "solana"}/${a}`;
+const tokenLink = (t) =>
+  `<a href="${padre(t.address)}" target="_blank" rel="noopener"><b>${t.ticker ? "$" + esc(t.ticker) : t.address.slice(0, 6) + "…"}</b></a>` +
+  ` <a href="#/token/${t.address}" title="details" style="color:var(--dim)">ⓘ</a>`;
 
 /* sortable table: cols = [{key,label,num,fmt,sortVal}] */
 function table(cols, rows, { defaultSort, onRow } = {}) {
@@ -221,7 +224,7 @@ const pages = {
     function kpisToken(t, d) {
       const item = (k, v) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`;
       return `<div class="cards">
-        ${item("Token", `${esc(t.ticker || addr.slice(0, 8))} ${chainBadge(t.chain ?? "?")}`)}
+        ${item("Token", `${t.ticker ? "$" + esc(t.ticker) : addr.slice(0, 8)} ${chainBadge(t.chain ?? "?")}`)}
         ${item("Current MC", t.dead ? `<span class="neg">dead</span>` : fmtMc(t.current_mc))}
         ${item("Peak (observed)", fmtMc(Math.max(t.peak_mc_dash ?? 0, ...d.calls.map((c) => c.mc_at_call ?? 0))))}
         ${item("Groups called", d.calls.length)}
