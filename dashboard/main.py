@@ -43,6 +43,7 @@ DEX_DELAY = 2.0               # s between Dexscreener requests
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
+VERSION = "1.01"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -512,7 +513,8 @@ def health():
                               (SELECT COUNT(*) FROM tokens) AS tokens,
                               (SELECT COUNT(*) FROM tokens WHERE dead=1) AS dead""").fetchone()
     now = time.time()
-    return {"calls": counts["calls"], "tokens": counts["tokens"], "dead": counts["dead"],
+    return {"version": VERSION,
+            "calls": counts["calls"], "tokens": counts["tokens"], "dead": counts["dead"],
             "ingest_lag_s": round(now - float(meta.get("last_ingest", 0))),
             "peak_poll_lag_s": round(now - float(meta.get("last_peak_poll", 0)))
                                if meta.get("last_peak_poll") else None}
@@ -520,7 +522,8 @@ def health():
 
 @app.get("/")
 def index():
-    return FileResponse(BASE_DIR / "static" / "index.html")
+    return FileResponse(BASE_DIR / "static" / "index.html",
+                        headers={"Cache-Control": "no-cache"})
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 # EOF

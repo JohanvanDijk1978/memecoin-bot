@@ -1,4 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
+const VERSION = "1.01"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -314,7 +315,9 @@ document.addEventListener("keydown", (e) => {
 async function health() {
   try {
     const h = await api("health");
-    $("health").innerHTML = `<span class="dot"></span>${h.calls} calls · ${h.tokens} tokens · ingest ${h.ingest_lag_s}s ago`;
+    const ver = h.version === VERSION ? `v${VERSION}`
+      : `<span class="warn">ui v${VERSION} / api v${h.version} — hard refresh</span>`;
+    $("health").innerHTML = `<span class="dot"></span>${ver} · ${h.calls} calls · ${h.tokens} tokens · ingest ${h.ingest_lag_s}s ago`;
   } catch { $("health").innerHTML = `<span class="dot" style="background:var(--red)"></span>API down`; }
 }
 health(); setInterval(health, 30000);
