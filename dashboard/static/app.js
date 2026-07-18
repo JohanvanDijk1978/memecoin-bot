@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.12"; // bump together with VERSION in main.py
+const VERSION = "1.13"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -9,6 +9,8 @@ const state = {
   days: localStorage.getItem("days") ?? "30",
   chain: localStorage.getItem("chain") ?? "",
 };
+// migrate pre-1.13 stored filter values (SOL/ETH -> dexscreener chain ids)
+state.chain = { SOL: "solana", ETH: "ethereum" }[state.chain] ?? state.chain;
 $("f-days").value = state.days;
 $("f-chain").value = state.chain;
 $("f-days").onchange = (e) => { state.days = e.target.value; localStorage.setItem("days", state.days); render(); };

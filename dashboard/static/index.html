@@ -70,6 +70,8 @@ th.num{text-align:right}
 .badge{display:inline-block;background:var(--bg3);border:1px solid var(--border);border-radius:5px;
   padding:1px 7px;font-size:11px;color:var(--muted)}
 .badge.sol{color:#9d7cff;border-color:#3a2f5e}.badge.eth{color:#7cb6ff;border-color:#2b3e5e}
+.badge.base{color:#5c8aff;border-color:#243a6e}.badge.bnb{color:#ffd45c;border-color:#5e4f1e}
+.badge.rh{color:#5cffb8;border-color:#1e5e43}
 .mult{font-weight:600}
 .pager{display:flex;gap:8px;align-items:center;margin-top:12px;color:var(--muted);font-size:12px}
 .pager button{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;
@@ -124,14 +126,17 @@ th.num{text-align:right}
       </select>
       <select id="f-chain">
         <option value="">All chains</option>
-        <option value="SOL">Solana</option>
-        <option value="ETH">ETH</option>
+        <option value="solana">Solana</option>
+        <option value="ethereum">ETH</option>
+        <option value="base">Base</option>
+        <option value="bsc">BNB</option>
+        <option value="robinhood">Robinhood</option>
       </select>
       <input type="text" id="f-search" placeholder="Search token / caller / group  ( / )">
     </div>
     <div id="view"><div class="loading">Loading…</div></div>
   </main>
 </div>
-<script type="module" src="/static/app.js?v=1.12"></script>
+<script type="module" src="/static/app.js?v=1.13"></script>
 </body>
 </html>

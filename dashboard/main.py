@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.12"              # bump together with VERSION in static/app.js
+VERSION = "1.13"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -257,6 +257,8 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
       SELECT c.*, t.current_mc, t.peak_mc_dash, t.peak_at, t.dead,
              CASE WHEN t.ticker!='' THEN t.ticker ELSE c.ticker END AS tick,
              IFNULL(t.chain_id,'') AS dex_chain,
+             CASE WHEN IFNULL(t.chain_id,'')!='' THEN t.chain_id
+                  WHEN c.chain='SOL' THEN 'solana' ELSE 'ethereum' END AS eff_chain,
              CASE WHEN c.sender_id!='' THEN c.sender_id ELSE c.sender_name END AS caller_key,
              MAX(c.first_mc, c.peak_mc_bot, IFNULL(t.peak_mc_dash,0)) AS eff_peak
       FROM calls c LEFT JOIN tokens t ON t.address = c.address WHERE 1=1
@@ -264,8 +266,8 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
     args: list = []
     if days:
         sql += " AND c.called_at >= ?"; args.append(time.time() - days * 86400)
-    if chain:
-        sql += " AND c.chain = ?"; args.append(chain)
+    # chain filter applied in Python below on eff_chain (real chain of the
+    # best-liquidity pool when known; legacy fallback SOL/ETH heuristic)
     # NOTE: caller filter is applied in Python below, after alias resolution,
     # so legacy name-keyed rows merge into the caller's ID-keyed identity.
     if group:
@@ -284,9 +286,16 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
         if not r["sender_id"]:  # legacy row: adopt the ID if the name maps to exactly one
             r["caller_key"] = aliases.get(r["sender_name"], r["sender_name"])
         r["mult"] = (r["eff_peak"] / r["first_mc"]) if r["first_mc"] else None
+        r["chain_label"] = CHAIN_LABELS.get(r["eff_chain"], r["chain"])
+    if chain:
+        rows = [r for r in rows if r["eff_chain"] == chain]
     if caller:
         rows = [r for r in rows if r["caller_key"] == caller]
     return rows
+
+
+CHAIN_LABELS = {"solana": "SOL", "ethereum": "ETH", "base": "BASE",
+                "bsc": "BNB", "robinhood": "RH"}
 
 
 def caller_aliases():
@@ -417,7 +426,7 @@ def overview(days: float = 30, chain: str = ""):
             if r["address"] in seen:
                 continue
             seen.add(r["address"])
-            movers.append({"ticker": r["tick"], "address": r["address"], "chain": r["chain"],
+            movers.append({"ticker": r["tick"], "address": r["address"], "chain": r["chain_label"],
                            "chain_id": r["dex_chain"],
                            "mult": round(r["mult"], 2), "first_mc": r["first_mc"],
                            "current_mc": r["current_mc"], "group": r["group_name"],
@@ -498,7 +507,7 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
     total = len(rows)
     rows = rows[(page - 1) * per: page * per]
     return {"total": total, "page": page,
-            "rows": [{"address": r["address"], "ticker": r["tick"], "chain": r["chain"],
+            "rows": [{"address": r["address"], "ticker": r["tick"], "chain": r["chain_label"],
                       "chain_id": r["dex_chain"],
                       "group": r["group_name"], "caller": r["sender_name"],
                       "caller_key": r["caller_key"], "source": r["source"],
@@ -512,16 +521,19 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
 def token_detail(address: str):
     with db() as c:
         tok = c.execute("SELECT * FROM tokens WHERE address=?", (address,)).fetchone()
+    tok = dict(tok) if tok else None
+    if tok:
+        tok["chain"] = CHAIN_LABELS.get(tok.get("chain_id", ""), tok["chain"])
     calls = [r for r in fetch_calls() if r["address"] == address]
     calls.sort(key=lambda r: r["called_at"])
     return {
-        "token": dict(tok) if tok else None,
+        "token": tok,
         "calls": [{"group": r["group_name"], "caller": r["sender_name"],
                    "caller_key": r["caller_key"], "source": r["source"],
                    "mc_at_call": r["first_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,
                    "scan_count": r["scan_count"], "called_at": r["called_at"]} for r in calls],
         "earliest": calls[0]["sender_name"] if calls else None,
-        "links": token_links(address, (dict(tok).get("chain_id") if tok else "") or ""),
+        "links": token_links(address, (tok or {}).get("chain_id", "")),
     }
 
 
