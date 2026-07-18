@@ -153,10 +153,11 @@ def axiom_url(chain_id: str, address: str) -> str:
 
 def padre_url(chain_id: str, address: str) -> str:
     slug = {
-        "solana":   "solana",
-        "ethereum": "eth",
-        "bsc":      "bnb",
-        "base":     "base",
+        "solana":    "solana",
+        "ethereum":  "eth",
+        "bsc":       "bnb",
+        "base":      "base",
+        "robinhood": "robinhood",
     }.get((chain_id or "").lower())
     if not slug:
         return ""
