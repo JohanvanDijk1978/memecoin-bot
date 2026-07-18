@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.04"              # bump together with VERSION in static/app.js
+VERSION = "1.05"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -367,8 +367,9 @@ def overview(days: float = 30, chain: str = ""):
         mults = [r["mult"] for r in rows if r["mult"]]
         out["histogram"] = [{"label": l, "count": sum(1 for m in mults if lo <= m < hi)}
                             for l, lo, hi in buckets]
-        # top movers: called in last 48h, by multiplier
-        recent = [r for r in rows if time.time() - r["called_at"] < ACTIVE_WINDOW and r["mult"]]
+        # top movers: best multipliers within the selected timeframe
+        # (rows are already filtered by `days`; days=0 = all time)
+        recent = [r for r in rows if r["mult"]]
         seen, movers = set(), []
         for r in sorted(recent, key=lambda r: r["mult"], reverse=True):
             if r["address"] in seen:

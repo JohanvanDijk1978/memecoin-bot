@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.04"; // bump together with VERSION in main.py
+const VERSION = "1.05"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -118,7 +118,7 @@ const pages = {
         <div class="panel"><h3>Calls per day</h3><div class="chart" id="c-day"></div></div>
         <div class="panel"><h3>Peak multiplier distribution</h3><div class="chart" id="c-hist"></div></div>
       </div>
-      <div class="panel"><h3>Top movers — called in last 48h</h3><div id="movers"></div></div>`;
+      <div class="panel"><h3>Top movers — ${$("f-days").selectedOptions[0].text.toLowerCase()}</h3><div id="movers"></div></div>`;
     chart($("c-day"), {
       xAxis: { type: "category", data: d.per_day.map((x) => x[0].slice(5)), ...axis() },
       yAxis: { type: "value", ...axis() },
