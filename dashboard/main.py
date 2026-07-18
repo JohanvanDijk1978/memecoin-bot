@@ -23,7 +23,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, FileResponse
+from fastapi.responses import JSONResponse, Response, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -34,7 +34,7 @@ HISTORY_FILE = Path(os.environ.get("HISTORY_FILE", BASE_DIR.parent / "data" / "c
 DB_FILE = Path(os.environ.get("DASH_DB", BASE_DIR / "data" / "dash.db"))
 DASH_PASSWORD = os.environ.get("DASH_PASSWORD", "")
 
-INGEST_INTERVAL = 20          # s (kept tight so the live CA feed feels live)
+INGEST_INTERVAL = 2           # s — just an mtime stat unless the file changed
 PEAK_INTERVAL = 300           # s between poll rounds
 ACTIVE_WINDOW = 48 * 3600     # poll tokens called within this window
 STALE_RECHECK = 24 * 3600     # older tokens: once a day
@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.13"              # bump together with VERSION in static/app.js
+VERSION = "1.14"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -147,12 +147,22 @@ def ingest_history() -> int:
     return n
 
 
+_subscribers: set = set()  # asyncio.Queues of connected /api/stream clients
+
+
+def _notify_subscribers():
+    for q in list(_subscribers):
+        if q.qsize() < 2:  # don't pile up events on slow clients
+            q.put_nowait("new")
+
+
 async def ingest_loop():
     while True:
         try:
             n = await asyncio.to_thread(ingest_history)
             if n:
                 log.info(f"ingested {n} call rows")
+                _notify_subscribers()
         except Exception as e:
             log.warning(f"ingest error: {e}")
         await asyncio.sleep(INGEST_INTERVAL)
@@ -595,6 +605,27 @@ def group_profile(name: str):
     p = profile(rows)
     p["top_callers"] = leaderboard(rows, "caller_key", display="sender_name")[:10]
     return p
+
+
+@app.get("/api/stream")
+async def stream():
+    """SSE: pushes an event whenever new calls are ingested, so the live feed
+    refreshes instantly instead of waiting for its polling interval."""
+    async def gen():
+        q: asyncio.Queue = asyncio.Queue()
+        _subscribers.add(q)
+        try:
+            yield "data: hello\n\n"
+            while True:
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=25)
+                    yield f"data: {msg}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _subscribers.discard(q)
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/health")

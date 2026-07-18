@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.13"; // bump together with VERSION in main.py
+const VERSION = "1.14"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -376,7 +376,12 @@ document.addEventListener("keydown", (e) => {
       first = false;
     } catch { /* keep last content on transient errors */ }
   }
-  refresh(); setInterval(refresh, 15000);
+  refresh();
+  setInterval(refresh, 30000);  // fallback safety net
+  try {  // server push: refresh the instant new calls are ingested
+    const es = new EventSource("/api/stream");
+    es.onmessage = () => refresh();
+  } catch { /* SSE unavailable — fallback polling covers it */ }
 })();
 
 /* health indicator */
