@@ -40,10 +40,11 @@ ACTIVE_WINDOW = 48 * 3600     # poll tokens called within this window
 STALE_RECHECK = 24 * 3600     # older tokens: once a day
 DEX_BATCH = 30
 DEX_DELAY = 2.0               # s between Dexscreener requests
+MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than this
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.01"              # bump together with VERSION in static/app.js
+VERSION = "1.02"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -155,19 +156,27 @@ async def poll_batch(client: httpx.AsyncClient, addresses: list[str]):
     r = await client.get(url, timeout=15)
     r.raise_for_status()
     pairs = (r.json() or {}).get("pairs") or []
-    best: dict[str, dict] = {}  # lowered address -> {mc, ticker}
+    # Per token: use the HIGHEST-LIQUIDITY pair's marketCap (same as the bot's
+    # _fetch_pair_data). Never take max mcap across pools — dust pools with a
+    # manipulated price report absurd caps ($1e28-style).
+    best: dict[str, dict] = {}  # lowered address -> {mc, ticker, liq}
     for p in pairs:
         addr = (p.get("baseToken") or {}).get("address", "")
+        liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
         mc = p.get("marketCap") or p.get("fdv") or 0
         sym = (p.get("baseToken") or {}).get("symbol", "")
         key = addr.lower()
-        if key and mc and (key not in best or mc > best[key]["mc"]):
-            best[key] = {"mc": mc, "ticker": sym}
+        if key and mc and (key not in best or liq > best[key]["liq"]):
+            best[key] = {"mc": mc, "ticker": sym, "liq": liq}
     now = time.time()
     with db() as c:
         for a in addresses:
             hit = best.get(a.lower())
-            if hit:
+            if hit and hit["liq"] < MIN_LIQ_USD:
+                # token responded but only dust pools remain — record the check,
+                # don't let a manipulated price set current/peak mcap
+                c.execute("UPDATE tokens SET miss_count=0, last_checked=? WHERE address=?", (now, a))
+            elif hit:
                 c.execute("""
                   UPDATE tokens SET current_mc=?, ticker=CASE WHEN ticker='' THEN ? ELSE ticker END,
                     peak_mc_dash=MAX(peak_mc_dash, ?), miss_count=0, last_checked=?,
