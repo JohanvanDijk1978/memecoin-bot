@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.08"              # bump together with VERSION in static/app.js
+VERSION = "1.09"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -259,9 +259,8 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
         sql += " AND c.called_at >= ?"; args.append(time.time() - days * 86400)
     if chain:
         sql += " AND c.chain = ?"; args.append(chain)
-    if caller:  # canonical: sender_id ("dc:.."/"tg:..") when recorded, else legacy name
-        sql += " AND (CASE WHEN c.sender_id!='' THEN c.sender_id ELSE c.sender_name END) = ?"
-        args.append(caller)
+    # NOTE: caller filter is applied in Python below, after alias resolution,
+    # so legacy name-keyed rows merge into the caller's ID-keyed identity.
     if group:
         sql += " AND c.group_name = ?"; args.append(group)
     if source:
@@ -273,9 +272,29 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
     sql += " ORDER BY c.called_at DESC"
     with db() as c:
         rows = [dict(r) for r in c.execute(sql, args).fetchall()]
+    aliases = caller_aliases()
     for r in rows:
+        if not r["sender_id"]:  # legacy row: adopt the ID if the name maps to exactly one
+            r["caller_key"] = aliases.get(r["sender_name"], r["sender_name"])
         r["mult"] = (r["eff_peak"] / r["first_mc"]) if r["first_mc"] else None
+    if caller:
+        rows = [r for r in rows if r["caller_key"] == caller]
     return rows
+
+
+def caller_aliases():
+    """display name -> sender_id, only where the name maps to exactly ONE known
+    ID across all data. Lets legacy (pre-ID) calls merge into the right caller;
+    names shared by multiple IDs stay unmerged rather than guessed."""
+    def build():
+        with db() as c:
+            rows = c.execute("""SELECT DISTINCT sender_name, sender_id FROM calls
+                                WHERE sender_id != '' AND sender_name != ''""").fetchall()
+        m: dict[str, set] = {}
+        for r in rows:
+            m.setdefault(r["sender_name"], set()).add(r["sender_id"])
+        return {n: next(iter(ids)) for n, ids in m.items() if len(ids) == 1}
+    return cached("aliases", build)
 
 
 def agg(rows):

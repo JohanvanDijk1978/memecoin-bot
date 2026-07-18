@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.08"; // bump together with VERSION in main.py
+const VERSION = "1.09"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
