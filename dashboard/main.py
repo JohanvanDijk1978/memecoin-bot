@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.10"              # bump together with VERSION in static/app.js
+VERSION = "1.11"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -427,7 +427,7 @@ def callers(days: float = 0, chain: str = "", min_calls: int = 2):
     def build():
         rows = fetch_calls(days=days, chain=chain)
         return [r for r in leaderboard(rows, "caller_key", display="sender_name")
-                if r["calls"] >= min_calls]
+                if r["calls"] >= min_calls and not r["key"].startswith("scan:")]
     return cached(f"callers:{days}:{chain}:{min_calls}", build)
 
 

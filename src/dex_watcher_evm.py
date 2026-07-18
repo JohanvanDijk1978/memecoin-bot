@@ -341,6 +341,16 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str, ch
     if tg_msg_id is None and dc_msg_id is None:
         return False
 
+    # Record in CA history so the dashboard (live feed / scan analytics) sees
+    # scanner finds alongside group calls.
+    try:
+        from .mention_store import store
+        store.add_message(f"CA:{address}", source="dex_watcher_evm",
+                          group_name="DEX Watcher (EVM)", sender_name="scanner",
+                          market_cap=initial_mc, ticker=symbol, sender_id="scan:evm")
+    except Exception as e:
+        logger.warning(f"dex_watcher_evm: history record failed for {address}: {e}")
+
     # Register for milestone tracking on the EVM channel/webhook.
     try:
         from .dex_milestone_tracker import register_token

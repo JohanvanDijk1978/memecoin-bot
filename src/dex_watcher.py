@@ -372,6 +372,16 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str) ->
         # Nothing landed anywhere — let the caller retry on the next poll.
         return False
 
+    # Record in CA history so the dashboard (live feed / scan analytics) sees
+    # scanner finds alongside group calls.
+    try:
+        from .mention_store import store
+        store.add_message(f"CA:{address}", source="dex_watcher",
+                          group_name="DEX Watcher (SOL)", sender_name="scanner",
+                          market_cap=initial_mc, ticker=symbol, sender_id="scan:sol")
+    except Exception as e:
+        logger.warning(f"dex_watcher: history record failed for {address}: {e}")
+
     # Register with milestone tracker if we have valid initial state + at least
     # one message to reply to.
     try:
