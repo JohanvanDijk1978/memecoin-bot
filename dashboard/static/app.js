@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.19"; // bump together with VERSION in main.py
+const VERSION = "1.20"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -251,6 +251,8 @@ const pages = {
         ${item("Groups called", d.calls.length)}
         ${item("First called", d.calls[0] ? ago(d.calls[0].called_at) : "—")}
       </div>
+      <div class="panel" style="margin-bottom:18px"><h3>Calls on chart — 📍 marks each call, ⌖ in the timeline jumps to it</h3>
+        <div id="cchart" style="height:280px"><div class="loading">Loading candles…</div></div></div>
       ${info.pair && info.chain_id ? `<div class="panel" style="margin-bottom:18px;padding:0;overflow:hidden">
         <iframe src="https://dexscreener.com/${esc(info.chain_id)}/${esc(info.pair)}?embed=1&theme=dark&trades=1&tabs=1&info=0"
           style="width:100%;height:720px;border:0;display:block" loading="lazy"></iframe>
@@ -265,7 +267,51 @@ const pages = {
       <div class="panel"><h3>Call timeline — earliest caller: <b style="color:var(--text)">${esc(d.earliest ?? "?")}</b>
         <span style="float:right" class="links">${links}</span></h3><div id="t"></div></div>`;
     $("mc-refresh").onclick = () => render();  // page reload re-fetches live from Dexscreener
+
+    // candlestick with call markers (GeckoTerminal OHLCV via our API)
+    (async () => {
+      const box = $("cchart");
+      const first = d.calls[0]?.called_at ?? Date.now() / 1000 - 86400;
+      const span = Date.now() / 1000 - first;
+      const tf = span < 20 * 3600 ? "minute" : span < 40 * 86400 ? "hour" : "day";
+      const o = await api(`token/${addr}/ohlcv`, { pair: info.pair ?? "", network: info.chain_id ?? "", tf });
+      if (!o.candles?.length) {
+        box.parentElement.innerHTML = `<div class="empty">No OHLCV history available for this pool.</div>`;
+        return;
+      }
+      const times = o.candles.map((c) => c[0]);
+      const idxFor = (ts) => {
+        let best = 0;
+        times.forEach((t, i) => { if (Math.abs(t - ts) < Math.abs(times[best] - ts)) best = i; });
+        return best;
+      };
+      box.innerHTML = "";
+      const ch = chart(box, {
+        grid: { left: 60, right: 15, top: 15, bottom: 42 },
+        xAxis: { type: "category", ...axis(),
+          data: times.map((t) => new Date(t * 1000).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })) },
+        yAxis: { type: "value", scale: true, ...axis() },
+        dataZoom: [{ type: "inside" }, { type: "slider", height: 16, bottom: 4,
+          borderColor: "#232734", backgroundColor: "#101218",
+          fillerColor: "rgba(124,108,255,.15)", textStyle: { color: "#5c6070" } }],
+        series: [{ type: "candlestick",
+          data: o.candles.map((c) => [c[1], c[4], c[3], c[2]]),  // o,c,l,h
+          itemStyle: { color: "#3fdd8f", color0: "#ff5c6c", borderColor: "#3fdd8f", borderColor0: "#ff5c6c" },
+          markPoint: { data: d.calls.map((c) => ({
+            coord: [idxFor(c.called_at), o.candles[idxFor(c.called_at)][2]],
+            name: c.caller, symbol: "pin", symbolSize: 26,
+            itemStyle: { color: "#7c6cff" }, label: { show: false },
+          })) } }],
+      });
+      window.__ccJump = (ts) => {
+        const i = idxFor(ts);
+        ch.dispatchAction({ type: "dataZoom", startValue: Math.max(0, i - 40), endValue: Math.min(times.length - 1, i + 40) });
+        ch.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: i });
+      };
+    })();
+
     $("t").append(table([
+      { key: "jump", label: "", fmt: (r) => `<button class="tab" style="padding:1px 8px" title="show on chart" onclick="__ccJump && __ccJump(${r.called_at})">⌖</button>` },
       { key: "called_at", label: "When", fmt: (r) => new Date(r.called_at * 1000).toLocaleString() },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },

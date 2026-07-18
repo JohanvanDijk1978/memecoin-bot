@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.19"              # bump together with VERSION in static/app.js
+VERSION = "1.20"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -579,6 +579,35 @@ async def _live_refresh(address: str) -> dict:
 
 
 SOL_RPC = "https://api.mainnet-beta.solana.com"
+GT_NETWORKS = {"solana": "solana", "ethereum": "eth", "bsc": "bsc", "base": "base"}
+
+
+@app.get("/api/token/{address}/ohlcv")
+async def token_ohlcv(address: str, pair: str = "", network: str = "", tf: str = "hour"):
+    """Candles for the token's best pool via GeckoTerminal (free tier).
+    pair/network come from the page's live Dexscreener fetch."""
+    net = GT_NETWORKS.get(network)
+    if not (pair and net) or tf not in ("minute", "hour", "day"):
+        return {"candles": []}
+    key = f"ohlcv:{net}:{pair}:{tf}"
+    hit = _cache.get(key)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": "memedash/1.0"}) as client:
+            r = await client.get(
+                f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{pair}/ohlcv/{tf}",
+                params={"limit": 1000}, timeout=15)
+            r.raise_for_status()
+            lst = ((((r.json() or {}).get("data") or {}).get("attributes") or {})
+                   .get("ohlcv_list") or [])
+        # ascending [ts, o, h, l, c]
+        candles = [[int(x[0]), x[1], x[2], x[3], x[4]] for x in reversed(lst)]
+        out = {"candles": candles}
+        _cache[key] = (time.time(), out)
+        return out
+    except Exception as e:
+        return {"candles": [], "error": str(e)}
 
 
 @app.get("/api/token/{address}/holders")
