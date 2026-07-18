@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.03"; // bump together with VERSION in main.py
+const VERSION = "1.04"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -248,10 +248,10 @@ async function profilePage(kind, name) {
       <div class="panel"><h3>Monthly calls & ≥2× rate</h3><div class="chart" id="c-month"></div></div>
       <div class="panel"><h3>${kind === "caller" ? "Groups posted in" : "Top callers"}</h3><div id="side"></div></div>
     </div>
-    <div class="grid2">
+    ${kind === "caller" ? `<div class="grid2">
       <div class="panel"><h3>Best calls</h3><div id="best"></div></div>
       <div class="panel"><h3>Worst calls</h3><div id="worst"></div></div>
-    </div>
+    </div>` : `<div class="panel" style="margin-bottom:18px"><h3>Best calls</h3><div id="best"></div></div>`}
     <div class="panel"><h3>Recent</h3><div id="recent"></div></div>`;
   chart($("c-month"), {
     xAxis: { type: "category", data: d.monthly.map((m) => m.month), ...axis() },
@@ -268,7 +268,7 @@ async function profilePage(kind, name) {
     { key: "called_at", label: "When", num: true, fmt: (r) => `<span style="color:var(--muted)">${ago(r.called_at)}</span>` },
   ];
   $("best").append(table(callCols, d.best, { defaultSort: "mult" }));
-  $("worst").append(table(callCols, d.worst));
+  if (kind === "caller") $("worst").append(table(callCols, d.worst));
   $("recent").append(table(callCols, d.recent, { defaultSort: "called_at" }));
   if (kind === "caller") {
     $("side").append(table([

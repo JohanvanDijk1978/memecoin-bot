@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.03"              # bump together with VERSION in static/app.js
+VERSION = "1.04"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -351,7 +351,7 @@ async def basic_auth(request: Request, call_next):
 # ---------------------------------------------------------------- endpoints
 
 @app.get("/api/overview")
-def overview(days: int = 30, chain: str = ""):
+def overview(days: float = 30, chain: str = ""):
     def build():
         rows = fetch_calls(days=days, chain=chain)
         out = agg(rows)
@@ -386,7 +386,7 @@ def overview(days: int = 30, chain: str = ""):
 
 
 @app.get("/api/callers")
-def callers(days: int = 0, chain: str = "", min_calls: int = 2):
+def callers(days: float = 0, chain: str = "", min_calls: int = 2):
     def build():
         rows = fetch_calls(days=days, chain=chain)
         return [r for r in leaderboard(rows, "sender_name") if r["calls"] >= min_calls]
@@ -394,7 +394,7 @@ def callers(days: int = 0, chain: str = "", min_calls: int = 2):
 
 
 @app.get("/api/groups")
-def groups(days: int = 0, chain: str = ""):
+def groups(days: float = 0, chain: str = ""):
     def build():
         rows = fetch_calls(days=days, chain=chain)
         boards = leaderboard(rows, "group_name")
@@ -413,7 +413,7 @@ def groups(days: int = 0, chain: str = ""):
 
 
 @app.get("/api/sources")
-def sources(days: int = 0):
+def sources(days: float = 0):
     def build():
         rows = fetch_calls(days=days)
         boards = leaderboard(rows, "source")
@@ -433,7 +433,7 @@ def sources(days: int = 0):
 
 @app.get("/api/calls")
 def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = "",
-                   source: str = "", min_mult: float = 0, days: int = 0,
+                   source: str = "", min_mult: float = 0, days: float = 0,
                    sort: str = "called_at", page: int = 1, per: int = 50):
     rows = fetch_calls(days=days, chain=chain, caller=caller, group=group, source=source, q=q)
     if min_mult:
