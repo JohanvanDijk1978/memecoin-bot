@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.25"; // bump together with VERSION in main.py
+const VERSION = "1.26"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -388,11 +388,20 @@ document.addEventListener("keydown", (e) => {
   const el = document.createElement("div");
   el.id = "live";
   el.innerHTML = `<div id="live-head"><span class="dot"></span>LIVE CA FEED
+    <button id="live-mute" title="sound on new CA"></button>
     <button id="live-collapse" title="collapse">—</button></div>
     <div id="live-body"><div class="empty">Loading…</div></div>`;
   document.body.append(el);
   const head = el.querySelector("#live-head"), body = el.querySelector("#live-body"),
-    btn = el.querySelector("#live-collapse");
+    btn = el.querySelector("#live-collapse"), muteBtn = el.querySelector("#live-mute");
+
+  // ping on new CA (browser blocks audio until the first click on the page)
+  const ping = new Audio("/static/ping.mp3");
+  ping.volume = 0.6;
+  let muted = ls("mute") ?? false;
+  const drawMute = () => { muteBtn.textContent = muted ? "🔕" : "🔔"; };
+  drawMute();
+  muteBtn.onclick = (e) => { e.stopPropagation(); muted = !muted; ls("mute", muted); drawMute(); };
 
   const pos = ls("pos") ?? { x: innerWidth - 380, y: innerHeight - 330 };
   const size = ls("size") ?? { w: 360, h: 290 };
@@ -427,14 +436,17 @@ document.addEventListener("keydown", (e) => {
     try {
       const d = await api("calls", { per: 20 });
       const rows = d.rows ?? [];
+      let hasNew = false;
       body.innerHTML = rows.map((r) => {
         const key = r.address + "|" + r.group + "|" + r.called_at;
         const isNew = !first && !seen.has(key);
+        if (isNew) hasNew = true;
         seen.add(key);
         return `<div class="live-row ${isNew ? "new" : ""}"><span class="t">${ago(r.called_at)}</span>
           ${tokenLink(r)} <span style="color:var(--muted)">${fmtMc(r.first_mc)}</span>
           <span class="who"><a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a> · ${esc(r.group)}</span></div>`;
       }).join("") || `<div class="empty">No calls yet.</div>`;
+      if (hasNew && !muted) ping.play().catch(() => {});  // rejected until first user click
       first = false;
     } catch { /* keep last content on transient errors */ }
   }
