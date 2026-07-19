@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.20"; // bump together with VERSION in main.py
+const VERSION = "1.21"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -251,12 +251,18 @@ const pages = {
         ${item("Groups called", d.calls.length)}
         ${item("First called", d.calls[0] ? ago(d.calls[0].called_at) : "—")}
       </div>
-      <div class="panel" style="margin-bottom:18px"><h3>Calls on chart — 📍 marks each call, ⌖ in the timeline jumps to it</h3>
-        <div id="cchart" style="height:280px"><div class="loading">Loading candles…</div></div></div>
-      ${info.pair && info.chain_id ? `<div class="panel" style="margin-bottom:18px;padding:0;overflow:hidden">
-        <iframe src="https://dexscreener.com/${esc(info.chain_id)}/${esc(info.pair)}?embed=1&theme=dark&trades=1&tabs=1&info=0"
-          style="width:100%;height:720px;border:0;display:block" loading="lazy"></iframe>
-      </div>` : `<div class="panel" style="margin-bottom:18px"><div class="empty">No live pool found — chart unavailable.</div></div>`}
+      <div class="panel" style="margin-bottom:18px;padding:0;overflow:hidden">
+        <div class="tabs" style="padding:10px 12px 0">
+          <button class="ctab active" data-c="live">Live chart</button>
+          <button class="ctab" data-c="calls">Calls on chart 📍</button>
+        </div>
+        <div id="chart-live">${info.pair && info.chain_id
+          ? `<iframe src="https://dexscreener.com/${esc(info.chain_id)}/${esc(info.pair)}?embed=1&theme=dark&trades=1&tabs=1&info=0" style="width:100%;height:720px;border:0;display:block" loading="lazy"></iframe>`
+          : `<div class="empty">No live pool found — chart unavailable.</div>`}</div>
+        <div id="chart-calls" style="display:none;padding:12px">
+          <div id="cchart" style="height:320px"><div class="loading">Loading candles…</div></div>
+        </div>
+      </div>
       <div class="panel" style="margin-bottom:18px">
         <div class="tabs">
           <button class="tab active" data-tab="holders">Holders</button>
@@ -268,8 +274,24 @@ const pages = {
         <span style="float:right" class="links">${links}</span></h3><div id="t"></div></div>`;
     $("mc-refresh").onclick = () => render();  // page reload re-fetches live from Dexscreener
 
-    // candlestick with call markers (GeckoTerminal OHLCV via our API)
-    (async () => {
+    // one chart panel, two views: Dexscreener embed <-> calls candlestick
+    let ccLoaded = false, doJump = null, pendingJump = null;
+    const showChart = (which) => {
+      view.querySelectorAll(".ctab").forEach((b) => b.classList.toggle("active", b.dataset.c === which));
+      $("chart-live").style.display = which === "live" ? "" : "none";
+      $("chart-calls").style.display = which === "calls" ? "" : "none";
+      if (which === "calls") loadCallsChart();
+    };
+    view.querySelectorAll(".ctab").forEach((b) => b.onclick = () => showChart(b.dataset.c));
+    window.__ccJump = (ts) => {
+      showChart("calls");
+      if (doJump) doJump(ts); else pendingJump = ts;
+    };
+
+    // candlestick with call markers (GeckoTerminal OHLCV via our API), lazy-built
+    async function loadCallsChart() {
+      if (ccLoaded) { charts.forEach((c) => c.resize()); return; }
+      ccLoaded = true;
       const box = $("cchart");
       const first = d.calls[0]?.called_at ?? Date.now() / 1000 - 86400;
       const span = Date.now() / 1000 - first;
@@ -303,15 +325,16 @@ const pages = {
             itemStyle: { color: "#7c6cff" }, label: { show: false },
           })) } }],
       });
-      window.__ccJump = (ts) => {
+      doJump = (ts) => {
         const i = idxFor(ts);
         ch.dispatchAction({ type: "dataZoom", startValue: Math.max(0, i - 40), endValue: Math.min(times.length - 1, i + 40) });
         ch.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: i });
       };
-    })();
+      if (pendingJump != null) { doJump(pendingJump); pendingJump = null; }
+    }
 
     $("t").append(table([
-      { key: "jump", label: "", fmt: (r) => `<button class="tab" style="padding:1px 8px" title="show on chart" onclick="__ccJump && __ccJump(${r.called_at})">⌖</button>` },
+      { key: "jump", label: "", fmt: (r) => `<button class="jbtn" title="show on calls chart" onclick="__ccJump && __ccJump(${r.called_at})">⌖</button>` },
       { key: "called_at", label: "When", fmt: (r) => new Date(r.called_at * 1000).toLocaleString() },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },

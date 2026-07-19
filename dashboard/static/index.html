@@ -100,10 +100,13 @@ th.num{text-align:right}
 #live-collapse:hover{color:var(--text)}
 
 .tabs{display:flex;gap:8px;margin-bottom:10px}
-.tab{background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:7px;
+.tab,.ctab{background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:7px;
   padding:5px 14px;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:500}
-.tab:hover{color:var(--text)}
-.tab.active{color:var(--text);border-color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent)}
+.tab:hover,.ctab:hover{color:var(--text)}
+.tab.active,.ctab.active{color:var(--text);border-color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent)}
+.jbtn{background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:5px;
+  padding:1px 8px;cursor:pointer;font-size:13px}
+.jbtn:hover{color:var(--text);border-color:var(--accent)}
 .socials{margin-top:6px;font-size:11.5px}
 .socials a{color:var(--accent)}
 #mc-refresh{background:none;border:1px solid var(--border);color:var(--muted);border-radius:5px;
@@ -148,6 +151,6 @@ th.num{text-align:right}
     <div id="view"><div class="loading">Loading…</div></div>
   </main>
 </div>
-<script type="module" src="/static/app.js?v=1.20"></script>
+<script type="module" src="/static/app.js?v=1.21"></script>
 </body>
 </html>
