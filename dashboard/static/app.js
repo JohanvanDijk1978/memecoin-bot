@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.22"; // bump together with VERSION in main.py
+const VERSION = "1.23"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -131,7 +131,7 @@ async function ovFeedRefresh() {
     const d = await api("calls", { per: 25, chain: state.chain });
     el.innerHTML = "";
     el.append(table([
-      { key: "called_at", label: "When", fmt: (r) => `<span style="color:var(--muted)">${ago(r.called_at)}</span>` },
+      { key: "activity_at", label: "When", fmt: (r) => `<span style="color:var(--muted)">${r.rescan ? `<span class="warn" title="re-scanned">↻</span> ` : ""}${ago(r.activity_at)}</span>` },
       { key: "ticker", label: "Token", fmt: tokenLink },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
       { key: "source", label: "Source", fmt: (r) => `<span class="badge">${SRC_LABELS[r.source] ?? esc(r.source)}</span>` },
@@ -139,6 +139,11 @@ async function ovFeedRefresh() {
       { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.eff_peak) },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group" },
+      { key: "scans_total", label: "Scans", num: true, fmt: (r) => `${r.scans_total}× in ${r.groups_n}` },
+      { key: "history", label: "Also called in", sortVal: (r) => r.groups_n,
+        fmt: (r) => (r.history ?? []).filter((h) => h.group !== r.group).slice(0, 2)
+          .map((h) => `${esc(h.group.slice(0, 16))} <span style="color:var(--muted)">${fmtMc(h.mc)}${h.mult && h.mult > 1 ? " " + h.mult.toFixed(1) + "×" : ""} · ${ago(h.called_at)}</span>`)
+          .join("<br>") || "—" },
     ], d.rows));
   } catch { /* keep last content */ }
 }
@@ -493,12 +498,19 @@ document.addEventListener("keydown", (e) => {
       const d = await api("calls", { per: 20 });
       const rows = d.rows ?? [];
       body.innerHTML = rows.map((r) => {
-        const key = r.address + "|" + r.group + "|" + r.called_at;
+        const key = r.address + "|" + r.group + "|" + (r.activity_at ?? r.called_at);
         const isNew = !first && !seen.has(key);
         seen.add(key);
-        return `<div class="live-row ${isNew ? "new" : ""}"><span class="t">${ago(r.called_at)}</span>
-          ${tokenLink(r)} <span style="color:var(--muted)">${fmtMc(r.first_mc)}</span>
-          <span class="who"><a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a> · ${esc(r.group)}</span></div>`;
+        return `<div class="live-row ${isNew ? "new" : ""}" style="display:block">
+          <div style="display:flex;gap:7px;align-items:baseline;white-space:nowrap;overflow:hidden">
+            <span class="t">${r.rescan ? `<span class="warn">↻</span>` : ""}${ago(r.activity_at ?? r.called_at)}</span>
+            ${tokenLink(r)} ${chainBadge(r.chain)}
+            <span style="color:var(--muted)">${fmtMc(r.first_mc)}</span> ${multPeak(r.mult, r.eff_peak)}
+          </div>
+          <div class="who" style="padding-left:41px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            <a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a> · ${esc(r.group)}
+            · ${r.scans_total ?? r.scan_count}× in ${r.groups_n ?? 1} group${(r.groups_n ?? 1) > 1 ? "s" : ""}
+          </div></div>`;
       }).join("") || `<div class="empty">No calls yet.</div>`;
       first = false;
     } catch { /* keep last content on transient errors */ }

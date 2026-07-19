@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.22"              # bump together with VERSION in static/app.js
+VERSION = "1.23"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -94,7 +94,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         """)
         for mig in ("ALTER TABLE calls ADD COLUMN sender_id TEXT NOT NULL DEFAULT ''",   # v1.08
-                    "ALTER TABLE tokens ADD COLUMN chain_id TEXT DEFAULT ''"):           # v1.12
+                    "ALTER TABLE tokens ADD COLUMN chain_id TEXT DEFAULT ''",            # v1.12
+                    "ALTER TABLE calls ADD COLUMN last_scan_at REAL DEFAULT 0"):         # v1.23
             try:
                 c.execute(mig)
             except sqlite3.OperationalError:
@@ -141,10 +142,13 @@ def ingest_history() -> int:
                     peak_mc_bot = MAX(peak_mc_bot, excluded.peak_mc_bot),
                     scan_count  = excluded.scan_count,
                     ticker      = CASE WHEN calls.ticker='' THEN excluded.ticker ELSE calls.ticker END,
-                    sender_id   = CASE WHEN calls.sender_id='' THEN excluded.sender_id ELSE calls.sender_id END
+                    sender_id   = CASE WHEN calls.sender_id='' THEN excluded.sender_id ELSE calls.sender_id END,
+                    last_scan_at = CASE WHEN excluded.scan_count > calls.scan_count
+                                        THEN ? ELSE calls.last_scan_at END
                 """, (address, chain, e.get("group_name", ""), e.get("sender_name", ""),
                       e.get("sender_id", ""), e.get("source", ""), e.get("ticker") or "", first_mc,
-                      e.get("peak_mc") or 0, e.get("scan_count", 1), e.get("timestamp", 0)))
+                      e.get("peak_mc") or 0, e.get("scan_count", 1), e.get("timestamp", 0),
+                      time.time()))
                 n += 1
             first_seen = min((e.get("timestamp", 0) for e in entries), default=0)
             c.execute("""
@@ -289,7 +293,8 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
              CASE WHEN IFNULL(t.chain_id,'')!='' THEN t.chain_id
                   WHEN c.chain='SOL' THEN 'solana' ELSE 'ethereum' END AS eff_chain,
              CASE WHEN c.sender_id!='' THEN c.sender_id ELSE c.sender_name END AS caller_key,
-             MAX(c.first_mc, c.peak_mc_bot, IFNULL(c.peak_mc_live,0)) AS eff_peak
+             MAX(c.first_mc, c.peak_mc_bot, IFNULL(c.peak_mc_live,0)) AS eff_peak,
+             MAX(c.called_at, IFNULL(c.last_scan_at,0)) AS activity_at
       FROM calls c LEFT JOIN tokens t ON t.address = c.address WHERE 1=1
     """
     args: list = []
@@ -307,7 +312,7 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
         sql += """ AND (c.address LIKE ? OR c.ticker LIKE ? OR IFNULL(t.ticker,'') LIKE ?
                    OR c.sender_name LIKE ? OR c.group_name LIKE ?)"""
         args += [f"%{q}%"] * 5
-    sql += " ORDER BY c.called_at DESC"
+    sql += " ORDER BY activity_at DESC"
     with db() as c:
         rows = [dict(r) for r in c.execute(sql, args).fetchall()]
     aliases = caller_aliases()
@@ -536,6 +541,25 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
         rows.sort(key=lambda r: r["first_mc"], reverse=True)
     total = len(rows)
     rows = rows[(page - 1) * per: page * per]
+    # per-address context: total scans, group count, cross-group call history
+    extras: dict[str, dict] = {}
+    addrs = list({r["address"] for r in rows})
+    if addrs:
+        marks = ",".join("?" * len(addrs))
+        with db() as c:
+            sib = c.execute(f"""SELECT address, group_name, called_at, first_mc, peak_mc_bot,
+                                IFNULL(peak_mc_live,0) AS pml, scan_count FROM calls
+                                WHERE address IN ({marks})""", addrs).fetchall()
+        for s in sib:
+            d = extras.setdefault(s["address"], {"groups_n": 0, "scans_total": 0, "history": []})
+            d["groups_n"] += 1
+            d["scans_total"] += s["scan_count"]
+            eff = max(s["first_mc"], s["peak_mc_bot"], s["pml"])
+            d["history"].append({"group": s["group_name"], "called_at": s["called_at"],
+                                 "mc": s["first_mc"],
+                                 "mult": round(eff / s["first_mc"], 2) if s["first_mc"] else None})
+        for d in extras.values():
+            d["history"].sort(key=lambda h: h["called_at"])
     return {"total": total, "page": page,
             "rows": [{"address": r["address"], "ticker": r["tick"], "chain": r["chain_label"],
                       "chain_id": r["dex_chain"],
@@ -544,7 +568,11 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
                       "first_mc": r["first_mc"], "eff_peak": r["eff_peak"],
                       "current_mc": r["current_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,
                       "scan_count": r["scan_count"], "called_at": r["called_at"],
-                      "dead": r["dead"]} for r in rows]}
+                      "activity_at": r["activity_at"],
+                      "rescan": r["activity_at"] > r["called_at"],
+                      "dead": r["dead"],
+                      **extras.get(r["address"], {"groups_n": 1, "scans_total": r["scan_count"], "history": []}),
+                      } for r in rows]}
 
 
 async def _live_refresh(address: str) -> dict:
