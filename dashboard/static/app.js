@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.28"; // bump together with VERSION in main.py
+const VERSION = "1.29"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -110,7 +110,8 @@ const lbCols = (nameLabel, href) => [
   { key: "hit10", label: "≥10×", num: true, fmt: (r) => fmtPct(r.hit10) },
   { key: "avg_mult", label: "Avg ×", num: true, fmt: (r) => fmtMult(r.avg_mult) },
   { key: "med_mult", label: "Med ×", num: true, fmt: (r) => fmtMult(r.med_mult) },
-  { key: "consistency", label: "Score", num: true, fmt: (r) => `<b>${r.consistency.toFixed(2)}</b>` },
+  { key: "win_rate", label: "Win /10", num: true, fmt: (r) => `<b>${r.win_rate.toFixed(1)}</b>`, title: "Reliability — 2× hit-rate, confidence-weighted" },
+  { key: "hit_quality", label: "Qual /10", num: true, fmt: (r) => `<b>${r.hit_quality.toFixed(1)}</b>`, title: "Win magnitude — bigger multiples score higher" },
   { key: "best_call", label: "Best call", sortVal: (r) => r.best_call?.mult ?? 0,
     fmt: (r) => r.best_call ? `${tokenLink(r.best_call)} ${multPeak(r.best_call.mult, r.best_call.peak_mc)}` : "—" },
   { key: "last_active", label: "Active", num: true, fmt: (r) => `<span style="color:var(--muted)">${ago(r.last_active)}</span>` },
@@ -202,17 +203,17 @@ const pages = {
 
   async callers() {
     const rows = await api("callers", { days: state.days, chain: state.chain, min_calls: 2 });
-    view.innerHTML = `<div class="panel"><h3>${rows.length} callers · min 2 calls · score = 2× hit-rate weighted by sample size</h3><div id="t"></div></div>`;
-    $("t").append(table(lbCols("Caller", "#/caller/"), rows, { defaultSort: "consistency" }));
+    view.innerHTML = `<div class="panel"><h3>${rows.length} callers · min 2 calls · Win = reliability (2× hit-rate, confidence-weighted) · Qual = win magnitude · both /10</h3><div id="t"></div></div>`;
+    $("t").append(table(lbCols("Caller", "#/caller/"), rows, { defaultSort: "win_rate" }));
   },
 
   async groups() {
     const rows = await api("groups", { days: state.days, chain: state.chain });
     const cols = lbCols("Group", "#/group/");
-    cols.splice(9, 0, { key: "active_callers", label: "Callers", num: true },
+    cols.splice(10, 0, { key: "active_callers", label: "Callers", num: true },
       { key: "top_caller", label: "Top caller", fmt: (r) => r.top_caller ? `<a href="#/caller/${encodeURIComponent(r.top_caller_key ?? r.top_caller)}">${esc(r.top_caller)}</a>` : "—" });
     view.innerHTML = `<div class="panel"><h3>${rows.length} groups</h3><div id="t"></div></div>`;
-    $("t").append(table(cols, rows, { defaultSort: "consistency" }));
+    $("t").append(table(cols, rows, { defaultSort: "win_rate" }));
   },
 
   async sources() {
