@@ -45,6 +45,12 @@ CHANNEL_ID          = os.getenv("DEX_UPDATES_CHANNEL_ID", "")
 DISCORD_WEBHOOK     = os.getenv("DEX_UPDATES_DISCORD_WEBHOOK", "")
 POLL_SECONDS        = int(os.getenv("DEX_WATCHER_POLL_SECONDS", "30"))
 MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_MIN_AGE_HOURS", "24"))
+# If a token was alerted more than REALERT_HOURS ago and reappears in the
+# Dexscreener feed, treat it as a new paid update and alert again. Keeps
+# dedup for the "same paid update still visible in the feed" case while
+# still catching genuine repeat purchases. Default 24h.
+REALERT_HOURS       = int(os.getenv("DEX_WATCHER_REALERT_HOURS", "24"))
+REALERT_TTL_SECS    = REALERT_HOURS * 3600
 INITIAL_DELAY_SECS  = 60  # warmup before first poll
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -79,6 +85,12 @@ def _save_seen(seen: dict) -> None:
 
 _seen: dict = _load_seen()
 _save_lock = asyncio.Lock()
+
+# Per-token "don't re-check until" timestamps for tokens skipped because they
+# were too young. In-memory only — on restart we'll re-poll each once and
+# repopulate. Keeps us from hammering Dexscreener with the same young-token
+# check every 10s for hours until it ages past MIN_AGE_HOURS.
+_age_gated: dict = {}  # address -> unix_ts_when_eligible_to_recheck
 
 
 # ── Dexscreener client ────────────────────────────────────────────────────
@@ -434,7 +446,17 @@ async def _process_feed(session: aiohttp.ClientSession, feed: list, event_type: 
             continue
 
         seen_key = f"{event_type}:{address}"
-        if seen_key in _seen:
+        seen_ts = _seen.get(seen_key)
+        if isinstance(seen_ts, (int, float)) and (time.time() - seen_ts) < REALERT_TTL_SECS:
+            # Same paid update still lingering in the feed — don't re-alert.
+            continue
+        # else: never seen OR seen long enough ago to count as a fresh paid update
+
+        # If we recently determined this token was too young, skip silently
+        # until the deadline passes. Avoids re-hitting Dexscreener every 10s
+        # for hours on a coin that's obviously not going to qualify yet.
+        gate_deadline = _age_gated.get(address, 0)
+        if gate_deadline and time.time() < gate_deadline:
             continue
 
         market = await _fetch_pair_data(session, address)
@@ -445,10 +467,18 @@ async def _process_feed(session: aiohttp.ClientSession, feed: list, event_type: 
             logger.info(f"dex_watcher: skip {address} ({event_type}) — no age data")
             continue
         if age_h < MIN_AGE_HOURS:
-            # Don't mark seen — the token will age past the threshold eventually
-            # and we want it to fire when it does (e.g. later paid update at 24h+).
-            logger.info(f"dex_watcher: skip {address} ({event_type}) — {age_h:.1f}h < {MIN_AGE_HOURS}h")
+            # Compute when this token will be eligible; skip until then to
+            # spare Dexscreener API budget. 5-minute lead-in so we catch the
+            # transition slightly early rather than exactly at the threshold.
+            hours_until_eligible = MIN_AGE_HOURS - age_h
+            _age_gated[address] = time.time() + max(60, (hours_until_eligible - 0.083) * 3600)
+            logger.info(
+                f"dex_watcher: skip {address} ({event_type}) — "
+                f"{age_h:.1f}h < {MIN_AGE_HOURS}h, gated for {hours_until_eligible:.1f}h"
+            )
             continue
+        # Cleared the age gate — no need to keep the entry around.
+        _age_gated.pop(address, None)
 
         ok = await _send_alert(profile, market, event_type)
         if ok:

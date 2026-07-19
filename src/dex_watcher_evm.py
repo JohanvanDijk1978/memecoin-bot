@@ -43,6 +43,10 @@ CHANNEL_ID          = os.getenv("DEX_UPDATES_EVM_CHANNEL_ID", "")
 DISCORD_WEBHOOK     = os.getenv("DEX_UPDATES_EVM_DISCORD_WEBHOOK", "")
 POLL_SECONDS        = int(os.getenv("DEX_WATCHER_EVM_POLL_SECONDS", "30"))
 MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_EVM_MIN_AGE_HOURS", "12"))
+# See dex_watcher.py for rationale — re-alert after this many hours if a
+# previously-alerted token re-appears in the Dexscreener feed.
+REALERT_HOURS       = int(os.getenv("DEX_WATCHER_EVM_REALERT_HOURS", "24"))
+REALERT_TTL_SECS    = REALERT_HOURS * 3600
 INITIAL_DELAY_SECS  = 60
 
 _CHAINS_RAW = os.getenv("DEX_WATCHER_EVM_CHAINS", "ethereum,bsc,robinhood")
@@ -80,6 +84,11 @@ def _save_seen(seen: dict) -> None:
 
 _seen: dict = _load_seen()
 _save_lock = asyncio.Lock()
+
+# Per-token "don't re-check until" timestamps for tokens skipped for being too
+# young. See dex_watcher.py for the rationale — same fix keeps us from
+# hitting Dexscreener on the same young token every poll cycle.
+_age_gated: dict = {}  # address -> unix_ts_when_eligible_to_recheck
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -401,7 +410,13 @@ async def _process_feed(session: aiohttp.ClientSession, feed: list, event_type: 
             continue
 
         seen_key = f"{event_type}:{address}"
-        if seen_key in _seen:
+        seen_ts = _seen.get(seen_key)
+        if isinstance(seen_ts, (int, float)) and (time.time() - seen_ts) < REALERT_TTL_SECS:
+            continue
+
+        # Skip silently until this token's age-gate deadline passes.
+        gate_deadline = _age_gated.get(address, 0)
+        if gate_deadline and time.time() < gate_deadline:
             continue
 
         market = await _fetch_pair_data(session, address)
@@ -414,11 +429,14 @@ async def _process_feed(session: aiohttp.ClientSession, feed: list, event_type: 
                 logger.info(f"dex_watcher_evm: skip {address} ({event_type}, {chain}) — no age data")
                 continue
             if age_h < MIN_AGE_HOURS:
+                hours_until_eligible = MIN_AGE_HOURS - age_h
+                _age_gated[address] = time.time() + max(60, (hours_until_eligible - 0.083) * 3600)
                 logger.info(
                     f"dex_watcher_evm: skip {address} ({event_type}, {chain}) "
-                    f"— {age_h:.1f}h < {MIN_AGE_HOURS}h"
+                    f"— {age_h:.1f}h < {MIN_AGE_HOURS}h, gated for {hours_until_eligible:.1f}h"
                 )
                 continue
+            _age_gated.pop(address, None)
 
         ok = await _send_alert(profile, market, event_type, chain)
         if ok:
