@@ -44,7 +44,8 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.29"              # bump together with VERSION in static/app.js
+HIT_CEIL = 1000.0             # winning multiple that maps to 100% Hit Rate
+VERSION = "1.30"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -366,37 +367,25 @@ def agg(rows):
 
 
 def win_rate_score(rows):
-    """Reliability (1-10): Wilson lower confidence bound of the 2x hit-rate.
-    Small samples are discounted by real statistical uncertainty (not an
-    arbitrary curve); anchored so ~0.85 lower-bound maps to 10."""
-    import math
+    """Win Rate (%): pure share of calls that reached >=2x. No sample-size
+    weighting — 2 wins of 2 calls reads 100%."""
     mults = [r["mult"] for r in rows if r["mult"]]
-    n = len(mults)
-    if not n:
-        return 1.0
-    p = sum(1 for m in mults if m >= WIN_X) / n
-    z = 1.64                                        # ~90% one-sided confidence
-    z2 = z * z
-    wilson = (p + z2 / (2 * n) - z * math.sqrt((p * (1 - p) + z2 / (4 * n)) / n)) / (1 + z2 / n)
-    return round(1 + 9 * min(max(wilson / 0.85, 0.0), 1.0), 1)
+    if not mults:
+        return 0.0
+    return round(100 * sum(1 for m in mults if m >= WIN_X) / len(mults), 1)
 
 
-def hit_quality_score(rows):
-    """Magnitude (1-10): robust log-scaled measure of how big the wins are.
-    100x counts far more than 2x; winsorized + shrunk toward the 2x floor so a
-    single moonshot can't max it, then blended with the best call so tails still
-    move the score. Anchored so an avg winning multiple of ~100x maps to 10."""
+def hit_rate_score(rows):
+    """Hit Rate (%): quality of the wins. Each winning multiple is log-scaled to
+    a 0-1 quality (100% at HIT_CEIL x) then averaged over the wins. Log scaling
+    gives diminishing returns (a 400x beats a 20x but isn't 20x as valuable), and
+    averaging the already-compressed values stops one moonshot from dominating."""
     import math
     wins = [r["mult"] for r in rows if r["mult"] and r["mult"] >= WIN_X]
     if not wins:
-        return 1.0
-    L = [min(math.log10(m), 3.0) for m in wins]     # winsorize at 1000x
-    L0 = math.log10(WIN_X)                            # baseline: a bare 2x win
-    lam = 3.0                                         # shrink strength (~3 virtual 2x wins)
-    typical = (sum(L) + lam * L0) / (len(L) + lam)    # geometric mean shrunk to baseline
-    peak = typical + (max(L) - typical) * len(L) / (len(L) + 2)   # best call, confidence-scaled
-    qlog = 0.6 * typical + 0.4 * peak
-    return round(1 + 9 * min(max((qlog - L0) / (2.0 - L0), 0.0), 1.0), 1)  # 2.0 = log10(100x)
+        return 0.0
+    ceil = math.log10(HIT_CEIL)
+    return round(100 * sum(min(1.0, math.log10(m) / ceil) for m in wins) / len(wins), 1)
 
 
 def leaderboard(rows, key, display=None):
@@ -418,7 +407,7 @@ def leaderboard(rows, key, display=None):
             "name": label,
             "key": k,
             "win_rate": win_rate_score(rs),
-            "hit_quality": hit_quality_score(rs),
+            "hit_rate": hit_rate_score(rs),
             "last_active": max(r["called_at"] for r in rs),
             "best_call": {"ticker": best["tick"], "address": best["address"],
                           "chain_id": best["dex_chain"], "mult": round(best["mult"], 2),
@@ -426,7 +415,7 @@ def leaderboard(rows, key, display=None):
         })
         out.append(a)
     # deterministic: win rate desc, quality desc, calls desc, then key as stable tiebreak
-    out.sort(key=lambda x: (-x["win_rate"], -x["hit_quality"], -x["calls"], x["key"]))
+    out.sort(key=lambda x: (-x["win_rate"], -x["hit_rate"], -x["calls"], x["key"]))
     return out
 
 # ---------------------------------------------------------------- app / auth
@@ -704,7 +693,7 @@ def profile(rows):
                      "group": r["group_name"], "caller": r["sender_name"],
                      "caller_key": r["caller_key"], "called_at": r["called_at"]}
     return {"summary": agg(rows), "win_rate": win_rate_score(rows),
-            "hit_quality": hit_quality_score(rows), "monthly": months,
+            "hit_rate": hit_rate_score(rows), "monthly": months,
             "chains": chains, "typical_mcap": round(statistics.median(mcs)) if mcs else 0,
             "best": [fmt(r) for r in best], "worst": [fmt(r) for r in worst],
             "recent": [fmt(r) for r in rows[:15]]}
