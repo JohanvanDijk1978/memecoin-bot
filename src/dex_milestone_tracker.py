@@ -120,8 +120,18 @@ def register_token(
         return
     if not (tg_message_id or dc_message_id):
         return
+
+    # If this address is already tracked, overwrite. Re-registration happens
+    # when a project buys a *second* paid update on the same token (after
+    # dex_watcher's REALERT_TTL passes) — we want milestone replies to attach
+    # to the newer alert message and progress to reset from the newer mcap.
     if address in _state:
-        return
+        old = _state[address]
+        logger.info(
+            f"milestone_tracker: re-registering {address} — "
+            f"was ${old.get('initial_mc', 0):,.0f}, now ${initial_mc:,.0f} "
+            f"(hit list resets)"
+        )
 
     _state[address] = {
         "initial_mc":  initial_mc,
@@ -131,7 +141,7 @@ def register_token(
         "dc_msg_id":   dc_message_id,
         "chain":       chain or "solana",
         "posted_at":   time.time(),
-        "hit":         [],  # milestones already announced
+        "hit":         [],  # milestones already announced (reset on re-register)
     }
     _save(_state)
     logger.info(
