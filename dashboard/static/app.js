@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.27"; // bump together with VERSION in main.py
+const VERSION = "1.28"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -155,8 +155,8 @@ async function ovFeedRefresh() {
       { key: "ticker", label: "Token", fmt: (r) => tokenIcon(r) + tokenLink(r) },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
       { key: "source", label: "Source", fmt: (r) => `<span class="badge">${SRC_LABELS[r.source] ?? esc(r.source)}</span>` },
+      { key: "current_mc", label: "MC now", num: true, fmt: (r) => r.current_mc ? `<b>${fmtMc(r.current_mc)}</b>` : "—" },
       { key: "first_mc", label: "MC at post", num: true, fmt: (r) => fmtMc(r.first_mc) },
-      { key: "current_mc", label: "MC now", num: true, fmt: (r) => r.current_mc ? fmtMc(r.current_mc) : "—" },
       { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.eff_peak) },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group" },
@@ -444,7 +444,7 @@ document.addEventListener("keydown", (e) => {
         if (isNew) hasNew = true;
         seen.add(key);
         return `<div class="live-row ${isNew ? "new" : ""}"><span class="t">${ago(r.called_at)}</span>
-          ${tokenLink(r)} <span style="color:var(--muted)" title="MC at post → MC now">${fmtMc(r.first_mc)}${r.current_mc ? ` → ${fmtMc(r.current_mc)}` : ""}</span>
+          ${tokenLink(r)} <span style="color:var(--muted)" title="MC now · MC at post">${r.current_mc ? `<b>${fmtMc(r.current_mc)}</b> · ` : ""}${fmtMc(r.first_mc)}</span>
           <span class="who"><a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a> · ${esc(r.group)}</span></div>`;
       }).join("") || `<div class="empty">No calls yet.</div>`;
       if (hasNew && !muted) ping.play().catch(() => {});  // rejected until first user click
