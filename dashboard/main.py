@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.21"              # bump together with VERSION in static/app.js
+VERSION = "1.22"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -99,6 +99,16 @@ def init_db():
                 c.execute(mig)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        try:  # v1.22: per-call peak — a call only gets credit for price action AFTER it
+            c.execute("ALTER TABLE calls ADD COLUMN peak_mc_live REAL DEFAULT 0")
+            # one-time backfill: grant the token's observed peak only to calls
+            # that were made BEFORE that peak was observed
+            c.execute("""UPDATE calls SET peak_mc_live = IFNULL((
+                           SELECT t.peak_mc_dash FROM tokens t
+                           WHERE t.address = calls.address
+                             AND t.peak_at >= calls.called_at), 0)""")
+        except sqlite3.OperationalError:
+            pass
 
 # ---------------------------------------------------------------- ingest
 
@@ -210,6 +220,9 @@ async def poll_batch(client: httpx.AsyncClient, addresses: list[str]):
                   WHERE address=?
                 """, (hit["mc"], hit["ticker"], hit["mc"], now, hit["mc"], now,
                       hit["chain_id"], a))
+                # per-call peak: every existing call row predates this observation
+                c.execute("UPDATE calls SET peak_mc_live = MAX(peak_mc_live, ?) WHERE address = ?",
+                          (hit["mc"], a))
             else:
                 c.execute("""
                   UPDATE tokens SET miss_count=miss_count+1, last_checked=?,
@@ -276,7 +289,7 @@ def fetch_calls(days=0, chain="", caller="", group="", source="", q=""):
              CASE WHEN IFNULL(t.chain_id,'')!='' THEN t.chain_id
                   WHEN c.chain='SOL' THEN 'solana' ELSE 'ethereum' END AS eff_chain,
              CASE WHEN c.sender_id!='' THEN c.sender_id ELSE c.sender_name END AS caller_key,
-             MAX(c.first_mc, c.peak_mc_bot, IFNULL(t.peak_mc_dash,0)) AS eff_peak
+             MAX(c.first_mc, c.peak_mc_bot, IFNULL(c.peak_mc_live,0)) AS eff_peak
       FROM calls c LEFT JOIN tokens t ON t.address = c.address WHERE 1=1
     """
     args: list = []
@@ -572,6 +585,8 @@ async def _live_refresh(address: str) -> dict:
                   WHERE address=?
                 """, (mc, (best.get("baseToken") or {}).get("symbol", ""), mc, now, mc, now,
                       (best.get("chainId") or "").lower(), address))
+                c.execute("UPDATE calls SET peak_mc_live = MAX(peak_mc_live, ?) WHERE address = ?",
+                          (mc, address))
             _cache.clear()
     except Exception as e:
         log.warning(f"live refresh failed for {address}: {e}")
