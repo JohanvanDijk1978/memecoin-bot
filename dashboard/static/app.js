@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.23"; // bump together with VERSION in main.py
+const VERSION = "1.24"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -124,6 +124,12 @@ setInterval(() => ovFeedRefresh(), 30000);
 
 const SRC_LABELS = { telegram: "TG", discord: "DC", dex_watcher: "DEX SOL", dex_watcher_evm: "DEX EVM" };
 
+// token pfp via Dexscreener's static CDN (predictable URL, hides itself on 404)
+const tokenIcon = (r) => {
+  const cid = r.chain_id || (r.address.startsWith("0x") ? "ethereum" : "solana");
+  return `<img class="pfp" loading="lazy" src="https://dd.dexscreener.com/ds-data/tokens/${esc(cid)}/${esc(r.address)}.png?size=lg" onerror="this.remove()">`;
+};
+
 async function ovFeedRefresh() {
   const el = document.getElementById("ovfeed");
   if (!el) return;  // not on the overview page
@@ -132,7 +138,7 @@ async function ovFeedRefresh() {
     el.innerHTML = "";
     el.append(table([
       { key: "activity_at", label: "When", fmt: (r) => `<span style="color:var(--muted)">${r.rescan ? `<span class="warn" title="re-scanned">↻</span> ` : ""}${ago(r.activity_at)}</span>` },
-      { key: "ticker", label: "Token", fmt: tokenLink },
+      { key: "ticker", label: "Token", fmt: (r) => tokenIcon(r) + tokenLink(r) },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
       { key: "source", label: "Source", fmt: (r) => `<span class="badge">${SRC_LABELS[r.source] ?? esc(r.source)}</span>` },
       { key: "first_mc", label: "MC at post", num: true, fmt: (r) => fmtMc(r.first_mc) },
@@ -498,19 +504,12 @@ document.addEventListener("keydown", (e) => {
       const d = await api("calls", { per: 20 });
       const rows = d.rows ?? [];
       body.innerHTML = rows.map((r) => {
-        const key = r.address + "|" + r.group + "|" + (r.activity_at ?? r.called_at);
+        const key = r.address + "|" + r.group + "|" + r.called_at;
         const isNew = !first && !seen.has(key);
         seen.add(key);
-        return `<div class="live-row ${isNew ? "new" : ""}" style="display:block">
-          <div style="display:flex;gap:7px;align-items:baseline;white-space:nowrap;overflow:hidden">
-            <span class="t">${r.rescan ? `<span class="warn">↻</span>` : ""}${ago(r.activity_at ?? r.called_at)}</span>
-            ${tokenLink(r)} ${chainBadge(r.chain)}
-            <span style="color:var(--muted)">${fmtMc(r.first_mc)}</span> ${multPeak(r.mult, r.eff_peak)}
-          </div>
-          <div class="who" style="padding-left:41px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-            <a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a> · ${esc(r.group)}
-            · ${r.scans_total ?? r.scan_count}× in ${r.groups_n ?? 1} group${(r.groups_n ?? 1) > 1 ? "s" : ""}
-          </div></div>`;
+        return `<div class="live-row ${isNew ? "new" : ""}"><span class="t">${ago(r.called_at)}</span>
+          ${tokenLink(r)} <span style="color:var(--muted)">${fmtMc(r.first_mc)}</span>
+          <span class="who"><a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a> · ${esc(r.group)}</span></div>`;
       }).join("") || `<div class="empty">No calls yet.</div>`;
       first = false;
     } catch { /* keep last content on transient errors */ }

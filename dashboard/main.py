@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.23"              # bump together with VERSION in static/app.js
+VERSION = "1.24"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
