@@ -36,6 +36,25 @@ CHANNEL_IDS_2: List[int] = [
 DISCORD_MIRROR_CHANNEL_ID = int(os.getenv("DISCORD_MIRROR_CHANNEL_ID", "0") or 0)
 DISCORD_MIRROR_TOPIC_ID   = int(os.getenv("DISCORD_MIRROR_TOPIC_ID", "0") or 0)
 
+
+def _mirror_feed_append(sender: str, text: str, image_url: str):
+    """Also record mirrored messages to data/mirror_feed.jsonl so the
+    dashboard can show the mirror next to its live CA feed."""
+    import json as _json, time as _time
+    try:
+        os.makedirs("data", exist_ok=True)
+        path = "data/mirror_feed.jsonl"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps({"ts": _time.time(), "sender": sender,
+                                 "text": (text or "")[:600], "image": image_url}) + "\n")
+        if os.path.getsize(path) > 2_000_000:  # cap file size, keep newest 500
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()[-500:]
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+    except Exception as e:
+        logger.warning(f"mirror feed append failed: {e}")
+
 # Dedup — if both Discord accounts happen to see the same channel, both
 # on_message handlers fire. Without this we'd double-post to Telegram.
 _mirror_seen: dict = {}  # message_id -> timestamp
@@ -384,6 +403,7 @@ try:
                         image_url=img_url,
                         topic_id=DISCORD_MIRROR_TOPIC_ID,
                     ))
+                    _mirror_feed_append(sender, message.clean_content or "", img_url)
                 except Exception as e:
                     logger.warning(f"discord mirror failed for msg {message.id}: {e}")
 

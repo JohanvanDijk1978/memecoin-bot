@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.24"; // bump together with VERSION in main.py
+const VERSION = "1.25"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -121,6 +121,20 @@ let liveES = null;
 try { liveES = new EventSource("/api/stream"); } catch { /* fallback polling covers it */ }
 liveES?.addEventListener("message", () => ovFeedRefresh());
 setInterval(() => ovFeedRefresh(), 30000);
+setInterval(() => ovMirrorRefresh(), 10000);
+
+async function ovMirrorRefresh() {
+  const el = document.getElementById("ovmirror");
+  if (!el) return;  // not on the overview page
+  try {
+    const d = await api("mirror", { limit: 40 });
+    el.innerHTML = (d.messages ?? []).map((m) => `
+      <div class="mrow"><span class="t">${ago(m.ts)}</span> <b>${esc(m.sender)}</b>
+        ${m.image ? ` <a href="${esc(m.image)}" target="_blank" title="image">🖼</a>` : ""}
+        <div class="mtxt">${esc(m.text)}</div></div>`).join("")
+      || `<div class="empty">No mirrored messages yet — fills as new ones arrive.</div>`;
+  } catch { /* keep last content */ }
+}
 
 const SRC_LABELS = { telegram: "TG", discord: "DC", dex_watcher: "DEX SOL", dex_watcher_evm: "DEX EVM" };
 
@@ -159,10 +173,20 @@ const pages = {
   async overview() {
     const d = await api("overview", { days: state.days, chain: state.chain });
     view.innerHTML = kpis(d) + `
-      <div class="panel" style="margin-bottom:18px"><h3>Live feed — group calls · dex watcher sol · dex watcher evm</h3>
-        <div id="ovfeed"><div class="loading">Loading…</div></div></div>
+      <div class="grid2" style="margin-bottom:18px;grid-template-columns:3fr 2fr">
+        <div class="panel"><h3>Live feed — group calls · dex watchers <span style="float:right;color:var(--dim);font-weight:400">drag bottom edge to resize</span></h3>
+          <div id="ovfeed-wrap" class="vresize"><div id="ovfeed"><div class="loading">Loading…</div></div></div></div>
+        <div class="panel"><h3>habibifnf mirror</h3>
+          <div id="ovmirror-wrap" class="vresize"><div id="ovmirror"><div class="loading">Loading…</div></div></div></div>
+      </div>
       <div class="panel"><h3>Top movers — ${$("f-days").selectedOptions[0].text.toLowerCase()}</h3><div id="movers"></div></div>`;
+    for (const [id, k] of [["ovfeed-wrap", "ovh"], ["ovmirror-wrap", "ovmh"]]) {
+      const w = $(id);
+      w.style.height = localStorage.getItem(k) ?? "360px";
+      new ResizeObserver(() => { if (w.offsetHeight > 40) localStorage.setItem(k, w.offsetHeight + "px"); }).observe(w);
+    }
     ovFeedRefresh();
+    ovMirrorRefresh();
     $("movers").append(table([
       { key: "ticker", label: "Token", fmt: tokenLink },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
@@ -262,90 +286,14 @@ const pages = {
         ${item("Groups called", d.calls.length)}
         ${item("First called", d.calls[0] ? ago(d.calls[0].called_at) : "—")}
       </div>
-      <div class="panel" style="margin-bottom:18px;padding:0;overflow:hidden">
-        <div class="tabs" style="padding:10px 12px 0">
-          <button class="ctab active" data-c="live">Live chart</button>
-          <button class="ctab" data-c="calls">Calls on chart 📍</button>
-        </div>
-        <div id="chart-live">${info.pair && info.chain_id
-          ? `<iframe src="https://dexscreener.com/${esc(info.chain_id)}/${esc(info.pair)}?embed=1&theme=dark&trades=1&tabs=1&info=0" style="width:100%;height:720px;border:0;display:block" loading="lazy"></iframe>`
-          : `<div class="empty">No live pool found — chart unavailable.</div>`}</div>
-        <div id="chart-calls" style="display:none;padding:12px">
-          <div id="cchart" style="height:320px"><div class="loading">Loading candles…</div></div>
-        </div>
-      </div>
-      <div class="panel" style="margin-bottom:18px">
-        <div class="tabs">
-          <button class="tab active" data-tab="holders">Holders</button>
-          <button class="tab" data-tab="traders">Top traders</button>
-        </div>
-        <div id="tabbody"><div class="loading">Loading…</div></div>
-      </div>
+      ${info.pair && info.chain_id ? `<div class="panel" style="margin-bottom:18px;padding:0;overflow:hidden">
+        <iframe src="https://dexscreener.com/${esc(info.chain_id)}/${esc(info.pair)}?embed=1&theme=dark&trades=1&tabs=1&info=0" style="width:100%;height:720px;border:0;display:block" loading="lazy"></iframe>
+      </div>` : `<div class="panel" style="margin-bottom:18px"><div class="empty">No live pool found — chart unavailable.</div></div>`}
       <div class="panel"><h3>Call timeline — earliest caller: <b style="color:var(--text)">${esc(d.earliest ?? "?")}</b>
         <span style="float:right" class="links">${links}</span></h3><div id="t"></div></div>`;
     $("mc-refresh").onclick = () => render();  // page reload re-fetches live from Dexscreener
 
-    // one chart panel, two views: Dexscreener embed <-> calls candlestick
-    let ccLoaded = false, doJump = null, pendingJump = null;
-    const showChart = (which) => {
-      view.querySelectorAll(".ctab").forEach((b) => b.classList.toggle("active", b.dataset.c === which));
-      $("chart-live").style.display = which === "live" ? "" : "none";
-      $("chart-calls").style.display = which === "calls" ? "" : "none";
-      if (which === "calls") loadCallsChart();
-    };
-    view.querySelectorAll(".ctab").forEach((b) => b.onclick = () => showChart(b.dataset.c));
-    window.__ccJump = (ts) => {
-      showChart("calls");
-      if (doJump) doJump(ts); else pendingJump = ts;
-    };
-
-    // candlestick with call markers (GeckoTerminal OHLCV via our API), lazy-built
-    async function loadCallsChart() {
-      if (ccLoaded) { charts.forEach((c) => c.resize()); return; }
-      ccLoaded = true;
-      const box = $("cchart");
-      const first = d.calls[0]?.called_at ?? Date.now() / 1000 - 86400;
-      const span = Date.now() / 1000 - first;
-      const tf = span < 20 * 3600 ? "minute" : span < 40 * 86400 ? "hour" : "day";
-      const o = await api(`token/${addr}/ohlcv`, { pair: info.pair ?? "", network: info.chain_id ?? "", tf });
-      if (!o.candles?.length) {
-        box.parentElement.innerHTML = `<div class="empty">No OHLCV history available for this pool.</div>`;
-        return;
-      }
-      const times = o.candles.map((c) => c[0]);
-      const idxFor = (ts) => {
-        let best = 0;
-        times.forEach((t, i) => { if (Math.abs(t - ts) < Math.abs(times[best] - ts)) best = i; });
-        return best;
-      };
-      box.innerHTML = "";
-      const ch = chart(box, {
-        grid: { left: 60, right: 15, top: 15, bottom: 42 },
-        xAxis: { type: "category", ...axis(),
-          data: times.map((t) => new Date(t * 1000).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })) },
-        yAxis: { type: "value", scale: true, ...axis() },
-        dataZoom: [{ type: "inside" }, { type: "slider", height: 16, bottom: 4,
-          borderColor: "#232734", backgroundColor: "#101218",
-          fillerColor: "rgba(124,108,255,.15)", textStyle: { color: "#5c6070" } }],
-        series: [{ type: "candlestick",
-          data: o.candles.map((c) => [c[1], c[4], c[3], c[2]]),  // o,c,l,h
-          itemStyle: { color: "#3fdd8f", color0: "#ff5c6c", borderColor: "#3fdd8f", borderColor0: "#ff5c6c" },
-          markPoint: { data: d.calls.map((c) => ({
-            coord: [idxFor(c.called_at), o.candles[idxFor(c.called_at)][2]],
-            name: c.caller, symbol: "pin", symbolSize: 26,
-            itemStyle: { color: "#7c6cff" }, label: { show: false },
-          })) } }],
-      });
-      doJump = (ts) => {
-        const i = idxFor(ts);
-        ch.dispatchAction({ type: "dataZoom", startValue: Math.max(0, i - 40), endValue: Math.min(times.length - 1, i + 40) });
-        ch.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: i });
-      };
-      if (pendingJump != null) { doJump(pendingJump); pendingJump = null; }
-    }
-
     $("t").append(table([
-      { key: "jump", label: "", fmt: (r) => `<button class="jbtn" title="show on calls chart" onclick="__ccJump && __ccJump(${r.called_at})">⌖</button>` },
       { key: "called_at", label: "When", fmt: (r) => new Date(r.called_at * 1000).toLocaleString() },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },
@@ -354,30 +302,6 @@ const pages = {
       { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.mult * r.mc_at_call) },
       { key: "scan_count", label: "Scans", num: true },
     ], d.calls, { defaultSort: "called_at" }));
-
-    const showTab = async (which) => {
-      document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === which));
-      const body = $("tabbody");
-      if (which === "traders") {
-        body.innerHTML = `<div class="empty">Per-wallet trader stats aren't in any keyless API — see
-          <a href="${d.links.gmgn ?? "#"}" target="_blank" style="color:var(--accent)">GMGN ↗</a> or
-          <a href="${d.links.axiom ?? "#"}" target="_blank" style="color:var(--accent)">Axiom ↗</a>.
-          Add a Birdeye API key to embed them here.</div>`;
-        return;
-      }
-      body.innerHTML = `<div class="loading">Loading…</div>`;
-      const h = await api(`token/${addr}/holders`);
-      if (h.unsupported) { body.innerHTML = `<div class="empty">${esc(h.reason ?? "unavailable")}</div>`; return; }
-      body.innerHTML = "";
-      body.append(table([
-        { key: "rank", label: "#", num: true },
-        { key: "address", label: "Token account", fmt: (r) => `<a class="mono" href="https://solscan.io/account/${r.address}" target="_blank">${r.address.slice(0, 4)}…${r.address.slice(-4)}</a>` },
-        { key: "amount", label: "Amount", num: true, fmt: (r) => r.amount >= 1e6 ? (r.amount / 1e6).toFixed(2) + "M" : Math.round(r.amount).toLocaleString() },
-        { key: "pct", label: "% supply", num: true, fmt: (r) => r.pct == null ? "—" : `<span class="${r.pct >= 5 ? "warn" : ""}">${r.pct}%</span>` },
-      ], h.holders.map((r, i) => ({ ...r, rank: i + 1 })), { defaultSort: "amount" }));
-    };
-    document.querySelectorAll(".tab").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
-    showTab("holders");
   },
 
   async caller(_, name) { await profilePage("caller", name); },

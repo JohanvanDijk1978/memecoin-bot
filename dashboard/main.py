@@ -44,7 +44,7 @@ MIN_LIQ_USD = 250             # ignore mcap from pools with less liquidity than 
 CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
-VERSION = "1.24"              # bump together with VERSION in static/app.js
+VERSION = "1.25"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -621,66 +621,6 @@ async def _live_refresh(address: str) -> dict:
     return out
 
 
-SOL_RPC = "https://api.mainnet-beta.solana.com"
-GT_NETWORKS = {"solana": "solana", "ethereum": "eth", "bsc": "bsc", "base": "base"}
-
-
-@app.get("/api/token/{address}/ohlcv")
-async def token_ohlcv(address: str, pair: str = "", network: str = "", tf: str = "hour"):
-    """Candles for the token's best pool via GeckoTerminal (free tier).
-    pair/network come from the page's live Dexscreener fetch."""
-    net = GT_NETWORKS.get(network)
-    if not (pair and net) or tf not in ("minute", "hour", "day"):
-        return {"candles": []}
-    key = f"ohlcv:{net}:{pair}:{tf}"
-    hit = _cache.get(key)
-    if hit and time.time() - hit[0] < 300:
-        return hit[1]
-    try:
-        async with httpx.AsyncClient(headers={"User-Agent": "memedash/1.0"}) as client:
-            r = await client.get(
-                f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{pair}/ohlcv/{tf}",
-                params={"limit": 1000}, timeout=15)
-            r.raise_for_status()
-            lst = ((((r.json() or {}).get("data") or {}).get("attributes") or {})
-                   .get("ohlcv_list") or [])
-        # ascending [ts, o, h, l, c]
-        candles = [[int(x[0]), x[1], x[2], x[3], x[4]] for x in reversed(lst)]
-        out = {"candles": candles}
-        _cache[key] = (time.time(), out)
-        return out
-    except Exception as e:
-        return {"candles": [], "error": str(e)}
-
-
-@app.get("/api/token/{address}/holders")
-async def token_holders(address: str):
-    """Top 20 token accounts via public Solana RPC (free, keyless). EVM chains
-    have no keyless holder API — needs e.g. a Birdeye key."""
-    if address.startswith("0x"):
-        return {"unsupported": True,
-                "reason": "Holder data for EVM chains needs a keyed API (e.g. Birdeye)."}
-    try:
-        async with httpx.AsyncClient() as client:
-            largest = await client.post(SOL_RPC, json={
-                "jsonrpc": "2.0", "id": 1,
-                "method": "getTokenLargestAccounts", "params": [address]}, timeout=10)
-            supply = await client.post(SOL_RPC, json={
-                "jsonrpc": "2.0", "id": 2,
-                "method": "getTokenSupply", "params": [address]}, timeout=10)
-        accs = ((largest.json().get("result") or {}).get("value") or [])[:20]
-        total = float((((supply.json().get("result") or {}).get("value") or {})
-                      .get("uiAmount")) or 0)
-        holders = [{"address": a.get("address", ""),
-                    "amount": float(a.get("uiAmount") or 0),
-                    "pct": round(100 * float(a.get("uiAmount") or 0) / total, 2)
-                           if total else None}
-                   for a in accs]
-        return {"unsupported": False, "holders": holders}
-    except Exception as e:
-        return {"unsupported": True, "reason": f"holder lookup failed: {e}"}
-
-
 @app.get("/api/token/{address}")
 async def token_detail(address: str):
     info = await _live_refresh(address)
@@ -782,6 +722,23 @@ async def stream():
             _subscribers.discard(q)
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache"})
+
+
+MIRROR_FEED = Path(os.environ.get("MIRROR_FEED", BASE_DIR.parent / "data" / "mirror_feed.jsonl"))
+
+
+@app.get("/api/mirror")
+def mirror_feed(limit: int = 40):
+    """Latest messages from the Discord mirror (written by discord_scraper)."""
+    if not MIRROR_FEED.exists():
+        return {"messages": []}
+    try:
+        lines = MIRROR_FEED.read_text(encoding="utf-8").strip().splitlines()[-limit:]
+        msgs = [json.loads(ln) for ln in lines if ln.strip()]
+        msgs.reverse()
+        return {"messages": msgs}
+    except Exception as e:
+        return {"messages": [], "error": str(e)}
 
 
 @app.get("/api/health")
