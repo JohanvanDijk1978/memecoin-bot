@@ -13,6 +13,7 @@ import logging
 import asyncio
 import aiohttp
 import time as import_time
+from collections import OrderedDict
 from typing import List, Tuple
 from dotenv import load_dotenv
 from .mention_store import store, SOL_ADDRESS_RE, ETH_ADDRESS_RE
@@ -35,6 +36,16 @@ CHANNEL_IDS_2: List[int] = [
 # Both must be set for the mirror to activate. Silent no-op if either is 0.
 DISCORD_MIRROR_CHANNEL_ID = int(os.getenv("DISCORD_MIRROR_CHANNEL_ID", "0") or 0)
 DISCORD_MIRROR_TOPIC_ID   = int(os.getenv("DISCORD_MIRROR_TOPIC_ID", "0") or 0)
+
+# ── Backfill config: catch messages the WebSocket gateway missed ──────────
+# Discord self-bot gateway connections drop and RESUME frequently. During
+# reconnect gaps, on_message never fires for messages sent in that window.
+# The backfill loop polls channel.history() via REST (which doesn't depend on
+# the gateway) and replays anything new through on_message. Bounded dedup
+# prevents double-processing when the gateway also delivers the message.
+DISCORD_BACKFILL_INTERVAL_SECS = int(os.getenv("DISCORD_BACKFILL_INTERVAL_SECS", "60"))
+DISCORD_BACKFILL_LIMIT         = int(os.getenv("DISCORD_BACKFILL_LIMIT", "20"))
+_SEEN_MSG_ID_MAX               = 5000  # bound the per-instance dedup dict
 
 
 def _mirror_feed_append(sender: str, text: str, image_url: str):
@@ -371,12 +382,81 @@ try:
             super().__init__(self_bot=True, chunk_guilds_at_startup=False)
             self._channel_ids = channel_ids or CHANNEL_IDS
             self._channel_cache = {}
+            # Per-instance bounded dedup so on_message and _backfill_loop don't
+            # double-process the same Discord message.
+            self._seen_msg_ids: "OrderedDict[int, None]" = OrderedDict()
+            self._backfill_task = None
+
+        def _mark_seen(self, msg_id: int) -> bool:
+            """Return True if this msg_id was newly added, False if already seen.
+            Evicts oldest entries when the dict exceeds _SEEN_MSG_ID_MAX."""
+            if msg_id in self._seen_msg_ids:
+                # move to end so recently-seen stays warm
+                self._seen_msg_ids.move_to_end(msg_id)
+                return False
+            self._seen_msg_ids[msg_id] = None
+            while len(self._seen_msg_ids) > _SEEN_MSG_ID_MAX:
+                self._seen_msg_ids.popitem(last=False)
+            return True
+
+        async def _backfill_loop(self):
+            """Every DISCORD_BACKFILL_INTERVAL_SECS, pull the last N messages
+            from each monitored channel via REST. Anything not already seen
+            (i.e. missed by the WebSocket gateway during a reconnect) gets
+            replayed through on_message.
+
+            Uses REST, so it works even when the gateway is disconnected.
+            """
+            # Let the gateway settle before the first pass so we don't race
+            # on_ready and end up processing every recent message on startup.
+            await asyncio.sleep(DISCORD_BACKFILL_INTERVAL_SECS)
+            while True:
+                for channel_id in list(self._channel_ids):
+                    try:
+                        ch = self.get_channel(channel_id)
+                        if ch is None:
+                            try:
+                                ch = await self.fetch_channel(channel_id)
+                            except Exception:
+                                ch = None
+                        if ch is None:
+                            continue
+
+                        messages = []
+                        async for msg in ch.history(limit=DISCORD_BACKFILL_LIMIT):
+                            messages.append(msg)
+                        # Oldest first, so per-group cooldowns and any other
+                        # ordering-sensitive logic still runs chronologically.
+                        for msg in reversed(messages):
+                            if msg.id not in self._seen_msg_ids:
+                                try:
+                                    await self.on_message(msg)
+                                except Exception as e:
+                                    logger.warning(f"backfill on_message failed for {msg.id}: {e}")
+                    except Exception as e:
+                        logger.warning(f"backfill: channel {channel_id} failed: {e}")
+                await asyncio.sleep(DISCORD_BACKFILL_INTERVAL_SECS)
 
         async def on_ready(self):
             logger.info(f"✅ Discord self-bot connected as: {self.user}")
             logger.info(f"📡 Monitoring {len(self._channel_ids)} Discord channel(s)")
+            # Start the REST-based backfill loop exactly once per client instance.
+            # on_ready can fire multiple times across gateway reconnects — the
+            # guard prevents spawning duplicate loops.
+            if self._backfill_task is None or self._backfill_task.done():
+                self._backfill_task = asyncio.create_task(self._backfill_loop())
+                logger.info(
+                    f"🩹 Backfill loop armed — interval={DISCORD_BACKFILL_INTERVAL_SECS}s, "
+                    f"limit={DISCORD_BACKFILL_LIMIT}/channel"
+                )
 
         async def on_message(self, message):
+            # Dedup at the door: the same message can arrive via WebSocket
+            # (on_message) and via _backfill_loop. Whoever gets here first wins;
+            # the second call short-circuits so we don't ping / mirror twice.
+            if not self._mark_seen(message.id):
+                return
+
             # Mirror path: forward EVERY message from the configured Discord
             # channel into the configured Telegram topic. Runs independently
             # of the scraper path so it fires even for image-only messages.
