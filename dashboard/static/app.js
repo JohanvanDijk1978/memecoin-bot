@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.30"; // bump together with VERSION in main.py
+const VERSION = "1.32"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -102,10 +102,13 @@ function kpis(a) {
 }
 
 /* shared leaderboard columns */
-const lbCols = (nameLabel, href) => [
-  { key: "name", label: nameLabel, fmt: (r) => `<a href="${href}${encodeURIComponent(r.key ?? r.name)}"><b>${esc(r.name)}</b></a>` },
-  { key: "calls", label: "Calls", num: true },
-  { key: "win_rate", label: "Win Rate", num: true, fmt: (r) => `<b>${fmtPct(r.win_rate)}</b>`, title: "Consistency — % of calls that reached ≥2×" },
+const lbCols = (nameLabel, href, colorByWinRate = false) => [
+  { key: "name", label: nameLabel, fmt: (r) => `<a href="${href}${encodeURIComponent(r.key ?? r.name)}"><b${colorByWinRate && r.win_rate > 20 ? ' style="color:var(--green)"' : ""}>${esc(r.name)}</b></a>` },
+  { key: "calls", label: "Calls", num: true, sortVal: (r) => r.with_data,
+    fmt: (r) => r.with_data < r.calls
+      ? `${r.with_data}<span style="color:var(--dim)" title="${r.with_data} completed · ${r.calls - r.with_data} dead (no market cap) excluded from rates · ${r.calls} total">/${r.calls}</span>`
+      : `${r.calls}` },
+  { key: "win_rate", label: "Win Rate", num: true, fmt: (r) => `<b>${fmtPct(r.win_rate)}</b>`, title: "Consistency — % of completed calls that reached ≥2× (dead calls excluded)" },
   { key: "hit_rate", label: "Hit Rate", num: true, fmt: (r) => `<b>${fmtPct(r.hit_rate)}</b>`, title: "Win quality — log-scaled avg of winning multiples (100% ≈ 1000×)" },
   { key: "hit5", label: "≥5×", num: true, fmt: (r) => fmtPct(r.hit5) },
   { key: "hit10", label: "≥10×", num: true, fmt: (r) => fmtPct(r.hit10) },
@@ -203,7 +206,7 @@ const pages = {
   async callers() {
     const rows = await api("callers", { days: state.days, chain: state.chain, min_calls: 2 });
     view.innerHTML = `<div class="panel"><h3>${rows.length} callers · min 2 calls · Win Rate = % of calls ≥2× · Hit Rate = win quality, log-scaled (100% ≈ 1000×)</h3><div id="t"></div></div>`;
-    $("t").append(table(lbCols("Caller", "#/caller/"), rows, { defaultSort: "win_rate" }));
+    $("t").append(table(lbCols("Caller", "#/caller/", true), rows, { defaultSort: "win_rate" }));
   },
 
   async groups() {

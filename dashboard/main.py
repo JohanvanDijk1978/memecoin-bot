@@ -45,7 +45,7 @@ CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
 HIT_CEIL = 1000.0             # winning multiple that maps to 100% Hit Rate
-VERSION = "1.30"              # bump together with VERSION in static/app.js
+VERSION = "1.32"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -350,8 +350,9 @@ def caller_aliases():
 
 
 def agg(rows):
-    """Shared metric block for a set of call rows."""
-    mults = [r["mult"] for r in rows if r["mult"]]
+    """Shared metric block for a set of call rows. Dead calls (no market cap →
+    mult is None) are excluded from every rate; only completed calls count."""
+    mults = [r["mult"] for r in rows if r["mult"] is not None]
     n = len(rows)
     def rate(x):
         return round(100 * sum(1 for m in mults if m >= x) / len(mults), 1) if mults else 0
@@ -367,9 +368,10 @@ def agg(rows):
 
 
 def win_rate_score(rows):
-    """Win Rate (%): pure share of calls that reached >=2x. No sample-size
-    weighting — 2 wins of 2 calls reads 100%."""
-    mults = [r["mult"] for r in rows if r["mult"]]
+    """Win Rate (%): pure share of COMPLETED calls that reached >=2x. Dead calls
+    (blank Peak × / no market cap) are excluded from the denominator entirely —
+    not counted as wins or losses. No sample-size weighting."""
+    mults = [r["mult"] for r in rows if r["mult"] is not None]
     if not mults:
         return 0.0
     return round(100 * sum(1 for m in mults if m >= WIN_X) / len(mults), 1)
@@ -381,7 +383,8 @@ def hit_rate_score(rows):
     gives diminishing returns (a 400x beats a 20x but isn't 20x as valuable), and
     averaging the already-compressed values stops one moonshot from dominating."""
     import math
-    wins = [r["mult"] for r in rows if r["mult"] and r["mult"] >= WIN_X]
+    # dead calls (mult None) can't be wins, so they're excluded here too
+    wins = [r["mult"] for r in rows if r["mult"] is not None and r["mult"] >= WIN_X]
     if not wins:
         return 0.0
     ceil = math.log10(HIT_CEIL)
