@@ -94,6 +94,7 @@ BLOCKED_NAMES = {"rickburpbot", "rick"}
 from .send_ping import send_ping
 from .filtered_forward import maybe_forward
 from .mirror import mirror_message
+from .high_wr_notifier import notify_high_wr_scan
 
 
 async def fetch_token_quick(address: str, chain: str) -> dict:
@@ -232,6 +233,13 @@ async def handle_ca_ping(text: str, sender_name: str, group_name: str, sender_id
         return str(n)
 
     for address, chain in found:
+        # High-WR caller notification — own persistent dedup, must see EVERY
+        # scan event, so it runs BEFORE the ping cooldown. Fire-and-forget.
+        asyncio.create_task(notify_high_wr_scan(
+            address=address, chain=chain, sender_name=sender_name,
+            sender_id=sender_id, group_name=group_name,
+        ))
+
         ping_key = f"{address}:{group_name}"
         existing = _recent_pings.get(address)
         group_last_ping = _recent_pings.get(ping_key, 0)
