@@ -138,6 +138,22 @@ def _query_win_rate(caller_key: str, sender_name: str):
     return (round(100 * wins / len(mults), 1), wins, len(mults))
 
 
+# ── Formatting ─────────────────────────────────────────────────────────────
+
+def _fmt_mc_compact(n) -> str:
+    """Compact mcap for the header line: 31.3K / 1.2M / 870. No $ prefix
+    (a $ already appears next to the symbol in the header)."""
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return "n/a"
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}K"
+    return f"{n:.0f}"
+
+
 # ── Filters (extend here) ─────────────────────────────────────────────────
 
 def _passes_filters(win_rate: float, wins: int, completed: int) -> bool:
@@ -181,6 +197,7 @@ async def notify_high_wr_scan(address: str, chain: str, sender_name: str,
 
         name   = escape_md(token.get("name", "Unknown")) if token else "Unknown"
         symbol = escape_md(token.get("symbol", "???")) if token else "???"
+        mcap   = _fmt_mc_compact(token.get("market_cap", 0) if token else 0)
         caller = escape_md(" ".join(sender_name.split()))
         group  = escape_md(" ".join(group_name.split()))
         ts     = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
@@ -189,7 +206,7 @@ async def notify_high_wr_scan(address: str, chain: str, sender_name: str,
             f"🚨 *High Win Rate Caller*\n\n"
             f"👤 Caller: *{caller}*\n"
             f"📈 Win Rate: *{win_rate}%* ({wins}/{completed} ≥2x)\n\n"
-            f"🪙 Token: {name} (${symbol})\n"
+            f"🪙 {name} | {mcap} | ${symbol}\n"
             f"🌐 Chain: {chain_display_name(actual_chain)}\n"
             f"`{address}`\n\n"
             f"💬 Group: {group}\n"
