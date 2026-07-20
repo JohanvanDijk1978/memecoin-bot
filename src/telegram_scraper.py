@@ -52,6 +52,7 @@ def clean_text(text: str) -> str:
 from .send_ping import send_ping
 from .mirror import mirror_message, get_group_link
 from .filtered_forward import maybe_forward
+from .high_wr_notifier import notify_high_wr_scan
 
 
 async def fetch_token_quick(address: str, chain: str) -> dict:
@@ -246,6 +247,15 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
     chain_emoji = {"SOL": "◎", "ETH": "Ξ"}
 
     for address, chain in found:
+        # High-WR caller notification — has its own persistent dedup, so it
+        # must see EVERY scan event. Runs BEFORE the ping cooldown (which
+        # would swallow first scans by a second caller within 5 min).
+        # Fire-and-forget: never blocks or breaks the ping flow.
+        asyncio.create_task(notify_high_wr_scan(
+            address=address, chain=chain, sender_name=sender_name,
+            sender_id=sender_id, group_name=group_name,
+        ))
+
         ping_key = f"{address}:{group_name}"
         existing = _recent_pings.get(address)
         group_last_ping = _recent_pings.get(ping_key, 0)
