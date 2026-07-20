@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.34"; // bump together with VERSION in main.py
+const VERSION = "1.35"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -179,15 +179,27 @@ const tokenIcon = (r) => {
   return `<img class="pfp" loading="lazy" src="https://dd.dexscreener.com/ds-data/tokens/${esc(cid)}/${esc(r.address)}.png?size=lg" onerror="this.remove()">`;
 };
 
+/* per-browser hidden-token list for the overview Live feed panel */
+const HIDDEN_KEY = "hiddenTokens";
+const getHidden = () => { try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_KEY) ?? "[]")); } catch { return new Set(); } };
+const setHidden = (set) => localStorage.setItem(HIDDEN_KEY, JSON.stringify([...set]));
+window.hideToken = (addr) => { const h = getHidden(); h.add(addr); setHidden(h); ovFeedRefresh(); };
+window.showAllTokens = () => { localStorage.removeItem(HIDDEN_KEY); ovFeedRefresh(); };
+
 async function ovFeedRefresh() {
   const el = document.getElementById("ovfeed");
   if (!el) return;  // not on the overview page
   try {
     await ensureCallerWR();
     const d = await api("calls", { per: 25, chain: state.chain });
+    const hidden = getHidden();
+    const rows = (d.rows ?? []).filter((r) => !hidden.has(r.address));
+    const showAllBtn = $("ovfeed-showall");
+    if (showAllBtn) showAllBtn.style.display = hidden.size ? "inline" : "none";
     el.innerHTML = "";
     el.append(table([
-      { key: "activity_at", label: "When", fmt: (r) => `<span style="color:var(--muted)">${r.rescan ? `<span class="warn" title="re-scanned">↻</span> ` : ""}${ago(r.activity_at)}</span>` },
+      { key: "activity_at", label: "When", fmt: (r) => `<span style="color:var(--muted)">${r.rescan ? `<span class="warn" title="re-scanned">↻</span> ` : ""}${ago(r.activity_at)}</span>` +
+        ` <button class="hide-btn" title="Hide this token from the feed" onclick="hideToken('${esc(r.address)}')">✕</button>` },
       { key: "ticker", label: "Token", fmt: (r) => tokenIcon(r) + tokenLink(r) },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
       { key: "source", label: "Source", fmt: (r) => `<span class="badge">${SRC_LABELS[r.source] ?? esc(r.source)}</span>` },
@@ -201,7 +213,7 @@ async function ovFeedRefresh() {
         fmt: (r) => (r.history ?? []).filter((h) => h.group !== r.group).slice(0, 2)
           .map((h) => `${esc(h.group.slice(0, 16))} <span style="color:var(--muted)">${fmtMc(h.mc)}${h.mult && h.mult > 1 ? " " + h.mult.toFixed(1) + "×" : ""} · ${ago(h.called_at)}</span>`)
           .join("<br>") || "—" },
-    ], d.rows));
+    ], rows));
   } catch { /* keep last content */ }
 }
 
@@ -211,7 +223,10 @@ const pages = {
     const d = await api("overview", { days: state.days, chain: state.chain });
     view.innerHTML = kpis(d) + `
       <div class="grid2" style="margin-bottom:18px;grid-template-columns:3fr 2fr">
-        <div class="panel"><h3>Live feed — group calls · dex watchers <span style="float:right;color:var(--dim);font-weight:400">drag bottom edge to resize</span></h3>
+        <div class="panel"><h3 style="display:flex;align-items:center;gap:10px">
+          <span>Live feed — group calls · dex watchers</span>
+          <span id="ovfeed-showall" class="showall-btn" style="display:none;font-weight:400" onclick="showAllTokens()">show all tokens</span>
+          <span style="margin-left:auto;color:var(--dim);font-weight:400">drag bottom edge to resize</span></h3>
           <div id="ovfeed-wrap" class="vresize"><div id="ovfeed"><div class="loading">Loading…</div></div></div></div>
         <div class="panel"><h3>habibifnf mirror</h3>
           <div id="ovmirror-wrap" class="vresize"><div id="ovmirror"><div class="loading">Loading…</div></div></div></div>
