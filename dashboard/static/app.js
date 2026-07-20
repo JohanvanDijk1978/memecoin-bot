@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.33"; // bump together with VERSION in main.py
+const VERSION = "1.34"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -43,6 +43,28 @@ const mcFirstScan = (r, v) => fmtMc(v) + (isFirstScan(r) ? ` ${firstScanBadge}` 
 const peakFirstScan = (r, m, peak) => isFirstScan(r)
   ? `<span style="color:var(--dim)" title="${FIRST_SCAN_TITLE}">first scan</span>`
   : multPeak(m, peak);
+
+/* caller win-rate lookup — all-time, min 2 calls; same threshold as the Callers page.
+   Cached client-side (server also caches the endpoint) and refreshed every 5 min. */
+const GOOD_WIN_RATE = 20;
+const callerWR = new Map();
+let callerWRAt = 0;
+async function ensureCallerWR() {
+  if (Date.now() - callerWRAt < 300000) return;
+  try {
+    const rows = await api("callers", { days: 0, min_calls: 2 });
+    callerWR.clear();
+    rows.forEach((r) => callerWR.set(r.key ?? r.name, r.win_rate));
+    callerWRAt = Date.now();
+  } catch { /* keep whatever we had; links just render uncoloured */ }
+}
+/* caller link, green when the caller's all-time win rate clears the threshold */
+function callerLink(r) {
+  const key = r.caller_key ?? r.caller;
+  const good = (callerWR.get(key) ?? 0) > GOOD_WIN_RATE;
+  const style = good ? ` style="color:var(--green)" title="win rate ${callerWR.get(key)}%"` : "";
+  return `<a href="#/caller/${encodeURIComponent(key)}"${style}>${esc(r.caller)}</a>`;
+}
 const ago = (ts) => {
   const s = Date.now() / 1000 - ts;
   if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
@@ -161,6 +183,7 @@ async function ovFeedRefresh() {
   const el = document.getElementById("ovfeed");
   if (!el) return;  // not on the overview page
   try {
+    await ensureCallerWR();
     const d = await api("calls", { per: 25, chain: state.chain });
     el.innerHTML = "";
     el.append(table([
@@ -171,7 +194,7 @@ async function ovFeedRefresh() {
       { key: "current_mc", label: "MC now", num: true, fmt: (r) => r.current_mc ? `<b>${fmtMc(r.current_mc)}</b>` : "—" },
       { key: "first_mc", label: "MC at post", num: true, fmt: (r) => mcFirstScan(r, r.first_mc) },
       { key: "mult", label: "Peak ×", num: true, fmt: (r) => peakFirstScan(r, r.mult, r.eff_peak) },
-      { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
+      { key: "caller", label: "Caller", fmt: callerLink },
       { key: "group", label: "Group" },
       { key: "scans_total", label: "Scans", num: true, fmt: (r) => `${r.scans_total}× in ${r.groups_n}` },
       { key: "history", label: "Also called in", sortVal: (r) => r.groups_n,
@@ -448,6 +471,7 @@ document.addEventListener("keydown", (e) => {
   let first = true;
   async function refresh() {
     try {
+      await ensureCallerWR();
       const d = await api("calls", { per: 20 });
       const rows = d.rows ?? [];
       let hasNew = false;
@@ -458,7 +482,7 @@ document.addEventListener("keydown", (e) => {
         seen.add(key);
         return `<div class="live-row ${isNew ? "new" : ""}"><span class="t">${ago(r.called_at)}</span>
           ${tokenLink(r)} <span style="color:var(--muted)" title="MC now · MC at post">${r.current_mc ? `<b>${fmtMc(r.current_mc)}</b> · ` : ""}${fmtMc(r.first_mc)}</span>
-          <span class="who"><a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a> · ${esc(r.group)}</span></div>`;
+          <span class="who">${callerLink(r)} · ${esc(r.group)}</span></div>`;
       }).join("") || `<div class="empty">No calls yet.</div>`;
       if (hasNew && !muted) ping.play().catch(() => {});  // rejected until first user click
       first = false;
