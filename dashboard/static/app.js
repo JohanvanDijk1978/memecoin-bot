@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.32"; // bump together with VERSION in main.py
+const VERSION = "1.33"; // bump together with VERSION in main.py
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -33,6 +33,16 @@ const fmtMult = (m) => m == null ? `<span class="mono" style="color:var(--dim)">
 const fmtPct = (p) => `<span class="${p >= 50 ? "pos" : p >= 25 ? "warn" : ""}">${p}%</span>`;
 const multPeak = (m, peak) => fmtMult(m) +
   (m != null && peak ? ` <span style="color:var(--muted);font-size:11px">${fmtMc(peak)}</span>` : "");
+/* a call the peak poller has not revisited yet — its Peak × is "no result yet", not "flat" */
+const isFirstScan = (r) => !r.rescan && (r.scan_count ?? 1) <= 1;
+const FIRST_SCAN_TITLE = "First scan — not re-scanned yet, no peak observed since the call";
+const firstScanBadge = `<span class="badge" style="border-color:var(--accent);color:var(--accent)" title="${FIRST_SCAN_TITLE}">first scan</span>`;
+/* MC at post + badge */
+const mcFirstScan = (r, v) => fmtMc(v) + (isFirstScan(r) ? ` ${firstScanBadge}` : "");
+/* Peak × — replaced by the label while there is no result to report */
+const peakFirstScan = (r, m, peak) => isFirstScan(r)
+  ? `<span style="color:var(--dim)" title="${FIRST_SCAN_TITLE}">first scan</span>`
+  : multPeak(m, peak);
 const ago = (ts) => {
   const s = Date.now() / 1000 - ts;
   if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
@@ -159,8 +169,8 @@ async function ovFeedRefresh() {
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
       { key: "source", label: "Source", fmt: (r) => `<span class="badge">${SRC_LABELS[r.source] ?? esc(r.source)}</span>` },
       { key: "current_mc", label: "MC now", num: true, fmt: (r) => r.current_mc ? `<b>${fmtMc(r.current_mc)}</b>` : "—" },
-      { key: "first_mc", label: "MC at post", num: true, fmt: (r) => fmtMc(r.first_mc) },
-      { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.eff_peak) },
+      { key: "first_mc", label: "MC at post", num: true, fmt: (r) => mcFirstScan(r, r.first_mc) },
+      { key: "mult", label: "Peak ×", num: true, fmt: (r) => peakFirstScan(r, r.mult, r.eff_peak) },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group" },
       { key: "scans_total", label: "Scans", num: true, fmt: (r) => `${r.scans_total}× in ${r.groups_n}` },
@@ -253,8 +263,8 @@ const pages = {
     $("t").append(table([
       { key: "ticker", label: "Token", fmt: tokenLink },
       { key: "chain", label: "Chain", fmt: (r) => chainBadge(r.chain) },
-      { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.eff_peak) },
-      { key: "first_mc", label: "Called at", num: true, fmt: (r) => fmtMc(r.first_mc) },
+      { key: "mult", label: "Peak ×", num: true, fmt: (r) => peakFirstScan(r, r.mult, r.eff_peak) },
+      { key: "first_mc", label: "Called at", num: true, fmt: (r) => mcFirstScan(r, r.first_mc) },
       { key: "current_mc", label: "Now", num: true, fmt: (r) => r.dead ? `<span class="neg">dead</span>` : fmtMc(r.current_mc) },
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },
@@ -302,8 +312,8 @@ const pages = {
       { key: "caller", label: "Caller", fmt: (r) => `<a href="#/caller/${encodeURIComponent(r.caller_key ?? r.caller)}">${esc(r.caller)}</a>` },
       { key: "group", label: "Group", fmt: (r) => `<a href="#/group/${encodeURIComponent(r.group)}">${esc(r.group)}</a>` },
       { key: "source", label: "Src", fmt: (r) => `<span class="badge">${esc(r.source)}</span>` },
-      { key: "mc_at_call", label: "MC at call", num: true, fmt: (r) => fmtMc(r.mc_at_call) },
-      { key: "mult", label: "Peak ×", num: true, fmt: (r) => multPeak(r.mult, r.mult * r.mc_at_call) },
+      { key: "mc_at_call", label: "MC at call", num: true, fmt: (r) => mcFirstScan(r, r.mc_at_call) },
+      { key: "mult", label: "Peak ×", num: true, fmt: (r) => peakFirstScan(r, r.mult, r.mult * r.mc_at_call) },
       { key: "scan_count", label: "Scans", num: true },
     ], d.calls, { defaultSort: "called_at" }));
   },

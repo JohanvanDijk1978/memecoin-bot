@@ -45,7 +45,7 @@ CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
 HIT_CEIL = 1000.0             # winning multiple that maps to 100% Hit Rate
-VERSION = "1.32"              # bump together with VERSION in static/app.js
+VERSION = "1.33"              # bump together with VERSION in static/app.js
 
 # ---------------------------------------------------------------- database
 
@@ -653,7 +653,8 @@ async def token_detail(address: str):
         "calls": [{"group": r["group_name"], "caller": r["sender_name"],
                    "caller_key": r["caller_key"], "source": r["source"],
                    "mc_at_call": r["first_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,
-                   "scan_count": r["scan_count"], "called_at": r["called_at"]} for r in calls],
+                   "scan_count": r["scan_count"], "called_at": r["called_at"],
+                   "rescan": r["activity_at"] > r["called_at"]} for r in calls],
         "earliest": calls[0]["sender_name"] if calls else None,
         "links": token_links(address, (tok or {}).get("chain_id", "")),
     }
