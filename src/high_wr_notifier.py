@@ -11,6 +11,9 @@ Rules (all must hold):
      counts as a first scan here.
   3. Only live scan events. Historical entries never trigger; on first run the
      seen-set is seeded from ca_history.json so pre-existing calls don't fire.
+  4. Market cap strictly below HIGH_WR_MAX_MCAP (default $100K), measured at
+     scan time. Tokens with no usable mcap data are skipped, since we can't
+     confirm they're under the cap.
 
 Semantics: "first scan only" — every first scan is recorded in the persistent
 seen-set regardless of win rate. If the caller's WR was too low at first-scan
@@ -27,6 +30,7 @@ Modular by design: add extra filters in _passes_filters().
 
 Env (all optional):
   HIGH_WR_THRESHOLD  — win-rate %% threshold, strictly greater-than (22.5)
+  HIGH_WR_MAX_MCAP   — max market cap in USD, strictly less-than (100000)
   HIGH_WR_CHAT_ID    — destination chat; falls back to YOUR_TELEGRAM_USER_ID
   DASH_DB_PATH       — path to memedash SQLite (dashboard/data/dash.db)
 """
@@ -47,6 +51,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 WR_THRESHOLD = float(os.getenv("HIGH_WR_THRESHOLD", "22.5"))
+MAX_MCAP     = float(os.getenv("HIGH_WR_MAX_MCAP", "100000"))
 CHAT_ID      = os.getenv("HIGH_WR_CHAT_ID", "") or os.getenv("YOUR_TELEGRAM_USER_ID", "")
 DASH_DB      = os.getenv("DASH_DB_PATH", "dashboard/data/dash.db")
 WIN_X        = 2.0  # keep in sync with WIN_X in dashboard/main.py
@@ -158,8 +163,20 @@ def _fmt_mc_compact(n) -> str:
 
 def _passes_filters(win_rate: float, wins: int, completed: int) -> bool:
     """All extra gating beyond first-scan dedup lives here so future filters
-    (min calls, chain whitelist, mcap range, ...) are one-line additions."""
+    (min calls, chain whitelist, ...) are one-line additions.
+    Note: the mcap gate lives in _passes_mcap() since it needs token metadata
+    that is only fetched after this cheap check passes."""
     return win_rate > WR_THRESHOLD
+
+
+def _passes_mcap(market_cap) -> bool:
+    """True only when we have a positive mcap strictly below MAX_MCAP.
+    Unknown/zero mcap fails — we can't confirm it's under the cap."""
+    try:
+        mc = float(market_cap or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < mc < MAX_MCAP
 
 
 # ── Entry point ───────────────────────────────────────────────────────────
@@ -193,11 +210,20 @@ async def notify_high_wr_scan(address: str, chain: str, sender_name: str,
         # avoid a circular import (telegram_scraper imports this module).
         from .telegram_scraper import fetch_token_quick
         token = await fetch_token_quick(address, chain)
+
+        market_cap = (token or {}).get("market_cap", 0)
+        if not _passes_mcap(market_cap):
+            logger.info(
+                f"High-WR skip (mcap): {sender_name} ({win_rate}%) → {address} "
+                f"mcap={_fmt_mc_compact(market_cap)} (max {_fmt_mc_compact(MAX_MCAP)})"
+            )
+            return
+
         actual_chain = (token or {}).get("chain_id") or ("solana" if chain == "SOL" else "ethereum")
 
         name   = escape_md(token.get("name", "Unknown")) if token else "Unknown"
         symbol = escape_md(token.get("symbol", "???")) if token else "???"
-        mcap   = _fmt_mc_compact(token.get("market_cap", 0) if token else 0)
+        mcap   = _fmt_mc_compact(market_cap)
         caller = escape_md(" ".join(sender_name.split()))
         group  = escape_md(" ".join(group_name.split()))
         ts     = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
