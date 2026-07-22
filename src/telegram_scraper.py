@@ -519,6 +519,7 @@ class TelegramScraper:
                     image_bytes=image_bytes,
                     reply_text=reply_text,
                     reply_sender=reply_sender,
+                    chat_id=event.chat_id,
                 )
             except Exception:
                 mirror_link = ""

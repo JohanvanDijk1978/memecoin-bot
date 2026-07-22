@@ -18,6 +18,11 @@ TOPIC_MAIN   = int(os.getenv("MIRROR_TOPIC_MAIN", "1"))
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+# Map chat IDs to topic IDs — checked first, immune to title changes/mismatches
+CHAT_TOPIC_MAP = {
+    -1003755416055: 105846,  # casino
+}
+
 # Map group names to topic IDs (lowercase)
 GROUP_TOPIC_MAP = {
     "fantom troupe":             2,
@@ -44,7 +49,9 @@ def get_group_link(group_name: str) -> str:
 
 
 
-def get_topic_id(group_name: str) -> int:
+def get_topic_id(group_name: str, chat_id: int = None) -> int:
+    if chat_id is not None and chat_id in CHAT_TOPIC_MAP:
+        return CHAT_TOPIC_MAP[chat_id]
     return GROUP_TOPIC_MAP.get(group_name.lower().strip(), TOPIC_MAIN)
 
 
@@ -58,6 +65,7 @@ async def mirror_message(
     reply_text: str = None,
     reply_sender: str = None,
     topic_id: int = None,
+    chat_id: int = None,
 ) -> str:
     """Mirror a message to the topic channel.
 
@@ -72,7 +80,7 @@ async def mirror_message(
         return ""
 
     if topic_id is None:
-        topic_id = get_topic_id(group_name)
+        topic_id = get_topic_id(group_name, chat_id)
 
     if sender_username:
         sender_display = f"*{sender_name}* (@{sender_username})"
