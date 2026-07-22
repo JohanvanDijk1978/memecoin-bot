@@ -32,10 +32,34 @@ CHANNEL_IDS_2: List[int] = [
     int(cid.strip()) for cid in CHANNEL_IDS_2_RAW.split(",") if cid.strip().isdigit()
 ]
 
-# ── Mirror config: pipe a specific Discord channel → a Telegram topic ─────
-# Both must be set for the mirror to activate. Silent no-op if either is 0.
-DISCORD_MIRROR_CHANNEL_ID = int(os.getenv("DISCORD_MIRROR_CHANNEL_ID", "0") or 0)
-DISCORD_MIRROR_TOPIC_ID   = int(os.getenv("DISCORD_MIRROR_TOPIC_ID", "0") or 0)
+# ── Mirror config: pipe Discord channels → Telegram topics ───────────────
+# Preferred format (new): DISCORD_MIRROR_MAP="CHANNEL_ID:TOPIC_ID,CHANNEL_ID:TOPIC_ID"
+#   e.g. DISCORD_MIRROR_MAP="1374034315985293384:93008,1246170346948661319:98698"
+# Legacy (still honored if MAP is unset): DISCORD_MIRROR_CHANNEL_ID + DISCORD_MIRROR_TOPIC_ID
+# Silent no-op if nothing is configured.
+def _parse_mirror_map() -> dict:
+    raw = (os.getenv("DISCORD_MIRROR_MAP", "") or "").strip()
+    if raw:
+        result: dict = {}
+        for pair in raw.split(","):
+            pair = pair.strip()
+            if not pair or ":" not in pair:
+                continue
+            cid_str, tid_str = pair.split(":", 1)
+            try:
+                result[int(cid_str.strip())] = int(tid_str.strip())
+            except ValueError:
+                logger.warning(f"discord mirror: bad entry in DISCORD_MIRROR_MAP: {pair!r}")
+        return result
+    # Legacy single-mapping fallback.
+    cid = int(os.getenv("DISCORD_MIRROR_CHANNEL_ID", "0") or 0)
+    tid = int(os.getenv("DISCORD_MIRROR_TOPIC_ID",   "0") or 0)
+    if cid and tid:
+        return {cid: tid}
+    return {}
+
+
+_DISCORD_MIRROR_MAP: dict = _parse_mirror_map()
 
 # ── Backfill config: catch messages the WebSocket gateway missed ──────────
 # Discord self-bot gateway connections drop and RESUME frequently. During
@@ -465,13 +489,12 @@ try:
             if not self._mark_seen(message.id):
                 return
 
-            # Mirror path: forward EVERY message from the configured Discord
-            # channel into the configured Telegram topic. Runs independently
-            # of the scraper path so it fires even for image-only messages.
+            # Mirror path: forward EVERY message from any configured Discord
+            # channel into its mapped Telegram topic. Runs independently of the
+            # scraper path so it fires even for image-only messages.
+            mirror_topic = _DISCORD_MIRROR_MAP.get(message.channel.id, 0)
             if (
-                DISCORD_MIRROR_CHANNEL_ID
-                and DISCORD_MIRROR_TOPIC_ID
-                and message.channel.id == DISCORD_MIRROR_CHANNEL_ID
+                mirror_topic
                 and not message.author.bot
                 and not _mirror_dedup(message.id)
             ):
@@ -489,7 +512,7 @@ try:
                         group_name="",  # unused when topic_id is passed explicitly
                         sender_name=sender,
                         image_url=img_url,
-                        topic_id=DISCORD_MIRROR_TOPIC_ID,
+                        topic_id=mirror_topic,
                     ))
                     _mirror_feed_append(sender, message.clean_content or "", img_url)
                 except Exception as e:
