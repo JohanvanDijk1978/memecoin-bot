@@ -24,6 +24,7 @@ GROUP_TOPIC_MAP = {
     "the great locked in penis": 4,
     "alphadao":                  6,
     "tiktokfnf":                 8,
+    "casino":                    105846,
     "underground":               2096,
 }
 
@@ -34,6 +35,7 @@ GROUP_LINK_MAP = {
     "the great locked in penis": f"{MIRROR_BASE_URL}/4",
     "alphadao":                  f"{MIRROR_BASE_URL}/6",
     "tiktokfnf":                 f"{MIRROR_BASE_URL}/8",
+    "casino":                    f"{MIRROR_BASE_URL}/105846",
     "underground":               f"{MIRROR_BASE_URL}/2096",
 }
 
