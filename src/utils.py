@@ -169,6 +169,7 @@ def gmgn_url(chain_id: str, address: str) -> str:
         "ethereum": "eth",
         "bsc":      "bsc",
         "base":     "base",
+        "robinhood": "robinhood",
     }.get((chain_id or "").lower())
     if not slug:
         return ""
