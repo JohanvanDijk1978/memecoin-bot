@@ -102,7 +102,11 @@ async def mirror_message(
         def build(parse):
             form = aiohttp.FormData()
             form.add_field("chat_id", str(MIRROR_GROUP))
-            form.add_field("message_thread_id", str(topic_id))
+            if topic_id > 1:
+                # thread_id=1 (General) is rejected with "message thread not
+                # found" — omit it so unmapped groups land in General instead
+                # of being dropped.
+                form.add_field("message_thread_id", str(topic_id))
             form.add_field("caption", formatted_text[:1024])
             if parse:
                 form.add_field("parse_mode", parse)
@@ -117,10 +121,11 @@ async def mirror_message(
         def build(parse):
             payload = {
                 "chat_id": MIRROR_GROUP,
-                "message_thread_id": topic_id,
                 "photo": image_url,
                 "caption": formatted_text[:1024],
             }
+            if topic_id > 1:
+                payload["message_thread_id"] = topic_id
             if parse:
                 payload["parse_mode"] = parse
             return {"json": payload}
@@ -129,10 +134,11 @@ async def mirror_message(
         def build(parse):
             payload = {
                 "chat_id": MIRROR_GROUP,
-                "message_thread_id": topic_id,
                 "text": formatted_text[:4096],
                 "disable_web_page_preview": True,
             }
+            if topic_id > 1:
+                payload["message_thread_id"] = topic_id
             if parse:
                 payload["parse_mode"] = parse
             return {"json": payload}
@@ -157,7 +163,7 @@ async def mirror_message(
                 if msg_id:
                     return f"https://t.me/c/3963742680/{topic_id}/{msg_id}"
                 return ""
-            logger.warning(f"Mirror send not ok (parse_mode={parse}): {data}")
+            logger.warning(f"Mirror send not ok (parse_mode={parse}, group={group_name!r}, topic={topic_id}): {data}")
             # Only a parse failure is worth retrying as plain text; anything else
             # (bot not admin, chat not found, rate limit) would just fail again.
             if parse is None or "parse" not in str(data.get("description", "")).lower():
