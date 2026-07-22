@@ -82,56 +82,74 @@ async def mirror_message(
         reply_block = f"┌ *{reply_sender}:* {clean_reply}\n"
     formatted_text = f"{reply_block}👤 {sender_display} — {text}"
 
+    # Pick endpoint + request builder. `parse` is the parse_mode to use (or None
+    # for plain text). Builders take `parse` so we can re-send the exact same
+    # message without Markdown if the first attempt fails to parse.
+    if image_bytes:
+        # Multipart upload — required because Telethon-sourced photos have
+        # no public URL the Bot API can fetch on its own.
+        method, timeout = "sendPhoto", 20
+        def build(parse):
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(MIRROR_GROUP))
+            form.add_field("message_thread_id", str(topic_id))
+            form.add_field("caption", formatted_text[:1024])
+            if parse:
+                form.add_field("parse_mode", parse)
+            form.add_field(
+                "photo", image_bytes,
+                filename="photo.jpg",
+                content_type="image/jpeg",
+            )
+            return {"data": form}
+    elif image_url:
+        method, timeout = "sendPhoto", 10
+        def build(parse):
+            payload = {
+                "chat_id": MIRROR_GROUP,
+                "message_thread_id": topic_id,
+                "photo": image_url,
+                "caption": formatted_text[:1024],
+            }
+            if parse:
+                payload["parse_mode"] = parse
+            return {"json": payload}
+    else:
+        method, timeout = "sendMessage", 10
+        def build(parse):
+            payload = {
+                "chat_id": MIRROR_GROUP,
+                "message_thread_id": topic_id,
+                "text": formatted_text[:4096],
+                "disable_web_page_preview": True,
+            }
+            if parse:
+                payload["parse_mode"] = parse
+            return {"json": payload}
+
     async with aiohttp.ClientSession() as session:
-        try:
-            if image_bytes:
-                # Multipart upload — required because Telethon-sourced photos have
-                # no public URL the Bot API can fetch on its own.
-                form = aiohttp.FormData()
-                form.add_field("chat_id", str(MIRROR_GROUP))
-                form.add_field("message_thread_id", str(topic_id))
-                form.add_field("caption", formatted_text[:1024])
-                form.add_field("parse_mode", "Markdown")
-                form.add_field(
-                    "photo", image_bytes,
-                    filename="photo.jpg",
-                    content_type="image/jpeg",
-                )
+        # Try Markdown first; if the Bot API can't parse entities (a stray *, _,
+        # [ or ` in group chatter), re-send as plain text instead of silently
+        # dropping the whole message.
+        for parse in ("Markdown", None):
+            try:
                 resp = await session.post(
-                    f"{TELEGRAM_API}/sendPhoto",
-                    data=form,
-                    timeout=aiohttp.ClientTimeout(total=20),
+                    f"{TELEGRAM_API}/{method}",
+                    **build(parse),
+                    timeout=aiohttp.ClientTimeout(total=timeout),
                 )
-            elif image_url:
-                resp = await session.post(
-                    f"{TELEGRAM_API}/sendPhoto",
-                    json={
-                        "chat_id": MIRROR_GROUP,
-                        "message_thread_id": topic_id,
-                        "photo": image_url,
-                        "caption": formatted_text[:1024],
-                        "parse_mode": "Markdown",
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
-            else:
-                resp = await session.post(
-                    f"{TELEGRAM_API}/sendMessage",
-                    json={
-                        "chat_id": MIRROR_GROUP,
-                        "message_thread_id": topic_id,
-                        "text": formatted_text[:4096],
-                        "parse_mode": "Markdown",
-                        "disable_web_page_preview": True,
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
-            data = await resp.json()
-            if not data.get("ok"):
-                logger.warning(f"Mirror send not ok: {data}")
-            msg_id = data.get("result", {}).get("message_id")
-            if msg_id:
-                return f"https://t.me/c/3963742680/{topic_id}/{msg_id}"
-        except Exception as e:
-            logger.warning(f"Mirror send failed: {e}")
+                data = await resp.json()
+            except Exception as e:
+                logger.warning(f"Mirror send failed: {e}")
+                return ""
+            if data.get("ok"):
+                msg_id = data.get("result", {}).get("message_id")
+                if msg_id:
+                    return f"https://t.me/c/3963742680/{topic_id}/{msg_id}"
+                return ""
+            logger.warning(f"Mirror send not ok (parse_mode={parse}): {data}")
+            # Only a parse failure is worth retrying as plain text; anything else
+            # (bot not admin, chat not found, rate limit) would just fail again.
+            if parse is None or "parse" not in str(data.get("description", "")).lower():
+                break
     return ""
