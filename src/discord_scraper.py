@@ -449,9 +449,11 @@ try:
                         if ch is None:
                             try:
                                 ch = await self.fetch_channel(channel_id)
-                            except Exception:
+                            except Exception as e:
+                                logger.warning(f"backfill: cannot resolve channel {channel_id}: {e}")
                                 ch = None
                         if ch is None:
+                            logger.warning(f"backfill: channel {channel_id} unresolved — skipping (lost access?)")
                             continue
 
                         messages = []
@@ -488,6 +490,16 @@ try:
             # the second call short-circuits so we don't ping / mirror twice.
             if not self._mark_seen(message.id):
                 return
+
+            # TEMP DEBUG (remove after 1246 diagnosis): trace inbound messages
+            # on monitored channels — reveals whether the channel delivers at all
+            # and whether its poster is a bot (bot authors are skipped below).
+            if message.channel.id in self._channel_ids:
+                logger.info(
+                    f"🔎 DBG chan={message.channel.id} author={message.author!r} "
+                    f"bot={getattr(message.author, 'bot', None)} "
+                    f"content={(message.content or '')[:80]!r}"
+                )
 
             # Mirror path: forward EVERY message from any configured Discord
             # channel into its mapped Telegram topic. Runs independently of the
