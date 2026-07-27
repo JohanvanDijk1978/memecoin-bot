@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
 CHANNEL_ID          = os.getenv("DEX_UPDATES_EVM_CHANNEL_ID", "")
+# Optional second Telegram channel that receives BOTH Solana and EVM alerts.
+# Same var as dex_watcher.py — one channel, fed by both watchers.
+COMBINED_CHANNEL_ID = os.getenv("DEX_UPDATES_COMBINED_CHANNEL_ID", "")
 DISCORD_WEBHOOK     = os.getenv("DEX_UPDATES_EVM_DISCORD_WEBHOOK", "")
 POLL_SECONDS        = int(os.getenv("DEX_WATCHER_EVM_POLL_SECONDS", "30"))
 MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_EVM_MIN_AGE_HOURS", "12"))
@@ -286,11 +289,18 @@ async def _notify_discord(embed: dict) -> Optional[str]:
         return None
 
 
-async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
-    """Send the alert to the EVM Telegram channel and return the created
-    message_id, or None on failure. sendPhoto with caption when a banner exists,
-    plain sendMessage fallback otherwise."""
-    if not (os.getenv("TELEGRAM_BOT_TOKEN") and CHANNEL_ID):
+async def _send_telegram_alert(
+    caption: str, image_url: str, chat_id: str = ""
+) -> Optional[int]:
+    """Send the alert to a Telegram channel and return the created message_id,
+    or None on failure. sendPhoto with caption when a banner exists, plain
+    sendMessage fallback otherwise.
+
+    `chat_id` defaults to the EVM channel; pass COMBINED_CHANNEL_ID to post the
+    same alert to the combined Solana+EVM channel. Each destination gets its own
+    message_id so milestone replies can thread under both independently."""
+    chat_id = chat_id or CHANNEL_ID
+    if not (os.getenv("TELEGRAM_BOT_TOKEN") and chat_id):
         return None
     telegram_api = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}"
     async with aiohttp.ClientSession() as session:
@@ -302,7 +312,7 @@ async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
                 resp = await session.post(
                     f"{telegram_api}/sendPhoto",
                     json={
-                        "chat_id": CHANNEL_ID,
+                        "chat_id": chat_id,
                         "photo": image_url,
                         "caption": caption[:1024],
                         "parse_mode": "Markdown",
@@ -321,7 +331,7 @@ async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
         # a parse error can never fully drop the alert. One retry on 429.
         for extra in ({"parse_mode": "Markdown"}, {}):
             payload = {
-                "chat_id": CHANNEL_ID,
+                "chat_id": chat_id,
                 "text": caption[:4096],
                 "disable_web_page_preview": True,
                 **extra,
@@ -361,10 +371,15 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str, ch
     # Fire Telegram + Discord in parallel; we need message IDs from both for
     # milestone reply routing later.
     tg_task = asyncio.create_task(_send_telegram_alert(caption, header_url))
+    combined_task = (
+        asyncio.create_task(_send_telegram_alert(caption, header_url, COMBINED_CHANNEL_ID))
+        if COMBINED_CHANNEL_ID else None
+    )
     dc_task = asyncio.create_task(_notify_discord(_format_discord_embed(profile, market, event_type, chain)))
     tg_msg_id, dc_msg_id = await asyncio.gather(tg_task, dc_task)
+    tg_combined_msg_id = await combined_task if combined_task else None
 
-    if tg_msg_id is None and dc_msg_id is None:
+    if tg_msg_id is None and dc_msg_id is None and tg_combined_msg_id is None:
         return False
 
     # Record in CA history so the dashboard (live feed / scan analytics) sees
@@ -387,6 +402,7 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str, ch
             ticker=symbol,
             name=(market_dict.get("name") or ""),
             tg_message_id=tg_msg_id,
+            tg_combined_message_id=tg_combined_msg_id,
             dc_message_id=dc_msg_id,
             chain=chain,
         )

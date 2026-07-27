@@ -51,6 +51,11 @@ def _channel_for_chain(chain: str) -> str:
     return os.getenv("DEX_UPDATES_EVM_CHANNEL_ID", "")
 
 
+def _combined_channel() -> str:
+    """The optional channel carrying BOTH Solana and EVM alerts. Empty = off."""
+    return os.getenv("DEX_UPDATES_COMBINED_CHANNEL_ID", "")
+
+
 def _webhook_for_chain(chain: str) -> str:
     if chain == "solana":
         return os.getenv("DEX_UPDATES_DISCORD_WEBHOOK", "")
@@ -98,16 +103,23 @@ def register_token(
     tg_message_id: Optional[int] = None,
     dc_message_id: Optional[str] = None,
     chain: str = "solana",
+    tg_combined_message_id: Optional[int] = None,
 ) -> None:
     """Register a token for milestone tracking. Called by dex_watcher /
     dex_watcher_evm after successfully sending its initial alert. No-op if:
       - address is falsy
       - initial_mc is missing / invalid / <= 0
       - the token is already being tracked (first alert wins)
-      - both message IDs are missing (nothing to reply to)
+      - all message IDs are missing (nothing to reply to)
 
     `chain` is used to route milestone replies to the correct Telegram
     channel / Discord webhook (Solana vs EVM).
+
+    `tg_combined_message_id` is the message_id of the same alert in the
+    combined Solana+EVM channel, when DEX_UPDATES_COMBINED_CHANNEL_ID is set.
+    Stored separately because message_ids are per-chat — replying in the
+    combined channel with the per-chain channel's id would thread under an
+    unrelated message or fail outright.
     """
     if not address:
         return
@@ -118,7 +130,7 @@ def register_token(
     if initial_mc <= 0:
         logger.info(f"milestone_tracker: skip {address} — initial_mc missing/invalid")
         return
-    if not (tg_message_id or dc_message_id):
+    if not (tg_message_id or dc_message_id or tg_combined_message_id):
         return
 
     # If this address is already tracked, overwrite. Re-registration happens
@@ -138,6 +150,9 @@ def register_token(
         "ticker":      ticker or "",
         "name":        name or "",
         "tg_msg_id":   tg_message_id,
+        # Legacy entries in dex_milestones.json won't have this key — every
+        # read uses .get() so old state keeps working after a deploy.
+        "tg_combined_msg_id": tg_combined_message_id,
         "dc_msg_id":   dc_message_id,
         "chain":       chain or "solana",
         "posted_at":   time.time(),
@@ -146,7 +161,8 @@ def register_token(
     _save(_state)
     logger.info(
         f"milestone_tracker: registered {address} (${initial_mc:,.0f}, "
-        f"chain={chain}, tg={tg_message_id}, dc={dc_message_id})"
+        f"chain={chain}, tg={tg_message_id}, "
+        f"tg_combined={tg_combined_message_id}, dc={dc_message_id})"
     )
 
 
@@ -305,10 +321,22 @@ async def _process(session: aiohttp.ClientSession) -> int:
         chain = entry.get("chain", "solana")  # legacy entries default to solana
         channel_id = _channel_for_chain(chain)
         webhook    = _webhook_for_chain(chain)
-        await asyncio.gather(
+        combined_id = _combined_channel()
+
+        replies = [
             _reply_telegram(session, text, entry.get("tg_msg_id"), channel_id),
             _reply_discord(session, text, entry.get("dc_msg_id"), webhook),
-        )
+        ]
+        # Mirror the milestone into the combined channel, threaded under THAT
+        # channel's copy of the original alert. Skipped for tokens registered
+        # before the combined channel existed (no stored id) — otherwise the
+        # reply would post standalone and spam the channel with orphans.
+        combined_msg_id = entry.get("tg_combined_msg_id")
+        if combined_id and combined_msg_id:
+            replies.append(
+                _reply_telegram(session, text, combined_msg_id, combined_id)
+            )
+        await asyncio.gather(*replies)
 
         # Mark ALL milestones up to and including this one as hit — so if we
         # jumped from 1x to 10x we don't retroactively announce 2/3/5.
@@ -330,7 +358,7 @@ async def _process(session: aiohttp.ClientSession) -> int:
 async def run_milestone_tracker() -> None:
     sol_channel = _channel_for_chain("solana")
     evm_channel = _channel_for_chain("ethereum")
-    if not BOT_TOKEN or not (sol_channel or evm_channel):
+    if not BOT_TOKEN or not (sol_channel or evm_channel or _combined_channel()):
         logger.info(
             "milestone_tracker: TELEGRAM_BOT_TOKEN and at least one of "
             "DEX_UPDATES_CHANNEL_ID / DEX_UPDATES_EVM_CHANNEL_ID must be set — feature disabled"

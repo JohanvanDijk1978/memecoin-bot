@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
 CHANNEL_ID          = os.getenv("DEX_UPDATES_CHANNEL_ID", "")
+# Optional second Telegram channel that receives BOTH Solana and EVM alerts.
+# Empty string = feature off; the per-chain channel keeps working either way.
+COMBINED_CHANNEL_ID = os.getenv("DEX_UPDATES_COMBINED_CHANNEL_ID", "")
 DISCORD_WEBHOOK     = os.getenv("DEX_UPDATES_DISCORD_WEBHOOK", "")
 POLL_SECONDS        = int(os.getenv("DEX_WATCHER_POLL_SECONDS", "30"))
 MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_MIN_AGE_HOURS", "24"))
@@ -317,11 +320,18 @@ async def _notify_discord(embed: dict) -> Optional[str]:
         return None
 
 
-async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
-    """Send the alert to the Telegram dex updates channel. Returns the created
+async def _send_telegram_alert(
+    caption: str, image_url: str, chat_id: str = ""
+) -> Optional[int]:
+    """Send the alert to a Telegram dex updates channel. Returns the created
     message_id on success, or None. Uses sendPhoto when a banner URL is present,
-    falls back to sendMessage if the photo request fails or no banner exists."""
-    if not (os.getenv("TELEGRAM_BOT_TOKEN") and CHANNEL_ID):
+    falls back to sendMessage if the photo request fails or no banner exists.
+
+    `chat_id` defaults to the Solana channel; pass COMBINED_CHANNEL_ID to post
+    the same alert to the combined Solana+EVM channel. Each destination gets its
+    own message_id so milestone replies can thread under both independently."""
+    chat_id = chat_id or CHANNEL_ID
+    if not (os.getenv("TELEGRAM_BOT_TOKEN") and chat_id):
         return None
     telegram_api = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}"
     async with aiohttp.ClientSession() as session:
@@ -333,7 +343,7 @@ async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
                 resp = await session.post(
                     f"{telegram_api}/sendPhoto",
                     json={
-                        "chat_id": CHANNEL_ID,
+                        "chat_id": chat_id,
                         "photo": image_url,
                         "caption": caption[:1024],
                         "parse_mode": "Markdown",
@@ -352,7 +362,7 @@ async def _send_telegram_alert(caption: str, image_url: str) -> Optional[int]:
         # a parse error can never fully drop the alert. One retry on 429.
         for extra in ({"parse_mode": "Markdown"}, {}):
             payload = {
-                "chat_id": CHANNEL_ID,
+                "chat_id": chat_id,
                 "text": caption[:4096],
                 "disable_web_page_preview": True,
                 **extra,
@@ -391,12 +401,19 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str) ->
     initial_mc = float(market_dict.get("market_cap") or market_dict.get("fdv") or 0)
     symbol     = market_dict.get("symbol") or ""
 
-    # Fire Telegram + Discord in parallel — matched to their existing sync semantics.
+    # Fire Telegram (per-chain + combined) + Discord in parallel — matched to
+    # their existing sync semantics. The combined send is a separate task so a
+    # failure there can never take down the primary channel's alert.
     tg_task = asyncio.create_task(_send_telegram_alert(caption, header_url))
+    combined_task = (
+        asyncio.create_task(_send_telegram_alert(caption, header_url, COMBINED_CHANNEL_ID))
+        if COMBINED_CHANNEL_ID else None
+    )
     dc_task = asyncio.create_task(_notify_discord(_format_discord_embed(profile, market, event_type)))
     tg_msg_id, dc_msg_id = await asyncio.gather(tg_task, dc_task)
+    tg_combined_msg_id = await combined_task if combined_task else None
 
-    if tg_msg_id is None and dc_msg_id is None:
+    if tg_msg_id is None and dc_msg_id is None and tg_combined_msg_id is None:
         # Nothing landed anywhere — let the caller retry on the next poll.
         return False
 
@@ -421,6 +438,7 @@ async def _send_alert(profile: dict, market: Optional[dict], event_type: str) ->
             ticker=symbol,
             name=(market_dict.get("name") or ""),
             tg_message_id=tg_msg_id,
+            tg_combined_message_id=tg_combined_msg_id,
             dc_message_id=dc_msg_id,
             chain="solana",
         )
