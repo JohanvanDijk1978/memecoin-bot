@@ -221,6 +221,195 @@ async def pump_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(plain, disable_web_page_preview=True)
 
 
+# ── /wallet ───────────────────────────────────────────────────────────────
+# Frontrun bills in credits (associated-wallets is 400 a call, and Gold only
+# includes 100k/month), so src.frontrun caches every read. Nothing here should
+# call the API twice for the same input.
+
+def solscan_link(address: str, chain: str) -> str:
+    if (chain or "").upper() == "EVM" or address.startswith("0x"):
+        return f"https://etherscan.io/address/{address}"
+    return f"https://solscan.io/account/{address}"
+
+
+def format_wallet(w: dict) -> list:
+    """Render one Frontrun wallet object as Markdown lines."""
+    from src.frontrun import has_fomo_tag
+
+    address = str(w.get("address") or "")
+    chain = str(w.get("chain") or "")
+    name = w.get("name") or w.get("primaryLabel") or ""
+    handle = w.get("twitterUsername") or ""
+    smart = w.get("smartFollowersCount")
+    followers = w.get("followersCount")
+
+    badges = []
+    if has_fomo_tag(w):
+        badges.append("🔥 FOMO")
+    for label in (w.get("labels") or []):
+        text = label.get("name") if isinstance(label, dict) else label
+        if text:
+            badges.append(escape_md(str(text)))
+
+    header = f"🪙 `{address}`"
+    lines = [header]
+
+    ident = []
+    if name:
+        ident.append(f"*{escape_md(str(name))}*")
+    if handle:
+        ident.append(f"[@{escape_md(str(handle))}](https://x.com/{handle})")
+    if ident:
+        lines.append("   " + " — ".join(ident))
+
+    stats = []
+    if smart is not None:
+        stats.append(f"{smart:,} smart followers")
+    if followers is not None:
+        stats.append(f"{followers:,} followers")
+    if chain:
+        stats.append(escape_md(chain.title()))
+    if stats:
+        lines.append("   " + " | ".join(stats))
+
+    if badges:
+        lines.append("   " + " · ".join(badges))
+
+    # Tags are the noisy field (top-holder markers, manual notes) — cap them so
+    # a heavily-tagged whale doesn't blow past Telegram's 4096-char limit.
+    tags = [
+        str(t.get("name")) for t in (w.get("tags") or [])
+        if isinstance(t, dict) and t.get("name")
+        and str(t.get("name")).strip().upper() != "FOMO"
+    ]
+    if tags:
+        shown = ", ".join(escape_md(t) for t in tags[:6])
+        if len(tags) > 6:
+            shown += f" +{len(tags) - 6} more"
+        lines.append(f"   🏷 {shown}")
+
+    if address:
+        lines.append(f"   [Solscan]({solscan_link(address, chain)})")
+
+    return lines
+
+
+async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+
+    from src import frontrun
+
+    if not context.args:
+        await update.message.reply_text(
+            "🪙 *Wallet lookup*\n\n"
+            "`/wallet @handle` — wallets linked to an X account\n"
+            "`/wallet <fomo_username>` — same lookup; FOMO-tagged wallets are flagged 🔥\n"
+            "`/wallet <address>` — labels and identity for a wallet\n\n"
+            "_Token contract addresses aren't supported — Frontrun has no CA endpoint._",
+            parse_mode="Markdown",
+        )
+        return
+
+    if not frontrun.is_configured():
+        await update.message.reply_text(
+            "❌ Frontrun is not configured — add `FRONTRUN_API_KEY` to .env and restart.",
+            parse_mode="Markdown",
+        )
+        return
+
+    query = context.args[0].strip()
+    mode = context.args[1].lower() if len(context.args) > 1 else ""
+    chain = frontrun.looks_like_address(query)
+
+    msg = await update.message.reply_text("⏳ Querying Frontrun...")
+
+    # ── Address input ─────────────────────────────────────────────────
+    # A Solana mint and a Solana wallet are the same format, so we can't tell
+    # a token CA from a wallet here. Send it anyway: an unmatched lookup is
+    # 5 credits, and "no match" is itself the answer.
+    if chain:
+        wallets = await frontrun.wallets_batch_query([query], chain=chain)
+        if not wallets:
+            await msg.edit_text(
+                f"🪙 No wallet data for `{query}`\n\n"
+                "_Frontrun has no identity for this address. If it's a token "
+                "contract rather than a wallet, that's expected._",
+                parse_mode="Markdown",
+            )
+            return
+        lines = ["🪙 *Wallet*\n"]
+        for w in wallets:
+            lines += format_wallet(w) + [""]
+        await _send_wallet_result(msg, lines)
+        return
+
+    # ── Handle input (X or Fomo — usually the same string) ─────────────
+    handle = frontrun.clean_handle(query)
+    if not handle:
+        await msg.edit_text("❌ Could not read that as a handle or address.")
+        return
+
+    if mode.startswith("mention"):
+        wallets = await frontrun.mentioned_wallets(handle)
+        title = f"🪙 *Wallets mentioned by* @{escape_md(handle)}"
+    else:
+        wallets = await frontrun.associated_wallets(handle)
+        title = f"🪙 *Wallets linked to* @{escape_md(handle)}"
+
+    # Fomo usernames don't always match an X handle. If the X lookup came back
+    # empty, try fomo.family directly (off unless FOMO_API_ENABLED=1) and then
+    # label whatever addresses it returns through Frontrun.
+    if not wallets:
+        profile = await frontrun.fomo_profile(handle)
+        if profile:
+            addrs = frontrun.fomo_addresses(profile)
+            if addrs:
+                labelled = await frontrun.wallets_batch_query(
+                    [a["address"] for a in addrs]
+                )
+                known = {str(w.get("address")) for w in labelled}
+                wallets = labelled + [
+                    a for a in addrs if a["address"] not in known
+                ]
+                title = f"🪙 *Fomo wallets for* {escape_md(handle)}"
+
+    if not wallets:
+        # `handle` goes inside code spans here, so it must NOT be escape_md'd —
+        # a backslash-escaped underscore renders literally inside backticks.
+        await msg.edit_text(
+            f"🪙 No wallets found for `{handle}`\n\n"
+            "_Either the account has no publicly linked wallets, or Frontrun "
+            f"hasn't indexed it._\n\nTry `/wallet {handle} mentioned` "
+            "for wallets they've tweeted about.",
+            parse_mode="Markdown",
+        )
+        return
+
+    fomo_count = sum(1 for w in wallets if frontrun.has_fomo_tag(w))
+    lines = [title, ""]
+    if fomo_count:
+        lines.append(f"🔥 {fomo_count} of these trade on fomo.family\n")
+    for w in wallets:
+        lines += format_wallet(w) + [""]
+
+    await _send_wallet_result(msg, lines)
+
+
+async def _send_wallet_result(msg, lines: list):
+    """Edit the placeholder with the result, truncating to Telegram's 4096-char
+    limit and falling back to plain text if Markdown fails to parse."""
+    text = "\n".join(lines).rstrip()
+    if len(text) > 4000:
+        text = text[:3950].rsplit("\n", 1)[0] + "\n\n_…truncated_"
+    try:
+        await msg.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        logger.warning(f"/wallet: Markdown edit failed ({e}); retrying as plain text")
+        plain = text.replace("\\", "").replace("*", "").replace("`", "")
+        await msg.edit_text(plain[:4000], disable_web_page_preview=True)
+
+
 async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -314,6 +503,7 @@ def build_bot_app() -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
     app.add_handler(CommandHandler("pump", cmd_pump))
+    app.add_handler(CommandHandler("wallet", cmd_wallet))
     app.add_handler(CallbackQueryHandler(pump_callback, pattern="^pump_"))
 
     async def set_commands(application):
@@ -322,6 +512,7 @@ def build_bot_app() -> Application:
             BotCommand("status", "Check bot status and uptime"),
             BotCommand("leaderboard", "Show group and user leaderboard"),
             BotCommand("pump", "Top pumping coins by timeframe"),
+            BotCommand("wallet", "Look up wallets by X handle or address"),
         ])
 
     app.post_init = set_commands
