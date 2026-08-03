@@ -294,7 +294,26 @@ def format_wallet(w: dict) -> list:
     return lines
 
 
+# Telegram's command menu can't show argument variants, so each mode gets its
+# own command. They all funnel into _wallet_lookup.
+
 async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/wallet — Fomo-linked wallets only (the default)."""
+    await _wallet_lookup(update, context, default_mode="fomo")
+
+
+async def cmd_wallet_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/walletall — every wallet linked to the X account, Fomo or not."""
+    await _wallet_lookup(update, context, default_mode="all")
+
+
+async def cmd_wallet_mentioned(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/walletmentions — wallets the account has tweeted about."""
+    await _wallet_lookup(update, context, default_mode="mentioned")
+
+
+async def _wallet_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                         default_mode: str = "fomo"):
     if not is_allowed(update):
         return
 
@@ -303,9 +322,10 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "🪙 *Wallet lookup*\n\n"
-            "`/wallet @handle` — wallets linked to an X account\n"
-            "`/wallet <fomo_username>` — same lookup; FOMO-tagged wallets are flagged 🔥\n"
-            "`/wallet <address>` — labels and identity for a wallet\n\n"
+            "`/wallet @handle` — 🔥 Fomo wallets only\n"
+            "`/walletall @handle` — every linked wallet\n"
+            "`/walletmentions @handle` — wallets they've tweeted about\n"
+            "`/wallet <address>` — labels and identity for one wallet\n\n"
             "_Token contract addresses aren't supported — Frontrun has no CA endpoint._",
             parse_mode="Markdown",
         )
@@ -319,7 +339,8 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     query = context.args[0].strip()
-    mode = context.args[1].lower() if len(context.args) > 1 else ""
+    # A trailing word still overrides, so `/wallet foo all` keeps working.
+    mode = context.args[1].lower() if len(context.args) > 1 else default_mode
     chain = frontrun.looks_like_address(query)
 
     msg = await update.message.reply_text("⏳ Querying Frontrun...")
@@ -357,10 +378,18 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wallets = await frontrun.associated_wallets(handle)
         title = f"🪙 *Wallets linked to* @{escape_md(handle)}"
 
+    # Default is Fomo-only. We still fetch the full list (one 400-credit call
+    # returns everything either way) and filter locally, so /walletall on the
+    # same handle is served straight from cache for free.
+    all_linked = list(wallets)
+    if mode == "fomo":
+        wallets = [w for w in wallets if frontrun.has_fomo_tag(w)]
+        title = f"🔥 *Fomo wallets for* @{escape_md(handle)}"
+
     # Fomo usernames don't always match an X handle. If the X lookup came back
     # empty, try fomo.family directly (off unless FOMO_API_ENABLED=1) and then
     # label whatever addresses it returns through Frontrun.
-    if not wallets:
+    if not all_linked:
         profile = await frontrun.fomo_profile(handle)
         if profile:
             addrs = frontrun.fomo_addresses(profile)
@@ -369,27 +398,49 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [a["address"] for a in addrs]
                 )
                 known = {str(w.get("address")) for w in labelled}
-                wallets = labelled + [
+                all_linked = labelled + [
                     a for a in addrs if a["address"] not in known
                 ]
-                title = f"🪙 *Fomo wallets for* {escape_md(handle)}"
+                wallets = (
+                    [w for w in all_linked if frontrun.has_fomo_tag(w)]
+                    if mode == "fomo" else all_linked
+                )
+                title = f"🔥 *Fomo wallets for* {escape_md(handle)}"
 
-    if not wallets:
-        # `handle` goes inside code spans here, so it must NOT be escape_md'd —
-        # a backslash-escaped underscore renders literally inside backticks.
+    # `handle` goes inside code spans below, so it must NOT be escape_md'd —
+    # a backslash-escaped underscore renders literally inside backticks.
+    if not all_linked:
         await msg.edit_text(
             f"🪙 No wallets found for `{handle}`\n\n"
             "_Either the account has no publicly linked wallets, or Frontrun "
-            f"hasn't indexed it._\n\nTry `/wallet {handle} mentioned` "
+            f"hasn't indexed it._\n\nTry `/walletmentions {handle}` "
             "for wallets they've tweeted about.",
             parse_mode="Markdown",
         )
         return
 
-    fomo_count = sum(1 for w in wallets if frontrun.has_fomo_tag(w))
+    # Linked wallets exist, but none are Fomo. Say so explicitly rather than
+    # showing a bare "not found" — and point at the cached full list, which
+    # costs nothing to display.
+    if not wallets:
+        await msg.edit_text(
+            f"🔥 No Fomo-tagged wallets for `{handle}`\n\n"
+            f"Frontrun has *{len(all_linked)}* linked wallet"
+            f"{'s' if len(all_linked) != 1 else ''}, none tagged FOMO.\n"
+            f"`/walletall {handle}` to see them (already cached, no credits).",
+            parse_mode="Markdown",
+        )
+        return
+
     lines = [title, ""]
-    if fomo_count:
-        lines.append(f"🔥 {fomo_count} of these trade on fomo.family\n")
+    if mode == "fomo":
+        lines.append(
+            f"🔥 {len(wallets)} of {len(all_linked)} linked wallets trade on fomo.family\n"
+        )
+    else:
+        fomo_count = sum(1 for w in wallets if frontrun.has_fomo_tag(w))
+        if fomo_count:
+            lines.append(f"🔥 {fomo_count} of these trade on fomo.family\n")
     for w in wallets:
         lines += format_wallet(w) + [""]
 
@@ -504,6 +555,8 @@ def build_bot_app() -> Application:
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
     app.add_handler(CommandHandler("pump", cmd_pump))
     app.add_handler(CommandHandler("wallet", cmd_wallet))
+    app.add_handler(CommandHandler("walletall", cmd_wallet_all))
+    app.add_handler(CommandHandler("walletmentions", cmd_wallet_mentioned))
     app.add_handler(CallbackQueryHandler(pump_callback, pattern="^pump_"))
 
     async def set_commands(application):
@@ -512,7 +565,9 @@ def build_bot_app() -> Application:
             BotCommand("status", "Check bot status and uptime"),
             BotCommand("leaderboard", "Show group and user leaderboard"),
             BotCommand("pump", "Top pumping coins by timeframe"),
-            BotCommand("wallet", "Look up wallets by X handle or address"),
+            BotCommand("wallet", "🔥 Fomo wallets for an X handle"),
+            BotCommand("walletall", "All wallets linked to an X handle"),
+            BotCommand("walletmentions", "Wallets an X account tweeted about"),
         ])
 
     app.post_init = set_commands
