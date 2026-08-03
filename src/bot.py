@@ -234,17 +234,22 @@ def solscan_link(address: str, chain: str) -> str:
 
 def format_wallet(w: dict) -> list:
     """Render one Frontrun wallet object as Markdown lines."""
-    from src.frontrun import has_fomo_tag
+    from src.frontrun import has_fomo_tag, fomo_username
 
     address = str(w.get("address") or "")
     chain = str(w.get("chain") or "")
     name = w.get("name") or w.get("primaryLabel") or ""
     handle = w.get("twitterUsername") or ""
+    fomo_user = fomo_username(w)
     smart = w.get("smartFollowersCount")
     followers = w.get("followersCount")
 
     badges = []
-    if has_fomo_tag(w):
+    # The Fomo username is the field that matters for /wallet — show it first
+    # and distinctly from the X handle, which is often but not always the same.
+    if fomo_user:
+        badges.append(f"🔥 fomo: *{escape_md(fomo_user)}*")
+    elif has_fomo_tag(w):
         badges.append("🔥 FOMO")
     for label in (w.get("labels") or []):
         text = label.get("name") if isinstance(label, dict) else label
@@ -376,97 +381,62 @@ async def _wallet_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _send_wallet_result(msg, lines)
         return
 
-    # ── Handle input (X or Fomo — usually the same string) ─────────────
+    # ── Username input ────────────────────────────────────────────────
+    # The FOMO username is the identifier. The X handle is not consulted as a
+    # source of truth — see frontrun.fomo_wallets().
     handle = frontrun.clean_handle(query)
     if not handle:
-        await msg.edit_text("❌ Could not read that as a handle or address.")
+        await msg.edit_text("❌ Could not read that as a username or address.")
         return
 
+    source = ""
     if mode.startswith("mention"):
         wallets, err = await frontrun.mentioned_wallets(handle)
         title = f"🪙 *Wallets mentioned by* @{escape_md(handle)}"
-    else:
-        # linked_wallets chains associated-wallets -> wallets-batch-query. The
-        # second call is what carries the FOMO tag; without it the filter below
-        # has nothing to match on.
+    elif mode == "all":
+        # Explicit escape hatch: every wallet Frontrun links to the X account,
+        # Fomo or not. Only reachable via /walletall.
         wallets, err = await frontrun.linked_wallets(handle)
-        title = f"🪙 *Wallets linked to* @{escape_md(handle)}"
+        title = f"🪙 *All wallets linked to* @{escape_md(handle)}"
+    else:
+        wallets, err, source = await frontrun.fomo_wallets(handle)
+        title = f"🔥 *Fomo wallets for* `{handle}`"
 
     # Say what actually went wrong. "No wallets found" for an auth failure or a
     # changed response shape is worse than useless — it looks like an answer.
     if err:
         await msg.edit_text(
-            f"⚠️ Frontrun lookup failed for `{handle}`\n\n"
+            f"⚠️ Lookup failed for `{handle}`\n\n"
             f"*{escape_md(err)}*\n\n"
-            "_See `data/bot.log` for the full response, or run_ "
-            "`python3 tools/diag_frontrun.py " + handle + "`",
+            f"Try `/walletall {handle}` to see everything Frontrun links to "
+            f"the X account, or run `python3 tools/probe_fomo.py {handle}` "
+            "on the VPS to find the working Fomo route.",
             parse_mode="Markdown",
         )
         return
 
-    # Default is Fomo-only. We still fetch the full list (one 400-credit call
-    # returns everything either way) and filter locally, so /walletall on the
-    # same handle is served straight from cache for free.
-    all_linked = list(wallets)
-    if mode == "fomo":
-        wallets = [w for w in wallets if frontrun.has_fomo_tag(w)]
-        title = f"🔥 *Fomo wallets for* @{escape_md(handle)}"
-
-    # Fomo usernames don't always match an X handle. If the X lookup came back
-    # empty, try fomo.family directly (off unless FOMO_API_ENABLED=1) and then
-    # label whatever addresses it returns through Frontrun.
-    if not all_linked:
-        profile = await frontrun.fomo_profile(handle)
-        if profile:
-            addrs = frontrun.fomo_addresses(profile)
-            if addrs:
-                labelled, _ = await frontrun.wallets_batch_query(
-                    [a["address"] for a in addrs]
-                )
-                known = {str(w.get("address")) for w in labelled}
-                all_linked = labelled + [
-                    a for a in addrs if a["address"] not in known
-                ]
-                wallets = (
-                    [w for w in all_linked if frontrun.has_fomo_tag(w)]
-                    if mode == "fomo" else all_linked
-                )
-                title = f"🔥 *Fomo wallets for* {escape_md(handle)}"
-
-    # `handle` goes inside code spans below, so it must NOT be escape_md'd —
-    # a backslash-escaped underscore renders literally inside backticks.
-    if not all_linked:
-        await msg.edit_text(
-            f"🪙 No wallets found for `{handle}`\n\n"
-            "_Either the account has no publicly linked wallets, or Frontrun "
-            f"hasn't indexed it._\n\nTry `/walletmentions {handle}` "
-            "for wallets they've tweeted about.",
-            parse_mode="Markdown",
-        )
-        return
-
-    # Linked wallets exist, but none are Fomo. Say so explicitly rather than
-    # showing a bare "not found" — and point at the cached full list, which
-    # costs nothing to display.
     if not wallets:
         await msg.edit_text(
-            f"🔥 No Fomo-tagged wallets for `{handle}`\n\n"
-            f"Frontrun has *{len(all_linked)}* linked wallet"
-            f"{'s' if len(all_linked) != 1 else ''}, none tagged FOMO.\n"
-            f"`/walletall {handle}` to see them (already cached, no credits).",
+            f"🔥 No Fomo wallets found for `{handle}`\n\n"
+            f"No fomo.family profile resolved, and nothing Frontrun links to "
+            f"that name carries the Fomo username.\n\n"
+            f"`/walletall {handle}` shows every X-linked wallet instead.",
             parse_mode="Markdown",
         )
         return
 
     lines = [title, ""]
-    if mode == "fomo":
-        lines.append(
-            f"🔥 {len(wallets)} of {len(all_linked)} linked wallets trade on fomo.family\n"
-        )
-    else:
-        fomo_count = sum(1 for w in wallets if frontrun.has_fomo_tag(w))
-        if fomo_count:
-            lines.append(f"🔥 {fomo_count} of these trade on fomo.family\n")
+    if source:
+        # Be explicit about provenance — "from fomo.family" and "inferred from a
+        # Frontrun label" are very different confidence levels.
+        note = {
+            "fomo.family":     f"{len(wallets)} wallet(s) from fomo.family",
+            "frontrun-label":  f"{len(wallets)} wallet(s) — Frontrun label matched `{handle}` on Fomo",
+            "fomo-tag-only":   f"⚠️ {len(wallets)} FOMO-tagged wallet(s), but none names `{handle}` — verify before trusting",
+            "cache":           f"{len(wallets)} wallet(s) (cached)",
+        }.get(source, f"{len(wallets)} wallet(s) via {source}")
+        lines.append(note + "\n")
+
     for w in wallets:
         lines += format_wallet(w) + [""]
 

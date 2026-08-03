@@ -315,6 +315,58 @@ def has_fomo_tag(wallet: dict) -> bool:
     return False
 
 
+# Frontrun renders the Fomo identity as a LABEL, e.g.
+#     @koyla_sol - "koyla_sol" on Fomo
+# so the username has to be parsed back out of the label text. Explicit fields
+# are checked first in case the API ever exposes one directly.
+_FOMO_LABEL_RE = re.compile(r'["“]([^"”]+)["”]\s*on\s*Fomo', re.I)
+_FOMO_BARE_RE = re.compile(r'@?([A-Za-z0-9_]{2,32})\s*(?:-|–|on)\s*Fomo\b', re.I)
+
+
+def fomo_username(wallet: dict) -> Optional[str]:
+    """Extract the fomo.family username Frontrun associates with a wallet.
+
+    Returns None if the wallet has no Fomo identity. This is the field Johan
+    cares about — it is NOT the same as `twitterUsername`, even though the two
+    often happen to match.
+    """
+    if not isinstance(wallet, dict):
+        return None
+
+    for key in ("fomoUsername", "fomo_username", "fomoHandle", "fomoName"):
+        val = wallet.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip().lstrip("@")
+
+    candidates: List[str] = []
+    for key in ("primaryLabel", "userDefinedLabel", "label", "name"):
+        val = wallet.get(key)
+        if isinstance(val, str):
+            candidates.append(val)
+    for coll in ("labels", "tags"):
+        for item in wallet.get(coll) or []:
+            text = item.get("name") if isinstance(item, dict) else item
+            if isinstance(text, str):
+                candidates.append(text)
+
+    for text in candidates:
+        m = _FOMO_LABEL_RE.search(text)
+        if m:
+            return m.group(1).strip().lstrip("@")
+    for text in candidates:
+        if "fomo" in text.lower():
+            m = _FOMO_BARE_RE.search(text)
+            if m and m.group(1).lower() != "on":
+                return m.group(1).strip().lstrip("@")
+    return None
+
+
+def matches_fomo_user(wallet: dict, username: str) -> bool:
+    """True if this wallet's Fomo identity is `username` (case-insensitive)."""
+    found = fomo_username(wallet)
+    return bool(found) and found.lower() == clean_handle(username).lower()
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 async def associated_wallets(handle: str, use_cache: bool = True
                              ) -> Tuple[List[dict], Optional[str]]:
@@ -391,6 +443,147 @@ async def linked_wallets(handle: str, enrich: bool = True, use_cache: bool = Tru
         hit = by_addr.get(str(a.get("address", "")))
         merged.append({**a, **hit} if hit else a)
     return merged, None
+
+
+# ── FOMO-username lookup (the primary path) ──────────────────────────────
+# Frontrun has NO reverse index from a Fomo username to its wallets — every
+# published endpoint is keyed by Twitter handle, and the extension's own Fomo
+# label comes out of wallets-batch-query (wallet -> Fomo, not Fomo -> wallets).
+# So the lookup has to start at fomo.family, then enrich through Frontrun.
+#
+# Candidate fomo.family routes, tried in order. Which one is live is unproven
+# from a dev sandbox (Cloudflare blocks it) — run tools/probe_fomo.py on the
+# VPS and put the winner first.
+FOMO_USER_PATHS = (
+    "/v2/users/{u}",
+    "/v2/users/by-username/{u}",
+    "/v2/users/username/{u}",
+    "/v2/profile/{u}",
+    "/v2/profiles/{u}",
+)
+
+# OFF by default. Confirmed 2026-08-04: fomo.family Cloudflare-blocks the VPS
+# outright — every path returns an identical 4,547-byte 403 challenge, so this
+# strategy can only ever burn 5 x 15s of timeout before the fallback runs.
+# Flip to 1 only if fomo.family becomes reachable (allowlisted IP, official
+# API access, or a documented endpoint from the Frontrun team).
+FOMO_DIRECT_ENABLED = os.getenv("FOMO_DIRECT_ENABLED", "").strip() in ("1", "true", "yes")
+
+# Last-resort only. Uses the X handle purely as a CANDIDATE GENERATOR, then
+# keeps a wallet only if its own Fomo label matches the username asked for —
+# so the Fomo field stays the source of truth, per the /wallet spec.
+FOMO_XFALLBACK = os.getenv("FOMO_XFALLBACK", "1").strip() in ("1", "true", "yes")
+
+
+async def _fomo_http(path: str, timeout: int = 15) -> Tuple[Any, Optional[str]]:
+    """GET against fomo.family's API. Returns (json, error)."""
+    url = f"https://prod-api.fomo.family{path}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={
+                    "accept": "application/json",
+                    "user-agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0.0.0 Safari/537.36"
+                    ),
+                    "origin": "https://fomo.family",
+                    "referer": "https://fomo.family/",
+                },
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status == 403:
+                    return None, "fomo.family blocked the request (Cloudflare)"
+                if resp.status == 404:
+                    return None, "404"
+                if resp.status != 200:
+                    return None, f"HTTP {resp.status}"
+                return await resp.json(content_type=None), None
+    except Exception as e:
+        return None, f"{type(e).__name__}"
+
+
+async def fomo_wallets(username: str, use_cache: bool = True
+                       ) -> Tuple[List[dict], Optional[str], str]:
+    """All wallets connected to a fomo.family username.
+
+    THIS IS THE PRIMARY /wallet PATH. The Fomo username is the identifier; the
+    X handle is not consulted as a source of truth.
+
+    Returns `(wallets, error, source)` where `source` names which strategy
+    produced the result, so the bot can be honest about provenance.
+    """
+    username = clean_handle(username)
+    if not username:
+        return [], "empty username", "none"
+
+    key = f"fomo_user:{username.lower()}"
+    if use_cache:
+        cached = _cache_get(key, TTL_ASSOCIATED)
+        if cached is not None:
+            return cached.get("wallets", []), None, cached.get("source", "cache")
+
+    # ── Strategy 1: fomo.family's own API — the real source of truth ──
+    addresses: List[dict] = []
+    fomo_errs = []
+    for template in (FOMO_USER_PATHS if FOMO_DIRECT_ENABLED else ()):
+        body, err = await _fomo_http(template.format(u=username))
+        if err:
+            fomo_errs.append(f"{template}: {err}")
+            continue
+        profile = body.get("data") if isinstance(body, dict) and isinstance(
+            body.get("data"), dict) else body
+        found = fomo_addresses(profile) if isinstance(profile, dict) else []
+        if found:
+            addresses = found
+            break
+
+    source = "fomo.family"
+
+    # ── Strategy 2: X handle as candidate generator, Fomo label as filter ──
+    if not addresses and FOMO_XFALLBACK:
+        candidates, err = await linked_wallets(username, use_cache=use_cache)
+        if candidates:
+            confirmed = [w for w in candidates if matches_fomo_user(w, username)]
+            if confirmed:
+                await _cache_put(key, {"wallets": confirmed, "source": "frontrun-label"})
+                return confirmed, None, "frontrun-label"
+            # Nothing carried the Fomo username. Report the near-miss rather
+            # than silently returning X-linked wallets Johan didn't ask for.
+            tagged = [w for w in candidates if has_fomo_tag(w)]
+            if tagged:
+                await _cache_put(key, {"wallets": tagged, "source": "fomo-tag-only"})
+                return tagged, None, "fomo-tag-only"
+        if err:
+            fomo_errs.append(f"frontrun: {err}")
+
+    if not addresses:
+        if not FOMO_DIRECT_ENABLED:
+            # Strategy 2 already ran and found nothing that names this user.
+            return [], (
+                f"no wallet carries the Fomo username `{username}`. "
+                "Direct fomo.family lookup is disabled (Cloudflare blocks the VPS)"
+            ), "none"
+        detail = "; ".join(fomo_errs[:3]) or "no route returned a profile"
+        return [], f"no Fomo profile found ({detail})", "none"
+
+    # Enrich the fomo.family addresses with Frontrun labels/tags.
+    labelled, lerr = await wallets_batch_query(
+        [str(a["address"]) for a in addresses[:MAX_ENRICH] if a.get("address")],
+        use_cache=use_cache,
+    )
+    if lerr:
+        logger.warning(f"fomo: enrichment failed for {username}: {lerr}")
+        await _cache_put(key, {"wallets": addresses, "source": source})
+        return addresses, None, source
+
+    by_addr = {str(w.get("address")): w for w in labelled}
+    merged = [{**a, **by_addr[str(a.get("address"))]}
+              if str(a.get("address")) in by_addr else a for a in addresses]
+    await _cache_put(key, {"wallets": merged, "source": source})
+    return merged, None, source
 
 
 async def mentioned_wallets(handle: str, use_cache: bool = True
