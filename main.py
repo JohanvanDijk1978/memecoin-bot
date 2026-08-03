@@ -59,12 +59,15 @@ async def run_discord_scraper():
 
 async def run_bot():
     """Start the Telegram bot that handles /status, /leaderboard, /pump."""
-    from src.bot import build_bot_app
+    from src.bot import build_bot_app, register_commands
     app = build_bot_app()
     await app.initialize()
+    # Explicit: post_init does NOT run under manual startup (PTB only calls it
+    # from run_polling/run_webhook), so without this the / menu never updates.
+    await register_commands(app)
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    logger.info("✅ Telegram bot started — commands: /status, /leaderboard, /pump")
+    logger.info("✅ Telegram bot started — /status /leaderboard /pump /wallet /credits")
 
     # Keep running until cancelled
     try:

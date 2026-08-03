@@ -623,17 +623,37 @@ def build_bot_app() -> Application:
     app.add_handler(CommandHandler("credits", cmd_credits))
     app.add_handler(CallbackQueryHandler(pump_callback, pattern="^pump_"))
 
-    async def set_commands(application):
-        from telegram import BotCommand
-        await application.bot.set_my_commands([
-            BotCommand("status", "Check bot status and uptime"),
-            BotCommand("leaderboard", "Show group and user leaderboard"),
-            BotCommand("pump", "Top pumping coins by timeframe"),
-            BotCommand("wallet", "🔥 Fomo wallets for an X handle"),
-            BotCommand("walletall", "All wallets linked to an X handle"),
-            BotCommand("walletmentions", "Wallets an X account tweeted about"),
-            BotCommand("credits", "Frontrun API credits remaining"),
-        ])
-
-    app.post_init = set_commands
+    # post_init is ONLY invoked by run_polling()/run_webhook(). main.py starts
+    # the app manually (initialize/start/start_polling) so it can run under
+    # asyncio.gather with the scrapers — which means post_init never fires and
+    # the command menu never updates. Kept for correctness if this app is ever
+    # started the normal way; main.py calls register_commands() explicitly.
+    app.post_init = register_commands
     return app
+
+
+BOT_COMMANDS = [
+    ("status",         "Check bot status and uptime"),
+    ("leaderboard",    "Show group and user leaderboard"),
+    ("pump",           "Top pumping coins by timeframe"),
+    ("wallet",         "🔥 Fomo wallets for an X handle"),
+    ("walletall",      "All wallets linked to an X handle"),
+    ("walletmentions", "Wallets an X account tweeted about"),
+    ("credits",        "Frontrun API credits remaining"),
+]
+
+
+async def register_commands(app: Application) -> None:
+    """Push the command list to Telegram so it shows in the / menu.
+
+    Must be awaited explicitly after app.initialize() — see the note in
+    build_bot_app about post_init not running under manual startup.
+    """
+    from telegram import BotCommand
+    try:
+        await app.bot.set_my_commands(
+            [BotCommand(name, desc) for name, desc in BOT_COMMANDS]
+        )
+        logger.info(f"✅ Registered {len(BOT_COMMANDS)} bot commands with Telegram")
+    except Exception as e:
+        logger.warning(f"Could not register bot commands: {e}")
