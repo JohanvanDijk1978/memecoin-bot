@@ -60,6 +60,18 @@ TTL_MENTIONED = 7 * 86400    # 500 credits a pop
 TTL_BATCH = 3 * 86400        # 100 credits per matched wallet
 TTL_SMART_COUNT = 86400      # 3 credits, cheap, but no reason to re-ask hourly
 
+# An EMPTY result is cached far more briefly than a populated one. A wrong
+# empty is much more damaging than a stale hit: it makes the API unreachable
+# for the whole TTL, and it looks identical to a real answer. One hour is long
+# enough to stop a spam loop, short enough that a bad entry heals itself.
+TTL_EMPTY = 3600
+
+# Bumped whenever the cached representation changes. Entries written by an
+# older version are ignored rather than trusted — this is what retires the
+# empty `assoc:*` entries written before associated-wallets was chained to
+# wallets-batch-query (2026-08-04).
+CACHE_VERSION = 2
+
 _SOL_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _EVM_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
@@ -141,15 +153,21 @@ def _cache_get(key: str, ttl: int) -> Optional[Any]:
     entry = _load_cache().get(key)
     if not isinstance(entry, dict):
         return None
+    # Written by an older build — don't trust its shape or its emptiness.
+    if entry.get("v") != CACHE_VERSION:
+        return None
+    value = entry.get("value")
+    if not value:
+        ttl = min(ttl, TTL_EMPTY)
     if time.time() - entry.get("ts", 0) > ttl:
         return None
-    return entry.get("value")
+    return value
 
 
 async def _cache_put(key: str, value: Any) -> None:
     async with _cache_lock:
         cache = _load_cache()
-        cache[key] = {"ts": time.time(), "value": value}
+        cache[key] = {"v": CACHE_VERSION, "ts": time.time(), "value": value}
         try:
             os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
             tmp = CACHE_FILE + ".tmp"
