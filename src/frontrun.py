@@ -31,7 +31,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from dotenv import load_dotenv
@@ -172,11 +172,19 @@ def _headers() -> Dict[str, str]:
 
 
 async def _request(method: str, path: str, payload: Optional[dict] = None,
-                   timeout: int = 20) -> Optional[dict]:
-    """One Frontrun call. Returns the parsed `data` field, or None on any
-    failure. Never raises — a dead API must not take a command handler down."""
+                   timeout: int = 20) -> Tuple[Any, Optional[str]]:
+    """One Frontrun call.
+
+    Returns `(data, None)` on success or `(None, reason)` on failure. The two
+    are kept distinct on purpose: an empty result and a failed call look
+    identical downstream otherwise, which makes a broken key or a changed
+    response shape indistinguishable from "this handle has no wallets" — and
+    it means we'd cache a failure as if it were an answer.
+
+    Never raises. A dead API must not take a command handler down.
+    """
     if not API_KEY:
-        return None
+        return None, "FRONTRUN_API_KEY not set"
 
     url = f"{BASE_URL}{path}"
     await _limiter.wait()
@@ -189,35 +197,46 @@ async def _request(method: str, path: str, payload: Optional[dict] = None,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 text = await resp.text()
-                if resp.status == 401 or resp.status == 403:
-                    logger.error(f"frontrun: auth rejected ({resp.status}) on {path}")
-                    return None
+                if resp.status in (401, 403):
+                    logger.error(f"frontrun: auth rejected ({resp.status}) on {path}: {text[:300]}")
+                    return None, f"auth rejected (HTTP {resp.status}) — check FRONTRUN_API_KEY"
                 if resp.status == 402:
-                    logger.error("frontrun: out of credits (402)")
-                    return None
+                    logger.error(f"frontrun: out of credits on {path}: {text[:300]}")
+                    return None, "out of credits (HTTP 402)"
+                if resp.status == 404:
+                    logger.warning(f"frontrun: 404 on {path}: {text[:300]}")
+                    return None, "not found (HTTP 404) — handle unknown to Frontrun"
                 if resp.status == 429:
                     logger.warning(f"frontrun: rate limited on {path}")
-                    return None
+                    return None, "rate limited (HTTP 429) — try again shortly"
                 if resp.status != 200:
-                    logger.warning(f"frontrun: HTTP {resp.status} on {path}: {text[:200]}")
-                    return None
+                    logger.warning(f"frontrun: HTTP {resp.status} on {path}: {text[:300]}")
+                    return None, f"HTTP {resp.status}"
                 body = json.loads(text)
     except asyncio.TimeoutError:
         logger.warning(f"frontrun: timeout on {path}")
-        return None
+        return None, f"timeout after {timeout}s"
     except Exception as e:
         logger.warning(f"frontrun: request failed on {path}: {e}")
-        return None
+        return None, f"request failed: {type(e).__name__}"
 
     if not isinstance(body, dict):
-        return None
+        logger.warning(f"frontrun: non-dict body on {path}: {str(body)[:300]}")
+        return None, "unexpected response body"
     if body.get("status") is False:
         logger.warning(f"frontrun: API error on {path}: {body.get('message')}")
-        return None
-    return body.get("data")
+        return None, f"API error: {body.get('message')}"
+
+    data = body.get("data")
+    # A 200 whose payload we can't find is a shape change, not an empty result.
+    # Log the whole envelope — that's the only way to fix the parser.
+    if data is None and "data" not in body:
+        logger.warning(f"frontrun: no 'data' key on {path}; body={json.dumps(body)[:600]}")
+        return None, "response had no 'data' field"
+    return data, None
 
 
-def _extract_wallets(data: Any) -> List[dict]:
+def _extract_wallets(data: Any, _depth: int = 0) -> List[dict]:
     """Pull the wallet list out of a response.
 
     The docs publish sample JSON for smart-followers and high-pnl but not for
@@ -230,14 +249,40 @@ def _extract_wallets(data: Any) -> List[dict]:
     if isinstance(data, list):
         return [w for w in data if isinstance(w, dict)]
     if isinstance(data, dict):
-        for key in ("wallets", "associatedWallets", "mentionedWallets",
-                    "list", "items", "results", "data"):
-            val = data.get(key)
-            if isinstance(val, list):
-                return [w for w in val if isinstance(w, dict)]
         # A single wallet object returned bare.
         if "address" in data:
             return [data]
+        for key in ("wallets", "associatedWallets", "mentionedWallets",
+                    "associated_wallets", "mentioned_wallets",
+                    "list", "items", "results", "records", "rows", "data"):
+            val = data.get(key)
+            if isinstance(val, list):
+                return [w for w in val if isinstance(w, dict)]
+            # One more level of nesting, e.g. {"data": {"wallets": [...]}}.
+            if isinstance(val, dict):
+                nested = _extract_wallets(val, _depth + 1)
+                if nested:
+                    return nested
+        # Grouped by chain: {"SOLANA": [...], "EVM": [...]}.
+        grouped: List[dict] = []
+        for key, val in data.items():
+            if isinstance(val, list) and val and isinstance(val[0], dict) \
+                    and "address" in val[0]:
+                for w in val:
+                    if isinstance(w, dict):
+                        grouped.append({"chain": key.upper(), **w})
+        if grouped:
+            return grouped
+        # Last resort: recurse into any remaining dict value. The real response
+        # shape for associated-wallets isn't published, so rather than fail on
+        # an unexpected wrapper key we go looking for anything with an
+        # `address` field. Depth-limited to avoid pathological nesting.
+        if _depth < 4:
+            for val in data.values():
+                if isinstance(val, (dict, list)):
+                    found = _extract_wallets(val, _depth + 1)
+                    if found:
+                        return found
     return []
 
 
@@ -251,46 +296,67 @@ def has_fomo_tag(wallet: dict) -> bool:
 
 
 # ── Public API ────────────────────────────────────────────────────────────
-async def associated_wallets(handle: str, use_cache: bool = True) -> List[dict]:
-    """Wallets publicly linked to an X account. 400 credits — always cached."""
+async def associated_wallets(handle: str, use_cache: bool = True
+                             ) -> Tuple[List[dict], Optional[str]]:
+    """Wallets publicly linked to an X account. 400 credits — always cached.
+
+    Returns `(wallets, error)`. On error the result is NOT cached, so a
+    transient failure can't poison the handle for the next 7 days.
+    """
     handle = clean_handle(handle)
     if not handle:
-        return []
+        return [], "empty handle"
     key = f"assoc:{handle.lower()}"
     if use_cache:
         cached = _cache_get(key, TTL_ASSOCIATED)
         if cached is not None:
-            return cached
+            return cached, None
 
-    data = await _request("GET", f"/pro/twitter/{handle}/associated-wallets")
-    if data is None:
-        return []
+    data, err = await _request("GET", f"/pro/twitter/{handle}/associated-wallets")
+    if err:
+        return [], err
     wallets = _extract_wallets(data)
+    if not wallets and data:
+        # 200 with a payload we couldn't parse. Don't cache — log the shape so
+        # the extractor can be fixed against real data.
+        logger.warning(
+            f"frontrun: associated-wallets for {handle} returned unparsed data: "
+            f"{json.dumps(data)[:600]}"
+        )
+        return [], "response shape not recognised (logged for debugging)"
     await _cache_put(key, wallets)
-    return wallets
+    return wallets, None
 
 
-async def mentioned_wallets(handle: str, use_cache: bool = True) -> List[dict]:
+async def mentioned_wallets(handle: str, use_cache: bool = True
+                            ) -> Tuple[List[dict], Optional[str]]:
     """Wallets referenced in the account's tweets. 500 credits — always cached."""
     handle = clean_handle(handle)
     if not handle:
-        return []
+        return [], "empty handle"
     key = f"mention:{handle.lower()}"
     if use_cache:
         cached = _cache_get(key, TTL_MENTIONED)
         if cached is not None:
-            return cached
+            return cached, None
 
-    data = await _request("GET", f"/pro/twitter/{handle}/mentioned-wallets")
-    if data is None:
-        return []
+    data, err = await _request("GET", f"/pro/twitter/{handle}/mentioned-wallets")
+    if err:
+        return [], err
     wallets = _extract_wallets(data)
+    if not wallets and data:
+        logger.warning(
+            f"frontrun: mentioned-wallets for {handle} returned unparsed data: "
+            f"{json.dumps(data)[:600]}"
+        )
+        return [], "response shape not recognised (logged for debugging)"
     await _cache_put(key, wallets)
-    return wallets
+    return wallets, None
 
 
 async def wallets_batch_query(addresses: List[str], chain: Optional[str] = None,
-                              use_cache: bool = True) -> List[dict]:
+                              use_cache: bool = True
+                              ) -> Tuple[List[dict], Optional[str]]:
     """Label lookup for on-chain addresses.
 
     100 credits per MATCHED wallet, 5 per unmatched — so passing a token CA by
@@ -299,7 +365,7 @@ async def wallets_batch_query(addresses: List[str], chain: Optional[str] = None,
     """
     wanted = [a.strip() for a in addresses if a and a.strip()]
     if not wanted:
-        return []
+        return [], None
 
     results: List[dict] = []
     to_fetch: List[dict] = []
@@ -316,10 +382,12 @@ async def wallets_batch_query(addresses: List[str], chain: Optional[str] = None,
         to_fetch.append({"chain": detected, "address": addr})
 
     if to_fetch:
-        data = await _request(
+        data, err = await _request(
             "POST", "/pro/twitter/wallets-batch-query",
             payload={"wallets": to_fetch},
         )
+        if err:
+            return results, err
         fetched = _extract_wallets(data)
         by_addr = {str(w.get("address", "")): w for w in fetched}
         for item in to_fetch:
@@ -330,7 +398,7 @@ async def wallets_batch_query(addresses: List[str], chain: Optional[str] = None,
             if hit:
                 results.append(hit)
 
-    return results
+    return results, None
 
 
 async def smart_follower_count(handle: str, use_cache: bool = True) -> Optional[int]:
@@ -348,8 +416,8 @@ async def smart_follower_count(handle: str, use_cache: bool = True) -> Optional[
         if cached is not None:
             return cached
 
-    data = await _request("GET", f"/pro/twitter/{handle}/smart-followers/count")
-    if not isinstance(data, dict):
+    data, err = await _request("GET", f"/pro/twitter/{handle}/smart-followers/count")
+    if err or not isinstance(data, dict):
         return None
     meta = data.get("meta") or {}
     if meta.get("resolved") is False:
@@ -365,7 +433,32 @@ async def credits_remaining() -> Optional[dict]:
     """Current credit balance. Not cached — the whole point is a live figure."""
     if not API_KEY:
         return None
-    return await _request("GET", f"/user/paid-api/points/{API_KEY}")
+    data, err = await _request("GET", f"/user/paid-api/points/{API_KEY}")
+    return None if err else data
+
+
+def clear_cache(handle_or_address: str = "") -> int:
+    """Drop cached entries so the next lookup re-queries Frontrun.
+
+    With no argument, clears everything. Returns the number of entries removed.
+    Costs credits on the next lookup — that's the point.
+    """
+    global _cache
+    cache = _load_cache()
+    needle = clean_handle(handle_or_address).lower()
+    if needle:
+        doomed = [k for k in cache if needle in k.lower()]
+    else:
+        doomed = list(cache)
+    for k in doomed:
+        cache.pop(k, None)
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception as e:
+        logger.warning(f"frontrun: cache clear failed: {e}")
+    return len(doomed)
 
 
 async def fomo_profile(username: str) -> Optional[dict]:

@@ -339,8 +339,15 @@ async def _wallet_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     query = context.args[0].strip()
+    rest = [a.lower() for a in context.args[1:]]
+    # `fresh` / `nocache` forces a re-query — costs credits, but it's the way
+    # out when a bad response got cached.
+    fresh = any(a in ("fresh", "nocache", "refresh") for a in rest)
+    if fresh:
+        frontrun.clear_cache(query)
+    override = next((a for a in rest if a not in ("fresh", "nocache", "refresh")), "")
     # A trailing word still overrides, so `/wallet foo all` keeps working.
-    mode = context.args[1].lower() if len(context.args) > 1 else default_mode
+    mode = override or default_mode
     chain = frontrun.looks_like_address(query)
 
     msg = await update.message.reply_text("⏳ Querying Frontrun...")
@@ -350,7 +357,11 @@ async def _wallet_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # a token CA from a wallet here. Send it anyway: an unmatched lookup is
     # 5 credits, and "no match" is itself the answer.
     if chain:
-        wallets = await frontrun.wallets_batch_query([query], chain=chain)
+        wallets, err = await frontrun.wallets_batch_query([query], chain=chain)
+        if err:
+            await msg.edit_text(f"⚠️ Frontrun lookup failed — {escape_md(err)}",
+                                parse_mode="Markdown")
+            return
         if not wallets:
             await msg.edit_text(
                 f"🪙 No wallet data for `{query}`\n\n"
@@ -372,11 +383,23 @@ async def _wallet_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if mode.startswith("mention"):
-        wallets = await frontrun.mentioned_wallets(handle)
+        wallets, err = await frontrun.mentioned_wallets(handle)
         title = f"🪙 *Wallets mentioned by* @{escape_md(handle)}"
     else:
-        wallets = await frontrun.associated_wallets(handle)
+        wallets, err = await frontrun.associated_wallets(handle)
         title = f"🪙 *Wallets linked to* @{escape_md(handle)}"
+
+    # Say what actually went wrong. "No wallets found" for an auth failure or a
+    # changed response shape is worse than useless — it looks like an answer.
+    if err:
+        await msg.edit_text(
+            f"⚠️ Frontrun lookup failed for `{handle}`\n\n"
+            f"*{escape_md(err)}*\n\n"
+            "_See `data/bot.log` for the full response, or run_ "
+            "`python3 tools/diag_frontrun.py " + handle + "`",
+            parse_mode="Markdown",
+        )
+        return
 
     # Default is Fomo-only. We still fetch the full list (one 400-credit call
     # returns everything either way) and filter locally, so /walletall on the
@@ -394,7 +417,7 @@ async def _wallet_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if profile:
             addrs = frontrun.fomo_addresses(profile)
             if addrs:
-                labelled = await frontrun.wallets_batch_query(
+                labelled, _ = await frontrun.wallets_batch_query(
                     [a["address"] for a in addrs]
                 )
                 known = {str(w.get("address")) for w in labelled}
