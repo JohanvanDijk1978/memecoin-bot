@@ -252,7 +252,9 @@ def _extract_wallets(data: Any, _depth: int = 0) -> List[dict]:
         # A single wallet object returned bare.
         if "address" in data:
             return [data]
-        for key in ("wallets", "associatedWallets", "mentionedWallets",
+        # `addresses` is what associated-wallets actually returns (confirmed
+        # against the live API 2026-08-04): {"data":{"addresses":[{chain,address}]}}
+        for key in ("addresses", "wallets", "associatedWallets", "mentionedWallets",
                     "associated_wallets", "mentioned_wallets",
                     "list", "items", "results", "records", "rows", "data"):
             val = data.get(key)
@@ -326,6 +328,51 @@ async def associated_wallets(handle: str, use_cache: bool = True
         return [], "response shape not recognised (logged for debugging)"
     await _cache_put(key, wallets)
     return wallets, None
+
+
+# associated-wallets is only an address list, so identifying a Fomo trader
+# takes a second call. Each MATCHED wallet is another 100 credits, so a KOL
+# with 30 linked wallets would cost 400 + 3000. Cap it.
+MAX_ENRICH = 25
+
+
+async def linked_wallets(handle: str, enrich: bool = True, use_cache: bool = True
+                         ) -> Tuple[List[dict], Optional[str]]:
+    """Wallets linked to an X account, with labels/tags attached.
+
+    Two chained calls, because Frontrun splits them:
+      1. associated-wallets   → [{chain, address}]           400 credits
+      2. wallets-batch-query  → name, tags (incl. FOMO), PnL 100 per match
+
+    The FOMO tag only exists on step 2's output, so `enrich=False` can never
+    answer "does this person trade on fomo.family".
+
+    Step 2 is cached per-address, so once /wallet has run, /walletall on the
+    same handle is free.
+    """
+    addrs, err = await associated_wallets(handle, use_cache=use_cache)
+    if err or not addrs:
+        return [], err
+
+    if not enrich:
+        return addrs, None
+
+    subset = [a for a in addrs[:MAX_ENRICH] if a.get("address")]
+    labelled, lerr = await wallets_batch_query(
+        [str(a["address"]) for a in subset], use_cache=use_cache
+    )
+    if lerr:
+        # Degrade to bare addresses rather than losing the 400 credits we just
+        # spent — the caller can still show them, just without tags.
+        logger.warning(f"frontrun: enrichment failed for {handle}: {lerr}")
+        return addrs, None
+
+    by_addr = {str(w.get("address")): w for w in labelled}
+    merged = []
+    for a in addrs:
+        hit = by_addr.get(str(a.get("address", "")))
+        merged.append({**a, **hit} if hit else a)
+    return merged, None
 
 
 async def mentioned_wallets(handle: str, use_cache: bool = True

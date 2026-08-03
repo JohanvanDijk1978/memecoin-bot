@@ -386,7 +386,10 @@ async def _wallet_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE,
         wallets, err = await frontrun.mentioned_wallets(handle)
         title = f"🪙 *Wallets mentioned by* @{escape_md(handle)}"
     else:
-        wallets, err = await frontrun.associated_wallets(handle)
+        # linked_wallets chains associated-wallets -> wallets-batch-query. The
+        # second call is what carries the FOMO tag; without it the filter below
+        # has nothing to match on.
+        wallets, err = await frontrun.linked_wallets(handle)
         title = f"🪙 *Wallets linked to* @{escape_md(handle)}"
 
     # Say what actually went wrong. "No wallets found" for an auth failure or a
@@ -468,6 +471,43 @@ async def _wallet_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE,
         lines += format_wallet(w) + [""]
 
     await _send_wallet_result(msg, lines)
+
+
+async def cmd_credits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Frontrun credit balance. Worth watching: a /wallet lookup on a handle
+    with 2 linked wallets costs 600 credits (400 + 2x100)."""
+    if not is_allowed(update):
+        return
+
+    from src import frontrun
+
+    if not frontrun.is_configured():
+        await update.message.reply_text("❌ FRONTRUN_API_KEY not set.")
+        return
+
+    data = await frontrun.credits_remaining()
+    if not isinstance(data, dict):
+        await update.message.reply_text("⚠️ Could not read Frontrun credit balance.")
+        return
+
+    current = data.get("currentPoints")
+    try:
+        current = int(current)
+    except (TypeError, ValueError):
+        current = None
+
+    lines = ["💳 *Frontrun credits*\n"]
+    if current is not None:
+        lines.append(f"*{current:,}* remaining")
+        # Rough guide, using the observed 2-wallet case as the unit.
+        lines.append(f"≈ {current // 600} more `/wallet` lookups")
+    else:
+        lines.append(f"`{json.dumps(data)[:300]}`")
+    lines.append(
+        "\n_400 per handle + 100 per matched wallet._\n"
+        "_Cached results are free — only `fresh` re-bills._"
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def _send_wallet_result(msg, lines: list):
@@ -580,6 +620,7 @@ def build_bot_app() -> Application:
     app.add_handler(CommandHandler("wallet", cmd_wallet))
     app.add_handler(CommandHandler("walletall", cmd_wallet_all))
     app.add_handler(CommandHandler("walletmentions", cmd_wallet_mentioned))
+    app.add_handler(CommandHandler("credits", cmd_credits))
     app.add_handler(CallbackQueryHandler(pump_callback, pattern="^pump_"))
 
     async def set_commands(application):
@@ -591,6 +632,7 @@ def build_bot_app() -> Application:
             BotCommand("wallet", "🔥 Fomo wallets for an X handle"),
             BotCommand("walletall", "All wallets linked to an X handle"),
             BotCommand("walletmentions", "Wallets an X account tweeted about"),
+            BotCommand("credits", "Frontrun API credits remaining"),
         ])
 
     app.post_init = set_commands
