@@ -1,0 +1,5 @@
+.env
+.fomo_session.json
+.venv/
+__pycache__/
+.chrome-profile/

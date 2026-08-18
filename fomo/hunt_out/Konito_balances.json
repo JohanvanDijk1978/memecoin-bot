@@ -1,0 +1,1389 @@
+{
+ "balances": [
+  {
+   "balance": {
+    "tokenAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "balance": "20557347716",
+    "shiftedBalance": 20557.347716,
+    "tokenId": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "0.00002448244575011231",
+    "change1": "-0.00004024811036903149",
+    "change4": "0.000024622480786363096",
+    "change12": "3.569949201966228e-7",
+    "change24": "-0.000024092465724832816",
+    "createdAt": 1710952381,
+    "exchanges": [
+     {
+      "address": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+      "name": "Orca"
+     },
+     {
+      "address": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+      "name": "Raydium"
+     },
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "name": "Raydium CLMM"
+     },
+     {
+      "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "name": "PumpSwap"
+     }
+    ],
+    "liquidity": "10683466",
+    "marketCap": "7828452713",
+    "pair": {
+     "protocol": "Orca"
+    },
+    "priceUSD": "0.999798896923",
+    "token": {
+     "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+     "decimals": 6,
+     "networkId": 1399811149,
+     "createdAt": 1602610673,
+     "creatorAddress": "5TYZChz7APFopR5QirD5of4rQj1p9AXxeSAg6JndBdGj",
+     "name": "USDC",
+     "symbol": "USDC",
+     "freezable": "7dGbd2QZcCKcTndnHcTL8q7SMVXAkp688NTQYwrRCrar",
+     "mintable": "BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG",
+     "isScam": null,
+     "info": {
+      "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "circulatingSupply": "71857260186.65233",
+      "cmcId": null,
+      "description": "USDC is a USD-pegged stablecoin issued by Circle. It is used for payments, remittances, and as a primary collateral asset in DeFi. Circle publishes monthly reserve attestations by a Big Four accounting firm, ensuring every token is backed 1:1 by cash and short-dated U.S. Treasuries held in regulated financial institutions.",
+      "id": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v:1399811149",
+      "imageBannerUrl": "https://media.thegrid.id/1116/7/1194/id1762524723-ikQDLLiTQcC9JLMI9cc6Cw/image-1778674766.jpeg",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v_large_c8d2766f-09f9-48b6-ae77-54a3191a8eaf.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v_small_c8d2766f-09f9-48b6-ae77-54a3191a8eaf.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v_thumb_c8d2766f-09f9-48b6-ae77-54a3191a8eaf.png",
+      "imageThumbHash": "JYWFDQIsSFeHeHCNR0iHgHQICFh3iHB0Vw==",
+      "name": "USDC",
+      "networkId": 1399811149,
+      "symbol": "USDC",
+      "totalSupply": "71857260186.65233"
+     },
+     "socialLinks": {
+      "discord": "https://discord.com/invite/buildoncircle",
+      "telegram": null,
+      "twitter": "https://x.com/BuildOnCircle",
+      "website": "https://www.circle.com/en/usdc"
+     },
+     "launchpad": null
+    },
+    "txnCount1": 1820,
+    "txnCount4": 5110,
+    "txnCount12": 13709,
+    "txnCount24": 29483,
+    "volume1": "3740976",
+    "volume5m": "729519",
+    "volume4": "9332021",
+    "volume12": "23622057",
+    "volume24": "47099626"
+   },
+   "userToken": {
+    "id": "a0289699-c6cb-4f4e-adb8-ec25e5f7ab40",
+    "tokenAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 20557.349203,
+    "tokenAmountRemaining": -9445535935,
+    "averageEntryPriceUsd": 1,
+    "currentRealizedPnlUsd": -6.75254310052341,
+    "totalRealizedPnlUsd": -6.75265474152856,
+    "currentCostBasisUsd": 110806.74177512767,
+    "totalCostBasisUsd": 547606.9937241276,
+    "updatedAt": "2026-08-18T14:02:53.000Z",
+    "holdingSince": "2026-08-04T15:43:16.000Z",
+    "wasSwapped": true
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn",
+    "balance": "1332820367923378",
+    "shiftedBalance": 1332820.367923378,
+    "tokenId": "HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "0.0013027383907213512",
+    "change1": "-0.0066703464807064804",
+    "change4": "-0.20267413315639532",
+    "change12": "-0.15353695272783863",
+    "change24": "-0.2943245038167206",
+    "createdAt": 1786061558,
+    "exchanges": [
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "name": "Raydium CLMM"
+     },
+     {
+      "address": "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+      "name": "Meteora DAMM"
+     }
+    ],
+    "liquidity": "225143",
+    "marketCap": "2070795",
+    "pair": {
+     "protocol": "Meteora"
+    },
+    "priceUSD": "2.07756048843e-3",
+    "token": {
+     "address": "HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn",
+     "decimals": 9,
+     "networkId": 1399811149,
+     "createdAt": 1785968943,
+     "creatorAddress": "5CEbueQnq1Ym2uSSx2xXds3jQAqT1BDnkA59RZobSPAG",
+     "name": "MANLET",
+     "symbol": "MANLET",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn",
+      "circulatingSupply": "996743360.792522635",
+      "cmcId": null,
+      "description": "",
+      "id": "HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn:1399811149",
+      "imageBannerUrl": "https://token-media.defined.fi/1399811149_HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn_banner_3c3f1d269879.png",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn_large_54066137a9c7.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn_small_f30df90e2216.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn_thumb_b2bf42573a80.png",
+      "imageThumbHash": "xAcKBwAHyGeLdIuId2iXSLeGhQp3CHUK",
+      "name": "MANLET",
+      "networkId": 1399811149,
+      "symbol": "MANLET",
+      "totalSupply": "996743360.792522635"
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": null,
+      "twitter": "https://x.com/_manlet",
+      "website": "https://www.stonkfun.xyz/token/HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn"
+     },
+     "launchpad": {
+      "launchpadName": "StonkFun",
+      "launchpadIconUrl": "https://crypto-exchange-logos-production.s3.us-west-2.amazonaws.com/launchpad/stonkfun.png",
+      "graduationPercent": null,
+      "migrated": false
+     }
+    },
+    "txnCount1": 284,
+    "txnCount4": 931,
+    "txnCount12": 2050,
+    "txnCount24": 22383,
+    "volume1": "87138",
+    "volume5m": "1916",
+    "volume4": "310500",
+    "volume12": "560084",
+    "volume24": "8839799"
+   },
+   "userToken": {
+    "id": "6962c1d9-da22-4c02-9693-90ffef1b5cbe",
+    "tokenAddress": "HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 1332820.367923378,
+    "tokenAmountRemaining": 1332820367923378,
+    "averageEntryPriceUsd": 0.0028025378896575077,
+    "currentRealizedPnlUsd": 1885.5368357339294,
+    "totalRealizedPnlUsd": -834.5680081168039,
+    "currentCostBasisUsd": 5764.320341377358,
+    "totalCostBasisUsd": 10742.213908377358,
+    "updatedAt": "2026-08-17T16:09:21.000Z",
+    "holdingSince": "2026-08-17T16:06:07.000Z",
+    "wasSwapped": true
+   },
+   "activeTrade": {
+    "tokenAddress": "HxQhDGYqyjorgogMJx7YbBHADEDxuHhLnMMmr6VYpyn",
+    "createdAt": "2026-08-17T16:06:07.000Z",
+    "updatedAt": "2026-08-17T16:09:21.000Z",
+    "closedAt": null,
+    "humanTokenAmount": 1332820.3679233782,
+    "avgEntryPrice": null,
+    "avgExitPrice": null,
+    "sumSwapOpen": 0,
+    "sumSwapClosed": 0,
+    "sumTransferIn": 2056821.5554373122,
+    "sumTransferOut": 724001.187513934,
+    "avgTransferInPrice": 0.0028025378896575077,
+    "avgTransferOutPrice": 0.005406866264046591,
+    "realizedPnlUsd": 1885.5368357339294,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "675f8d1d-6a4d-46ac-8a22-82cd03567160"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump",
+    "balance": "1833680719785",
+    "shiftedBalance": 1833680.719785,
+    "tokenId": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "0.01565010273846627",
+    "change1": "-0.006591716701972462",
+    "change4": "-0.1116132227149565",
+    "change12": "-0.05769601195070418",
+    "change24": "-0.4623527772343578",
+    "createdAt": 1782959359,
+    "exchanges": [
+     {
+      "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "name": "PumpSwap"
+     },
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+      "name": "Meteora DAMM"
+     }
+    ],
+    "liquidity": "65131",
+    "marketCap": "1221212",
+    "pair": {
+     "protocol": "PumpAmm"
+    },
+    "priceUSD": "1.22124401091e-3",
+    "token": {
+     "address": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump",
+     "decimals": 6,
+     "networkId": 1399811149,
+     "createdAt": 1782958803,
+     "creatorAddress": "DYmsQudNqJyyDvq86XmzAvrU9T7xwfQEwh6gPQw9TPNF",
+     "name": "The Black Table",
+     "symbol": "MENSA",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump",
+      "circulatingSupply": "999973785.198782",
+      "cmcId": null,
+      "description": ".",
+      "id": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump:1399811149",
+      "imageBannerUrl": "https://token-media.defined.fi/1399811149_CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump_banner_3a355fdb8012.png",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump_large_3642b3bd9598.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump_small_e3e8c3eff9cc.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump_thumb_74c3b34b9976.png",
+      "imageThumbHash": "56UFNwhVaUeIpYh4cleYBKh4dYEIEnYA",
+      "name": "The Black Table",
+      "networkId": 1399811149,
+      "symbol": "MENSA",
+      "totalSupply": "999973785.198782"
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": null,
+      "twitter": "https://x.com/wirelyss/status/2072523606353990075",
+      "website": "https://mensa.meme"
+     },
+     "launchpad": {
+      "launchpadName": "Pump.fun",
+      "launchpadIconUrl": "https://crypto-exchange-logos-production.s3.us-west-2.amazonaws.com/6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P.webp",
+      "graduationPercent": 100,
+      "migrated": true
+     }
+    },
+    "txnCount1": 106,
+    "txnCount4": 790,
+    "txnCount12": 1747,
+    "txnCount24": 6238,
+    "volume1": "8147",
+    "volume5m": "942",
+    "volume4": "65712",
+    "volume12": "151058",
+    "volume24": "721686"
+   },
+   "userToken": {
+    "id": "f47a4414-a72a-4c04-975e-40caa9b169f6",
+    "tokenAddress": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 1833680.719785,
+    "tokenAmountRemaining": 2033680719785,
+    "averageEntryPriceUsd": 0.0035704970725187416,
+    "currentRealizedPnlUsd": 293.1353894580236,
+    "totalRealizedPnlUsd": 1066.1331059013405,
+    "currentCostBasisUsd": 7834.623010134975,
+    "totalCostBasisUsd": 12699.517226343341,
+    "updatedAt": "2026-08-02T11:59:39.000Z",
+    "holdingSince": "2026-07-07T05:16:31.000Z",
+    "wasSwapped": true
+   },
+   "activeTrade": {
+    "tokenAddress": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump",
+    "createdAt": "2026-07-07T05:16:31.000Z",
+    "updatedAt": "2026-08-02T11:59:39.000Z",
+    "closedAt": null,
+    "humanTokenAmount": 1833680.7197849997,
+    "avgEntryPrice": null,
+    "avgExitPrice": 0.004531010055,
+    "sumSwapOpen": 0,
+    "sumSwapClosed": 200000,
+    "sumTransferIn": 2153680.7197849997,
+    "sumTransferOut": 120000,
+    "avgTransferInPrice": 0.0036377829536947803,
+    "avgTransferOutPrice": 0.005620039555555,
+    "realizedPnlUsd": 416.5162124842703,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "07143452-6145-49e4-9c79-c304607dfeec"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u",
+    "balance": "2610282015653",
+    "shiftedBalance": 2610282.015653,
+    "tokenId": "3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "-0.019652489679085606",
+    "change1": "0.04032884361793186",
+    "change4": "0.27679821669722116",
+    "change12": "0.1313533450830889",
+    "change24": "1.081631348044806",
+    "createdAt": 1758827118,
+    "exchanges": [
+     {
+      "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "name": "PumpSwap"
+     },
+     {
+      "address": "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+      "name": "Meteora DAMM"
+     },
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     }
+    ],
+    "liquidity": "48370",
+    "marketCap": "520103",
+    "pair": {
+     "protocol": "PumpAmm"
+    },
+    "priceUSD": "5.53817620191e-4",
+    "token": {
+     "address": "3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u",
+     "decimals": 6,
+     "networkId": 1399811149,
+     "createdAt": 1739742534,
+     "creatorAddress": "83QQFLxcEzuJZaejBnzAiW5tyfyaRHMLZnkhJbRPRWtf",
+     "name": "RETURN TO MEMES",
+     "symbol": "RTM",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u",
+      "circulatingSupply": "931466733.064189",
+      "cmcId": null,
+      "description": "Return to memes $RTM\n\nThe culture was built on memes. They weren\u2019t just funny pictures\u2014they were the foundation of every wave, every pump, every community that came before the distractions. Streams, trends, and fads come and go, but memes are eternal.\n\nThis is reminder of where you belong, what made you fall in love with this space, and why memes will always outshine the distractions, Return to memes.",
+      "id": "3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u:1399811149",
+      "imageBannerUrl": "https://token-media.defined.fi/1399811149_3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u_banner_25096da7cd53.png",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u_large_bb5f108e8a55.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u_small_648f6e01aec8.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u_thumb_73a2eb949945.png",
+      "imageThumbHash": "XykWLwT3iIh7hoeMeGh4qHd3uPdnf24C",
+      "name": "RETURN TO MEMES",
+      "networkId": 1399811149,
+      "symbol": "RTM",
+      "totalSupply": "939122762.515535"
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": "https://t.me/returntomemesol",
+      "twitter": "https://x.com/kmoney_69/status/1891243248384946505/photo/1",
+      "website": "https://www.returntomemes.lol/"
+     },
+     "launchpad": {
+      "launchpadName": "Pump.fun",
+      "launchpadIconUrl": "https://crypto-exchange-logos-production.s3.us-west-2.amazonaws.com/6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P.webp",
+      "graduationPercent": 100,
+      "migrated": true
+     }
+    },
+    "txnCount1": 130,
+    "txnCount4": 379,
+    "txnCount12": 938,
+    "txnCount24": 16412,
+    "volume1": "8632",
+    "volume5m": "657",
+    "volume4": "22629",
+    "volume12": "57777",
+    "volume24": "1457447"
+   },
+   "userToken": {
+    "id": "5aa92c0b-f41b-4226-ba0a-f3ac235b385c",
+    "tokenAddress": "3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 2610282.015653,
+    "tokenAmountRemaining": 4610282015653,
+    "averageEntryPriceUsd": 0.00200148306900491,
+    "currentRealizedPnlUsd": -622.6864260098198,
+    "totalRealizedPnlUsd": 226.58120614714974,
+    "currentCostBasisUsd": 9227.40139766731,
+    "totalCostBasisUsd": 17048.932045762624,
+    "updatedAt": "2026-08-17T17:07:52.000Z",
+    "holdingSince": "2026-07-04T21:30:29.000Z",
+    "wasSwapped": true
+   },
+   "activeTrade": {
+    "tokenAddress": "3d1qHSAkQhoN7kN1C6tvpAArCkXWxwYdBng6taXCDM6u",
+    "createdAt": "2026-07-04T21:30:29.000Z",
+    "updatedAt": "2026-08-17T17:07:52.000Z",
+    "closedAt": null,
+    "humanTokenAmount": 2610282.015653,
+    "avgEntryPrice": null,
+    "avgExitPrice": 0.001690139856,
+    "sumSwapOpen": 0,
+    "sumSwapClosed": 2000000,
+    "sumTransferIn": 4610282.015653,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": 0.002001483069004911,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": -622.6864260098215,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "a7f5af23-3273-4f28-8dba-6864e94c1932"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw",
+    "balance": "555825023",
+    "shiftedBalance": 0.555825023,
+    "tokenId": "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "-0.014827121839535324",
+    "change1": "-0.01489089106572644",
+    "change4": "0.13842883985649643",
+    "change12": "0.1271601785952867",
+    "change24": "0.10486895752822117",
+    "createdAt": 1781285135,
+    "exchanges": [
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "name": "Raydium CLMM"
+     }
+    ],
+    "liquidity": "51636",
+    "marketCap": "6918624",
+    "pair": {
+     "protocol": "Meteora"
+    },
+    "priceUSD": "937.030765775",
+    "token": {
+     "address": "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw",
+     "decimals": 9,
+     "networkId": 1399811149,
+     "createdAt": 1757778020,
+     "creatorAddress": "4wa8FTHDBLNf1DCAWhNbqJ5ZRGkV8TQX1TaF2VMpNttM",
+     "name": "Anthropic PreStock",
+     "symbol": "ANTHRP",
+     "freezable": "WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc",
+     "mintable": "WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc",
+     "isScam": null,
+     "info": {
+      "address": "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw",
+      "circulatingSupply": "7383.587702793",
+      "cmcId": 37693,
+      "description": "ANTHRP is a tokenized pre-IPO equity token representing economic exposure to Anthropic through Special Purpose Vehicle holdings on Solana. It is used to trade fractional ownership in the company with no minimum investment, enabling instant settlement and continuous price discovery. The token provides retail investors access to private company equity through an SPV structure, allowing them to gain exposure to Anthropic before it becomes publicly traded, though owning the token does not confer ownership rights, voting privileges, or dividends.",
+      "id": "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw:1399811149",
+      "imageBannerUrl": null,
+      "imageLargeUrl": "https://media.thegrid.id/id1756870872-XfWQ0l6_Spes6hPghUKUFQ/14/id1759122976-wyVea0FGTOKTwsx-KG7uIA/id1761223287-yofTwDGNQzWuWUaALp4d4Q/image-1773913494.png",
+      "imageSmallUrl": "https://media.thegrid.id/id1756870872-XfWQ0l6_Spes6hPghUKUFQ/14/id1759122976-wyVea0FGTOKTwsx-KG7uIA/id1761223287-yofTwDGNQzWuWUaALp4d4Q/image-1773913494.png",
+      "imageThumbUrl": "https://media.thegrid.id/id1756870872-XfWQ0l6_Spes6hPghUKUFQ/14/id1759122976-wyVea0FGTOKTwsx-KG7uIA/id1761223287-yofTwDGNQzWuWUaALp4d4Q/image-1773913494.png",
+      "imageThumbHash": null,
+      "name": "Anthropic PreStock",
+      "networkId": 1399811149,
+      "symbol": "ANTHRP",
+      "totalSupply": "7383.587702793"
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": "https://t.me/PreStocksFi",
+      "twitter": "https://x.com/PreStocks",
+      "website": "https://prestocks.com/"
+     },
+     "launchpad": null
+    },
+    "txnCount1": 2575,
+    "txnCount4": 8636,
+    "txnCount12": 8739,
+    "txnCount24": 9959,
+    "volume1": "289040",
+    "volume5m": "17914",
+    "volume4": "1050277",
+    "volume12": "1070248",
+    "volume24": "1277843"
+   },
+   "userToken": {
+    "id": "5652d6f1-b743-4510-995b-3a210125178a",
+    "tokenAddress": "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 0.555825023,
+    "tokenAmountRemaining": 555825023,
+    "averageEntryPriceUsd": 942.7511618359798,
+    "currentRealizedPnlUsd": 0,
+    "totalRealizedPnlUsd": -0.29281502385463043,
+    "currentCostBasisUsd": 524.0046862107603,
+    "totalCostBasisUsd": 565.8333202346151,
+    "updatedAt": "2026-08-18T14:03:56.000Z",
+    "holdingSince": "2026-08-18T11:34:10.000Z",
+    "wasSwapped": true
+   },
+   "activeTrade": {
+    "tokenAddress": "Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw",
+    "createdAt": "2026-08-18T11:34:10.000Z",
+    "updatedAt": "2026-08-18T14:03:56.000Z",
+    "closedAt": null,
+    "humanTokenAmount": 0.5558250229999997,
+    "avgEntryPrice": null,
+    "avgExitPrice": null,
+    "sumSwapOpen": 0,
+    "sumSwapClosed": 0,
+    "sumTransferIn": 0.5558250229999997,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": 942.7511618359803,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 0,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "8195e86d-0bed-466c-8b82-5013af7dac79"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD",
+    "balance": "13022151527947786",
+    "shiftedBalance": 13022151.527947785,
+    "tokenId": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "0",
+    "change1": "0.027168441292508217",
+    "change4": "0.16720761680040291",
+    "change12": "0.14791706006711589",
+    "change24": "0.13915884445021173",
+    "createdAt": 1785961537,
+    "exchanges": [
+     {
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "name": "Raydium CLMM"
+     },
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+      "name": "Meteora DAMM"
+     },
+     {
+      "address": "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+      "name": "Raydium CPMM"
+     }
+    ],
+    "liquidity": "14932",
+    "marketCap": "36554",
+    "pair": {
+     "protocol": "RaydiumClmm"
+    },
+    "priceUSD": "3.65571628119e-5",
+    "token": {
+     "address": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD",
+     "decimals": 9,
+     "networkId": 1399811149,
+     "createdAt": 1785961534,
+     "creatorAddress": "5CEbueQnq1Ym2uSSx2xXds3jQAqT1BDnkA59RZobSPAG",
+     "name": "clawd",
+     "symbol": "CLAWD",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD",
+      "circulatingSupply": "999922632.453288116",
+      "cmcId": null,
+      "description": "",
+      "id": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD:1399811149",
+      "imageBannerUrl": "https://token-media.defined.fi/1399811149_2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD_banner_9dda07cebcc3.png",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD_large_9b878af98f0d.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD_small_1c2c448e3bb4.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD_thumb_993aeea16770.png",
+      "imageThumbHash": "tigKHwjYh2d4h4d/g4d4R5d2d3IIJ4cA",
+      "name": "clawd",
+      "networkId": 1399811149,
+      "symbol": "CLAWD",
+      "totalSupply": "999922632.453288116"
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": "https://t.me/ClawdOnSF",
+      "twitter": "https://x.com/ClawdOnSF",
+      "website": "https://www.stonkfun.xyz/token/2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD"
+     },
+     "launchpad": {
+      "launchpadName": "StonkFun",
+      "launchpadIconUrl": "https://crypto-exchange-logos-production.s3.us-west-2.amazonaws.com/launchpad/stonkfun.png",
+      "graduationPercent": null,
+      "migrated": false
+     }
+    },
+    "txnCount1": 16,
+    "txnCount4": 34,
+    "txnCount12": 39,
+    "txnCount24": 52,
+    "volume1": "500",
+    "volume5m": "0",
+    "volume4": "522",
+    "volume12": "606",
+    "volume24": "1539"
+   },
+   "userToken": {
+    "id": "f04b7f3c-ee03-442a-8bb3-77ec02fd5bc2",
+    "tokenAddress": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 13022151.527947785,
+    "tokenAmountRemaining": 13022151527947786,
+    "averageEntryPriceUsd": 7.645270536618439e-05,
+    "currentRealizedPnlUsd": 0,
+    "totalRealizedPnlUsd": -334.08063200000004,
+    "currentCostBasisUsd": 995.578714,
+    "totalCostBasisUsd": 1991.157428,
+    "updatedAt": "2026-08-12T17:23:09.594Z",
+    "holdingSince": "2026-08-12T17:22:10.324Z",
+    "wasSwapped": true
+   },
+   "activeTrade": {
+    "tokenAddress": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD",
+    "createdAt": "2026-08-12T17:22:10.324Z",
+    "updatedAt": "2026-08-12T17:23:47.532Z",
+    "closedAt": null,
+    "humanTokenAmount": 13022151.527947787,
+    "avgEntryPrice": 7.645270536618439e-05,
+    "avgExitPrice": null,
+    "sumSwapOpen": 13022151.527947787,
+    "sumSwapClosed": 0,
+    "sumTransferIn": 0,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": null,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 0,
+    "networkId": 1399811149,
+    "commentId": "a63bc351-68ec-4a72-b33b-0cdacc65412c",
+    "id": "ebbe7650-cb5e-4651-ab24-a6e063a58450"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "So11111111111111111111111111111111111111112",
+    "balance": "1826993371",
+    "shiftedBalance": 1.826993371,
+    "tokenId": "So11111111111111111111111111111111111111112:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "0.0013288288150789522",
+    "change1": "0.001302362135979745",
+    "change4": "0.0049198379352954095",
+    "change12": "0.008666919873435774",
+    "change24": "0.009875723629347917",
+    "createdAt": 1710952381,
+    "exchanges": [
+     {
+      "address": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+      "name": "Orca"
+     },
+     {
+      "address": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+      "name": "Raydium"
+     },
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "name": "Raydium CLMM"
+     },
+     {
+      "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "name": "PumpSwap"
+     }
+    ],
+    "liquidity": "10683556",
+    "marketCap": "43337579952.55459",
+    "pair": {
+     "protocol": "Orca"
+    },
+    "priceUSD": "76.2091063526",
+    "token": {
+     "address": "So11111111111111111111111111111111111111112",
+     "decimals": 9,
+     "networkId": 1399811149,
+     "createdAt": 1722545905,
+     "creatorAddress": null,
+     "name": "Solana",
+     "symbol": "SOL",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "So11111111111111111111111111111111111111112",
+      "circulatingSupply": 568666686,
+      "cmcId": 16116,
+      "description": "Solana is a high-performance Layer 1 blockchain built for mass adoption, offering a fast and low-cost environment for decentralized applications. Wrapped Solana is a tradeable version of SOL used across the Solana blockchain.",
+      "id": "So11111111111111111111111111111111111111112:1399811149",
+      "imageBannerUrl": "https://media.thegrid.id/3/7/88/id1762524723-ikQDLLiTQcC9JLMI9cc6Cw/image-1780668139.jpg",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_So11111111111111111111111111111111111111112_large_4c51dc5c-cf3a-4cbb-96d6-a5de7c04069e.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_So11111111111111111111111111111111111111112_small_4c51dc5c-cf3a-4cbb-96d6-a5de7c04069e.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_So11111111111111111111111111111111111111112_thumb_4c51dc5c-cf3a-4cbb-96d6-a5de7c04069e.png",
+      "imageThumbHash": null,
+      "name": "Solana",
+      "networkId": 1399811149,
+      "symbol": "SOL",
+      "totalSupply": "606900671.1804999"
+     },
+     "socialLinks": {
+      "discord": "https://solana.com/discord",
+      "telegram": "https://t.me/solana",
+      "twitter": "https://twitter.com/solana",
+      "website": "https://solana.com"
+     },
+     "launchpad": null
+    },
+    "txnCount1": 1821,
+    "txnCount4": 5111,
+    "txnCount12": 13710,
+    "txnCount24": 29484,
+    "volume1": "3741066",
+    "volume5m": "729609",
+    "volume4": "9332111",
+    "volume12": "23622147",
+    "volume24": "47099716"
+   },
+   "userToken": {
+    "id": "9e3b0b15-4c72-48cc-aabf-112c38c442d0",
+    "tokenAddress": "So11111111111111111111111111111111111111112",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 1.861596886,
+    "tokenAmountRemaining": 1861596886,
+    "averageEntryPriceUsd": 75.93191580742246,
+    "currentRealizedPnlUsd": -290.3117882214964,
+    "totalRealizedPnlUsd": -295.89207769001234,
+    "currentCostBasisUsd": 10707.50225243892,
+    "totalCostBasisUsd": 11785.177297939415,
+    "updatedAt": "2026-08-18T14:02:53.000Z",
+    "holdingSince": "2026-06-27T00:43:51.000Z",
+    "wasSwapped": false
+   },
+   "activeTrade": {
+    "tokenAddress": "So11111111111111111111111111111111111111112",
+    "createdAt": "2026-06-27T00:43:51.000Z",
+    "updatedAt": "2026-08-18T14:02:53.000Z",
+    "closedAt": null,
+    "humanTokenAmount": 6.221778510000283,
+    "avgEntryPrice": null,
+    "avgExitPrice": null,
+    "sumSwapOpen": 0,
+    "sumSwapClosed": 0,
+    "sumTransferIn": 137.72088053700008,
+    "sumTransferOut": 131.66442992300014,
+    "avgTransferInPrice": 77.6531103851372,
+    "avgTransferOutPrice": 78.04536710393994,
+    "realizedPnlUsd": 51.646257264629526,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "03a2d109-f5df-48a5-8f2f-e87298e21cb6"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+    "balance": "338573663",
+    "shiftedBalance": 338.573663,
+    "tokenId": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "0.003331031576080374",
+    "change1": "-0.02046459797632481",
+    "change4": "0.029225354050024722",
+    "change12": "0.05821252573513665",
+    "change24": "0.014087822908995741",
+    "createdAt": 1782628736,
+    "exchanges": [
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "name": "PumpSwap"
+     },
+     {
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "name": "Raydium CLMM"
+     },
+     {
+      "address": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+      "name": "Orca"
+     }
+    ],
+    "liquidity": "1363410",
+    "marketCap": "263549224.72300002",
+    "pair": {
+     "protocol": "Meteora"
+    },
+    "priceUSD": "0.263549224723",
+    "token": {
+     "address": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+     "decimals": 6,
+     "networkId": 1399811149,
+     "createdAt": 1781643950,
+     "creatorAddress": "yHCxHBEaJW5tbndqC8JciSThr7U1cqLpdcsvHcx6PRe",
+     "name": "The Black Bull",
+     "symbol": "ANSEM",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+      "circulatingSupply": 1000000000,
+      "cmcId": 40588,
+      "description": "Ansem\u2019s wallet has been confirmed.\n65% of the supply has been sent to his wallet, and all fees are redirected to him.",
+      "id": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump:1399811149",
+      "imageBannerUrl": "https://token-media.defined.fi/1399811149_9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump_banner_090c49c33434.png",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump_large_175b0218916c.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump_small_5344782db361.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump_thumb_1489ea350df9.png",
+      "imageThumbHash": "CfgBDwI3V6eLhYiAfCq4d5eMe6II14UP",
+      "name": "The Black Bull",
+      "networkId": 1399811149,
+      "symbol": "ANSEM",
+      "totalSupply": 1000000000
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": "https://t.me/+LuzxBagQydQ1NzMx",
+      "twitter": "https://x.com/blackbullsol",
+      "website": "https://www.blackbullsol.com/"
+     },
+     "launchpad": {
+      "launchpadName": "Pump.fun",
+      "launchpadIconUrl": "https://crypto-exchange-logos-production.s3.us-west-2.amazonaws.com/6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P.webp",
+      "graduationPercent": 100,
+      "migrated": true
+     }
+    },
+    "txnCount1": 584,
+    "txnCount4": 1862,
+    "txnCount12": 5428,
+    "txnCount24": 26279,
+    "volume1": "345162",
+    "volume5m": "14919",
+    "volume4": "1061063",
+    "volume12": "3020603",
+    "volume24": "14854717"
+   },
+   "userToken": {
+    "id": "b73fb363-2cc6-4591-845d-9869f28fb501",
+    "tokenAddress": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 338.573663,
+    "tokenAmountRemaining": 42302658463,
+    "averageEntryPriceUsd": 0.26911989297639344,
+    "currentRealizedPnlUsd": 0,
+    "totalRealizedPnlUsd": 5161.486738900566,
+    "currentCostBasisUsd": 91.11690795118547,
+    "totalCostBasisUsd": 47073.98031483512,
+    "updatedAt": "2026-08-18T08:55:04.000Z",
+    "holdingSince": "2026-08-15T20:07:36.000Z",
+    "wasSwapped": true
+   },
+   "activeTrade": {
+    "tokenAddress": "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+    "createdAt": "2026-08-15T20:07:36.000Z",
+    "updatedAt": "2026-08-18T08:55:04.000Z",
+    "closedAt": null,
+    "humanTokenAmount": 338.573663,
+    "avgEntryPrice": null,
+    "avgExitPrice": null,
+    "sumSwapOpen": 0,
+    "sumSwapClosed": 0,
+    "sumTransferIn": 338.573663,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": 0.26911989297639344,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 0,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "be17bc1e-60c9-4aaf-84f3-4ca390da43c3"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF",
+    "balance": "16581854",
+    "shiftedBalance": 0.024642868,
+    "tokenId": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "0.008652641333601893",
+    "change1": "0.016491800852770855",
+    "change4": "0.020121456836585744",
+    "change12": "0.03248514581707345",
+    "change24": "0.016408996247233146",
+    "createdAt": 1758038287,
+    "exchanges": [
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "name": "Raydium CLMM"
+     },
+     {
+      "address": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+      "name": "Orca"
+     }
+    ],
+    "liquidity": "12417",
+    "marketCap": "1836699",
+    "pair": {
+     "protocol": "Meteora"
+    },
+    "priceUSD": "1309.31246853",
+    "token": {
+     "address": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF",
+     "decimals": 9,
+     "networkId": 1399811149,
+     "createdAt": 1757778189,
+     "creatorAddress": "4wa8FTHDBLNf1DCAWhNbqJ5ZRGkV8TQX1TaF2VMpNttM",
+     "name": "OpenAI PreStock",
+     "symbol": "OPENAI",
+     "freezable": "WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc",
+     "mintable": "WV9PJN7XTmTLVwbutCLFxp8TyePee6Xq5mRq6Fti5Wc",
+     "isScam": null,
+     "info": {
+      "address": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF",
+      "circulatingSupply": "1402.800594923",
+      "cmcId": 37671,
+      "description": "OPENAI is a tokenized pre-IPO equity token representing economic exposure to OpenAI through Special Purpose Vehicle holdings on Solana. It is used to trade fractional ownership in the company with no minimum investment, enabling instant settlement and continuous price discovery. Owning the token does not confer ownership rights, voting privileges, or dividends, but allows retail investors to gain exposure to OpenAI's valuation before it becomes publicly traded.",
+      "id": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF:1399811149",
+      "imageBannerUrl": null,
+      "imageLargeUrl": "https://media.thegrid.id/id1756870872-XfWQ0l6_Spes6hPghUKUFQ/14/id1759122987-I9IXCKV-QG-lzFOv5K_yxg/id1761223287-yofTwDGNQzWuWUaALp4d4Q/image-1773913495.png",
+      "imageSmallUrl": "https://media.thegrid.id/id1756870872-XfWQ0l6_Spes6hPghUKUFQ/14/id1759122987-I9IXCKV-QG-lzFOv5K_yxg/id1761223287-yofTwDGNQzWuWUaALp4d4Q/image-1773913495.png",
+      "imageThumbUrl": "https://media.thegrid.id/id1756870872-XfWQ0l6_Spes6hPghUKUFQ/14/id1759122987-I9IXCKV-QG-lzFOv5K_yxg/id1761223287-yofTwDGNQzWuWUaALp4d4Q/image-1773913495.png",
+      "imageThumbHash": null,
+      "name": "OpenAI PreStock",
+      "networkId": 1399811149,
+      "symbol": "OPENAI",
+      "totalSupply": "1402.800594923"
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": "https://t.me/PreStocksFi",
+      "twitter": "https://x.com/PreStocks",
+      "website": "https://prestocks.com/"
+     },
+     "launchpad": null
+    },
+    "txnCount1": 62,
+    "txnCount4": 340,
+    "txnCount12": 732,
+    "txnCount24": 1332,
+    "volume1": "2762",
+    "volume5m": "22",
+    "volume4": "15826",
+    "volume12": "26479",
+    "volume24": "46049"
+   },
+   "userToken": {
+    "id": "f18509f1-266a-4088-87c1-5f7f32b0ef43",
+    "tokenAddress": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 0.016581854,
+    "tokenAmountRemaining": 16581854,
+    "averageEntryPriceUsd": 1289.02287767,
+    "currentRealizedPnlUsd": 0,
+    "totalRealizedPnlUsd": 0,
+    "currentCostBasisUsd": 21.3743891601838,
+    "totalCostBasisUsd": 21.3743891601838,
+    "updatedAt": "2026-08-18T13:05:58.000Z",
+    "holdingSince": "2026-08-18T13:05:58.000Z",
+    "wasSwapped": false
+   },
+   "activeTrade": {
+    "tokenAddress": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF",
+    "createdAt": "2026-08-18T13:05:58.000Z",
+    "updatedAt": "2026-08-18T13:05:58.000Z",
+    "closedAt": null,
+    "humanTokenAmount": 0.016581854,
+    "avgEntryPrice": null,
+    "avgExitPrice": null,
+    "sumSwapOpen": 0,
+    "sumSwapClosed": 0,
+    "sumTransferIn": 0.016581854,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": 1289.02287767,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 0,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "64026c74-008e-43e4-8b6c-1b4a5d145375"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump",
+    "balance": "68228266226",
+    "shiftedBalance": 68228.266226,
+    "tokenId": "4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "-0.0025512380849814376",
+    "change1": "-0.0025512380849814376",
+    "change4": "0.007187312882800838",
+    "change12": "0.19410965869128438",
+    "change24": "0.29446417449527523",
+    "createdAt": 1784050230,
+    "exchanges": [
+     {
+      "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "name": "PumpSwap"
+     },
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+      "name": "Meteora DAMM"
+     },
+     {
+      "address": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+      "name": "Pump"
+     }
+    ],
+    "liquidity": "5637",
+    "marketCap": "18824",
+    "pair": {
+     "protocol": "PumpAmm"
+    },
+    "priceUSD": "1.88604608598e-5",
+    "token": {
+     "address": "4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump",
+     "decimals": 6,
+     "networkId": 1399811149,
+     "createdAt": 1727619836,
+     "creatorAddress": null,
+     "name": "Magic Internet Money",
+     "symbol": "MIM",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump",
+      "circulatingSupply": "998067888.204069",
+      "cmcId": null,
+      "description": "the mim cult for ansem holders as CTO",
+      "id": "4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump:1399811149",
+      "imageBannerUrl": "https://token-media.defined.fi/1399811149_4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump_banner_4dee41e39a1a.png",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump_large_24f3605516e4.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump_small_3600d9fc9130.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump_thumb_84e52a467bb1.png",
+      "imageThumbHash": "5cYFLwR1XoZuhVhuiSSO9OxkD/yKpJ8H",
+      "name": "Magic Internet Money",
+      "networkId": 1399811149,
+      "symbol": "MIM",
+      "totalSupply": "998067888.204069"
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": "https://t.me/+1h9oeQ64jSM4MzRh",
+      "twitter": "https://x.com/i/status/2078249763628265620",
+      "website": null
+     },
+     "launchpad": {
+      "launchpadName": "Pump.fun",
+      "launchpadIconUrl": "https://crypto-exchange-logos-production.s3.us-west-2.amazonaws.com/6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P.webp",
+      "graduationPercent": 100,
+      "migrated": true
+     }
+    },
+    "txnCount1": 1,
+    "txnCount4": 10,
+    "txnCount12": 42,
+    "txnCount24": 60,
+    "volume1": "1",
+    "volume5m": "1",
+    "volume4": "15",
+    "volume12": "1671",
+    "volume24": "2141"
+   },
+   "userToken": {
+    "id": "06a0ec46-6603-4026-9cb7-cfe8a8ad5650",
+    "tokenAddress": "4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 68228.266226,
+    "tokenAmountRemaining": 68228266226,
+    "averageEntryPriceUsd": 7.04979786971e-05,
+    "currentRealizedPnlUsd": 0,
+    "totalRealizedPnlUsd": 0,
+    "currentCostBasisUsd": 4.809954858940616,
+    "totalCostBasisUsd": 4.809954858940616,
+    "updatedAt": "2026-07-14T17:31:13.000Z",
+    "holdingSince": "2026-07-14T17:31:13.000Z",
+    "wasSwapped": false
+   },
+   "activeTrade": {
+    "tokenAddress": "4p37V4YA54Jou7k3TWnwxeDXqtB9BQRik6NL3noJpump",
+    "createdAt": "2026-07-14T17:31:13.000Z",
+    "updatedAt": "2026-07-14T17:31:13.000Z",
+    "closedAt": null,
+    "humanTokenAmount": 68228.266226,
+    "avgEntryPrice": null,
+    "avgExitPrice": null,
+    "sumSwapOpen": 0,
+    "sumSwapClosed": 0,
+    "sumTransferIn": 68228.266226,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": 7.04979786971e-05,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 0,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "188f9f8e-eca2-4e21-91cc-20ff4f86f4ca"
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump",
+    "balance": "1465924497",
+    "shiftedBalance": 1465.924497,
+    "tokenId": "GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "-0.0008817496687832286",
+    "change1": "0.014379709209938037",
+    "change4": "0.024992407826783313",
+    "change12": "-0.06742716170757009",
+    "change24": "0.025510838610253328",
+    "createdAt": 1783107760,
+    "exchanges": [
+     {
+      "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "name": "PumpSwap"
+     },
+     {
+      "address": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+      "name": "Orca"
+     },
+     {
+      "address": "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+      "name": "Meteora DAMM"
+     },
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+      "name": "Pump"
+     }
+    ],
+    "liquidity": "12460",
+    "marketCap": "66905",
+    "pair": {
+     "protocol": "PumpAmm"
+    },
+    "priceUSD": "6.69728715565e-5",
+    "token": {
+     "address": "GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump",
+     "decimals": 6,
+     "networkId": 1399811149,
+     "createdAt": 1783107761,
+     "creatorAddress": "4ZPAaiA4HK716ECEmJXTKYP21d5VuAZvhXEq21o9koYW",
+     "name": "the bleck bull",
+     "symbol": "ANSUM",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump",
+      "circulatingSupply": "998991486.252045",
+      "cmcId": null,
+      "description": "the bleck bull charges forward no matter what",
+      "id": "GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump:1399811149",
+      "imageBannerUrl": "https://token-media.defined.fi/1399811149_GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump_banner_72bbb1be0672.png",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump_large_e5dcf9b3b32c.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump_small_bc69d5032c46.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump_thumb_f51cc9893d22.png",
+      "imageThumbHash": "cxgOFwT4eFdzi4d6lpZ4d3h7apAIBokA",
+      "name": "the bleck bull",
+      "networkId": 1399811149,
+      "symbol": "ANSUM",
+      "totalSupply": "998991486.252045"
+     },
+     "socialLinks": {
+      "discord": null,
+      "telegram": "https://t.me/ansumsolanaa",
+      "twitter": "https://x.com/ansumsolana",
+      "website": "https://ansum.wtf/"
+     },
+     "launchpad": {
+      "launchpadName": "Pump.fun",
+      "launchpadIconUrl": "https://crypto-exchange-logos-production.s3.us-west-2.amazonaws.com/6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P.webp",
+      "graduationPercent": 100,
+      "migrated": true
+     }
+    },
+    "txnCount1": 25,
+    "txnCount4": 52,
+    "txnCount12": 161,
+    "txnCount24": 469,
+    "volume1": "1318",
+    "volume5m": "14",
+    "volume4": "1928",
+    "volume12": "5474",
+    "volume24": "21693"
+   },
+   "userToken": {
+    "id": "7e8b3bff-ef86-425b-b4d4-4ee1e2a1c3e6",
+    "tokenAddress": "GaZb3DE2U3Jcjx7ddAVwobsBKnCaDoJWLbzTvJYhpump",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 1465.924497,
+    "tokenAmountRemaining": 1465924497,
+    "averageEntryPriceUsd": 6.69728715565e-05,
+    "currentRealizedPnlUsd": 0,
+    "totalRealizedPnlUsd": 0,
+    "currentCostBasisUsd": 0,
+    "totalCostBasisUsd": 0,
+    "updatedAt": "2026-08-18T14:07:46.454Z",
+    "holdingSince": null,
+    "wasSwapped": true
+   }
+  },
+  {
+   "balance": {
+    "tokenAddress": "3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX",
+    "balance": "1000000",
+    "shiftedBalance": 1,
+    "tokenId": "3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX:1399811149"
+   },
+   "tokenFilterResult": {
+    "change5m": "0.0020185338929842173",
+    "change1": "0.00009464759038929785",
+    "change4": "0.004735606727249419",
+    "change12": "0.009124463148791213",
+    "change24": "0.009361306084038405",
+    "createdAt": 1763175375,
+    "exchanges": [
+     {
+      "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "name": "Meteora"
+     },
+     {
+      "address": "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+      "name": "Meteora DAMM"
+     },
+     {
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "name": "Raydium CLMM"
+     },
+     {
+      "address": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+      "name": "Orca"
+     }
+    ],
+    "liquidity": "25828",
+    "marketCap": "3553619",
+    "pair": {
+     "protocol": "Meteora"
+    },
+    "priceUSD": "0.0287374110525",
+    "token": {
+     "address": "3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX",
+     "decimals": 6,
+     "networkId": 1399811149,
+     "createdAt": 1758044915,
+     "creatorAddress": "pmprUcS9dKa8pnidT3raZZFhRFtyGe6cgDL4R1gjyZs",
+     "name": "SOLPUMP",
+     "symbol": "SOLPUMP",
+     "freezable": null,
+     "mintable": null,
+     "isScam": null,
+     "info": {
+      "address": "3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX",
+      "circulatingSupply": "68210001.390524",
+      "cmcId": null,
+      "description": "Claim a FREE Daily Solana Case & Hourly Solana Airdrops on Solpump\nPlay Crash & Coinflip. Win SOL.",
+      "id": "3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX:1399811149",
+      "imageBannerUrl": "https://token-media.defined.fi/1399811149_3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX_banner_9bb81c63d418.png",
+      "imageLargeUrl": "https://token-media.defined.fi/1399811149_3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX_large_043f718be4cb.png",
+      "imageSmallUrl": "https://token-media.defined.fi/1399811149_3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX_small_e25ee9d99825.png",
+      "imageThumbUrl": "https://token-media.defined.fi/1399811149_3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX_thumb_0f8a6425a2e0.png",
+      "imageThumbHash": "JegNJxL2d3mHeIh8hKhneHh3BkSGYGUI",
+      "name": "SOLPUMP",
+      "networkId": 1399811149,
+      "symbol": "SOLPUMP",
+      "totalSupply": "123658274.66052"
+     },
+     "socialLinks": {
+      "discord": "https://discord.gg/solpump",
+      "telegram": "https://t.me/solpumpcom",
+      "twitter": "https://x.com/solpumpcom",
+      "website": "https://solpump.com/a/5YOSKK4P"
+     },
+     "launchpad": null
+    },
+    "txnCount1": 6,
+    "txnCount4": 15,
+    "txnCount12": 83,
+    "txnCount24": 131,
+    "volume1": "138",
+    "volume5m": "87",
+    "volume4": "206",
+    "volume12": "523",
+    "volume24": "13542"
+   },
+   "userToken": {
+    "id": "ffef92c3-6827-499a-81bd-a57e0227d450",
+    "tokenAddress": "3VW31dwix6k2EdzhDgZ2zB15J7FbHYQwAUqXgktRcJEX",
+    "networkId": 1399811149,
+    "humanAmountRemaining": 1,
+    "tokenAmountRemaining": 1000000,
+    "averageEntryPriceUsd": 0.0287374110525,
+    "currentRealizedPnlUsd": 0,
+    "totalRealizedPnlUsd": 0,
+    "currentCostBasisUsd": 0,
+    "totalCostBasisUsd": 0,
+    "updatedAt": "2026-08-18T14:07:46.454Z",
+    "holdingSince": null,
+    "wasSwapped": true
+   }
+  }
+ ],
+ "otherPnl": 9568.756129032825,
+ "nativeEvmBalances": [],
+ "livePerpPnl": 0
+}

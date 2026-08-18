@@ -1,0 +1,64 @@
+{
+ "konito": {
+  "wallet": "93fjdwW7S3Aw4TkrnMzy51sZ5pP4ArpvtmFYujNyDVgH",
+  "confirmed": 5,
+  "checked": 5,
+  "resolvedAt": 1787063204,
+  "evmWallet": "0x27394168fdcfe5ea4e2042df3949a619238f3627",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmVerifiedAt": "2026-06-06T04:37:57.034Z",
+  "evmResolvedAt": 1787066144
+ },
+ "onmycheck": {
+  "wallet": "Ay77dkJkbjPCLbhHmwNg5z4WVtP2bMUpjKNnWFo1CuD2",
+  "confirmed": 5,
+  "checked": 5,
+  "resolvedAt": 1787063221,
+  "evmWallet": "0xb6e00eaea52e9a91e0a9af67301fa1bc6d02e7ac",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmSource": "manual+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787066466
+ },
+ "rowdy": {
+  "wallet": "CzU8MaRcwvwUoNkwJFLbvtFWJugcEXAhDDQqNFE4ybb7",
+  "confirmed": 5,
+  "checked": 6,
+  "resolvedAt": 1787065291,
+  "evmWallet": "0x03ba951f72e59899ac8dab30cb5624dbe5d52bb8",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmVerifiedAt": "2026-08-18T14:59:48.425Z",
+  "evmResolvedAt": 1787066406
+ },
+ "collectible": {
+  "wallet": "F2hA2zDVnHyDUiMQ6b3K9Gx9A2JAxJn66ASH9xZ9LqbG",
+  "confirmed": 5,
+  "checked": 6,
+  "resolvedAt": 1787065397
+ },
+ "runecrypto_": {
+  "wallet": "3CPHk5b7SRvAsTsocehAu1bA5YKMXJYMr3qc2SuMFkWY",
+  "confirmed": 0,
+  "resolvedAt": 1787066500,
+  "evmWallet": "0x180906a0ef400e4747eac35d4e02ffa18979e328",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmVerifiedAt": "2026-08-18T14:44:04.864Z",
+  "evmResolvedAt": 1787066500
+ }
+}

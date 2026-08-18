@@ -1,0 +1,7 @@
+discord.py==2.4.0
+aiohttp==3.10.5
+python-dotenv==1.0.1
+
+# needed by diag.py (and by the client if HTTP/2 turns out to be the fix)
+httpx[http2]==0.27.2
+playwright==1.47.0

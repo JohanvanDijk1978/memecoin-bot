@@ -1,0 +1,289 @@
+{
+ "bestTrades": [
+  {
+   "trade": {
+    "userAddress": "2XyT8odcS3iCVca48QeQKMkBuR4UcqpQzRrcHNmzuEpj",
+    "tokenAddress": "3KHMZhpthXuiCcgfTv7vVu9PpEz64KAEURFwi6Lopump",
+    "createdAt": "2026-04-30T10:43:18.086Z",
+    "updatedAt": "2026-05-01T01:26:29.000Z",
+    "closedAt": "2026-05-01T01:26:29.000Z",
+    "humanTokenAmount": 0,
+    "avgEntryPrice": 0.0012782965592867668,
+    "avgExitPrice": 0.0023331132320904323,
+    "sumSwapOpen": 2550378.810234,
+    "sumSwapClosed": 2550378.810234,
+    "sumTransferIn": 0,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": null,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 2690.1820909999988,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "880177b7-7f7a-4354-b186-ab7d91f51239",
+    "tokenMetadata": {
+     "symbol": "Goblin",
+     "networkId": 1399811149,
+     "imageLargeUrl": "https://token-media.defined.fi/1399811149_3KHMZhpthXuiCcgfTv7vVu9PpEz64KAEURFwi6Lopump_large_f14a2f634be8.png",
+     "liquidity": 35223,
+     "currentPrice": 0.000183241464488,
+     "thumbhash": "RMgBDwQGbERjeoaTWbppV6aHZjA1+ZwM"
+    },
+    "totalCostBasis": 3260.1404580000003
+   },
+   "swaps": [],
+   "transfers": [],
+   "displayName": "Konito",
+   "userHandle": "Konito",
+   "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/569e29a802cd2a88eb2a7eb742d36797_small.jpg",
+   "userId": "5a448a58-9c66-5706-96b3-760abca04e40",
+   "comment": null
+  },
+  {
+   "trade": {
+    "userAddress": "2XyT8odcS3iCVca48QeQKMkBuR4UcqpQzRrcHNmzuEpj",
+    "tokenAddress": "5P3DUdtj13HVxrpM9QuuabznPiGXtDwE8DofT4PemCWH",
+    "createdAt": "2026-08-18T12:21:46.000Z",
+    "updatedAt": "2026-08-18T14:04:48.630Z",
+    "closedAt": "2026-08-18T14:04:48.630Z",
+    "humanTokenAmount": 9.3132257462e-10,
+    "avgEntryPrice": 0.0003876179902820396,
+    "avgExitPrice": 0.0002124841716126869,
+    "sumSwapOpen": 25540.610209543,
+    "sumSwapClosed": 8682183.613952778,
+    "sumTransferIn": 14707274.964381255,
+    "sumTransferOut": 6050631.960638019,
+    "avgTransferInPrice": 0.00012003526979782393,
+    "avgTransferOutPrice": 0.0004142660577464657,
+    "realizedPnlUsd": 2576.106323867995,
+    "networkId": 1399811149,
+    "commentId": "d7770627-4236-4ddf-8b7b-4dad22a37c44",
+    "id": "41967252-0ad1-41bd-ab92-b367faae8e31",
+    "tokenMetadata": {
+     "symbol": "67COIN",
+     "networkId": 1399811149,
+     "imageLargeUrl": "https://token-media.defined.fi/1399811149_5P3DUdtj13HVxrpM9QuuabznPiGXtDwE8DofT4PemCWH_large_61e242ccc9b1.png",
+     "liquidity": 29725,
+     "currentPrice": 0.00018823253164,
+     "thumbhash": "AggGBoBoaHiHeHdweJl3uHiGAAAAAAA="
+    },
+    "totalCostBasis": 1775.2917183402853
+   },
+   "swaps": [],
+   "transfers": [],
+   "displayName": "Konito",
+   "userHandle": "Konito",
+   "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/569e29a802cd2a88eb2a7eb742d36797_small.jpg",
+   "userId": "5a448a58-9c66-5706-96b3-760abca04e40",
+   "comment": {
+    "id": "d7770627-4236-4ddf-8b7b-4dad22a37c44",
+    "userId": "5a448a58-9c66-5706-96b3-760abca04e40",
+    "tradeId": "41967252-0ad1-41bd-ab92-b367faae8e31",
+    "comment": "paid",
+    "createdAt": "2026-08-18T13:09:41.266Z",
+    "parentId": null,
+    "numLikes": 10,
+    "tokenAddress": "5P3DUdtj13HVxrpM9QuuabznPiGXtDwE8DofT4PemCWH",
+    "networkId": 1399811149,
+    "commentSegments": [
+     {
+      "text": "paid",
+      "link": null,
+      "provider": null
+     }
+    ],
+    "reactions": {
+     "counts": {
+      "likeCount": 10
+     },
+     "reactions": {
+      "like": false
+     }
+    },
+    "olderThesis": 1,
+    "newerThesis": 0
+   }
+  },
+  {
+   "trade": {
+    "userAddress": "2XyT8odcS3iCVca48QeQKMkBuR4UcqpQzRrcHNmzuEpj",
+    "tokenAddress": "7YYgo4mr6VNXxx48EfgEHdLSnpqRPoVGrCTzuoySpump",
+    "createdAt": "2026-08-11T23:09:52.000Z",
+    "updatedAt": "2026-08-11T23:09:59.000Z",
+    "closedAt": "2026-08-11T23:09:59.000Z",
+    "humanTokenAmount": 0,
+    "avgEntryPrice": 3.23933308320903e-06,
+    "avgExitPrice": 1.012140578681555e-05,
+    "sumSwapOpen": 355011346.613593,
+    "sumSwapClosed": 355011346.613593,
+    "sumTransferIn": 0,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": null,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 2443.213898,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "ba47368f-a5ef-43cd-8999-39671d39ce8f",
+    "tokenMetadata": {
+     "symbol": "Jumpman",
+     "networkId": 1399811149,
+     "imageLargeUrl": "https://token-media.defined.fi/1399811149_7YYgo4mr6VNXxx48EfgEHdLSnpqRPoVGrCTzuoySpump_large_60f06effdceb.png",
+     "liquidity": 0,
+     "currentPrice": 2.1300208581e-06,
+     "thumbhash": "DDgOFwoHeGh5hYmAeXiYZ6h2WHCnB3YF"
+    },
+    "totalCostBasis": 1149.9999999999998
+   },
+   "swaps": [],
+   "transfers": [],
+   "displayName": "Konito",
+   "userHandle": "Konito",
+   "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/569e29a802cd2a88eb2a7eb742d36797_small.jpg",
+   "userId": "5a448a58-9c66-5706-96b3-760abca04e40",
+   "comment": null
+  },
+  {
+   "trade": {
+    "userAddress": "2XyT8odcS3iCVca48QeQKMkBuR4UcqpQzRrcHNmzuEpj",
+    "tokenAddress": "BQb7SNzfsssjG9hin58EKXn24J6VHprVJCK1jP1wpump",
+    "createdAt": "2026-08-11T23:12:12.000Z",
+    "updatedAt": "2026-08-11T23:12:36.000Z",
+    "closedAt": "2026-08-11T23:12:36.000Z",
+    "humanTokenAmount": 0,
+    "avgEntryPrice": 3.38981675253105e-06,
+    "avgExitPrice": 1.00956893281029e-05,
+    "sumSwapOpen": 354001436.539012,
+    "sumSwapClosed": 354001436.539012,
+    "sumTransferIn": 0,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": null,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 2373.888524999999,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "947f3c0c-5879-475f-9d13-7addf3f73020",
+    "tokenMetadata": {
+     "symbol": "RANA",
+     "networkId": 1399811149,
+     "imageLargeUrl": "https://token-media.defined.fi/1399811149_BQb7SNzfsssjG9hin58EKXn24J6VHprVJCK1jP1wpump:1399811149_large_8b241e3c7cc7.png",
+     "liquidity": 0,
+     "currentPrice": 2.12942832856e-06,
+     "thumbhash": "4AkGFwK4l3Z3d4h/had5SZiFqYr3doAH"
+    },
+    "totalCostBasis": 1200.0000000000005
+   },
+   "swaps": [],
+   "transfers": [],
+   "displayName": "Konito",
+   "userHandle": "Konito",
+   "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/569e29a802cd2a88eb2a7eb742d36797_small.jpg",
+   "userId": "5a448a58-9c66-5706-96b3-760abca04e40",
+   "comment": null
+  },
+  {
+   "trade": {
+    "userAddress": "2XyT8odcS3iCVca48QeQKMkBuR4UcqpQzRrcHNmzuEpj",
+    "tokenAddress": "FxieLE5MDtTT3KEpZ4AbNY56iNhWr4WWfponUP1ipump",
+    "createdAt": "2026-08-08T23:34:12.000Z",
+    "updatedAt": "2026-08-08T23:34:23.000Z",
+    "closedAt": "2026-08-08T23:34:23.000Z",
+    "humanTokenAmount": 0,
+    "avgEntryPrice": 3.17461929070372e-06,
+    "avgExitPrice": 9.97566070539153e-06,
+    "sumSwapOpen": 346498240.976845,
+    "sumSwapClosed": 346498240.976845,
+    "sumTransferIn": 0,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": null,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 2356.5488870000013,
+    "networkId": 1399811149,
+    "commentId": null,
+    "id": "f6e11183-0691-4aed-a43e-ebd8bd73efa3",
+    "tokenMetadata": {
+     "symbol": "TNUT",
+     "networkId": 1399811149,
+     "imageLargeUrl": "https://token-media.defined.fi/1399811149_FxieLE5MDtTT3KEpZ4AbNY56iNhWr4WWfponUP1ipump:1399811149_large_2d2acdf28efd.png",
+     "liquidity": 0,
+     "currentPrice": 2.12206934773e-06,
+     "thumbhash": "LDkKLwb6R2huh3Z6cmp3aJd3lgB6OJAK"
+    },
+    "totalCostBasis": 1099.9999999999984
+   },
+   "swaps": [],
+   "transfers": [],
+   "displayName": "Konito",
+   "userHandle": "Konito",
+   "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/569e29a802cd2a88eb2a7eb742d36797_small.jpg",
+   "userId": "5a448a58-9c66-5706-96b3-760abca04e40",
+   "comment": null
+  }
+ ],
+ "bestComments": [
+  {
+   "trade": {
+    "userAddress": "2XyT8odcS3iCVca48QeQKMkBuR4UcqpQzRrcHNmzuEpj",
+    "tokenAddress": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD",
+    "createdAt": "2026-08-12T17:22:10.324Z",
+    "updatedAt": "2026-08-12T17:23:47.532Z",
+    "closedAt": null,
+    "humanTokenAmount": 13022151.527947787,
+    "avgEntryPrice": 7.645270536618439e-05,
+    "avgExitPrice": null,
+    "sumSwapOpen": 13022151.527947787,
+    "sumSwapClosed": 0,
+    "sumTransferIn": 0,
+    "sumTransferOut": 0,
+    "avgTransferInPrice": null,
+    "avgTransferOutPrice": null,
+    "realizedPnlUsd": 0,
+    "networkId": 1399811149,
+    "commentId": "a63bc351-68ec-4a72-b33b-0cdacc65412c",
+    "id": "ebbe7650-cb5e-4651-ab24-a6e063a58450",
+    "tokenMetadata": {
+     "symbol": "CLAWD",
+     "networkId": 1399811149,
+     "imageLargeUrl": "https://token-media.defined.fi/1399811149_2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD_large_9b878af98f0d.png",
+     "liquidity": 14932,
+     "currentPrice": 3.65571628119e-05,
+     "thumbhash": "tigKHwjYh2d4h4d/g4d4R5d2d3IIJ4cA"
+    },
+    "unrealizedPnlUsd": -519.5258004315804,
+    "totalCostBasis": 995.578714
+   },
+   "swaps": [],
+   "transfers": [],
+   "displayName": "Konito",
+   "userHandle": "Konito",
+   "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/569e29a802cd2a88eb2a7eb742d36797_small.jpg",
+   "userId": "5a448a58-9c66-5706-96b3-760abca04e40",
+   "comment": {
+    "id": "a63bc351-68ec-4a72-b33b-0cdacc65412c",
+    "userId": "5a448a58-9c66-5706-96b3-760abca04e40",
+    "tradeId": "ebbe7650-cb5e-4651-ab24-a6e063a58450",
+    "comment": "The other Clawd is without rewards, this one has rewards",
+    "createdAt": "2026-08-12T17:23:47.532Z",
+    "parentId": null,
+    "numLikes": 1,
+    "tokenAddress": "2Q3RhyE3u9qWf4ZNMebsWBkUJjCuQiYT62b15zu2LtCD",
+    "networkId": 1399811149,
+    "commentSegments": [
+     {
+      "text": "The other Clawd is without rewards, this one has rewards",
+      "link": null,
+      "provider": null
+     }
+    ],
+    "reactions": {
+     "counts": {
+      "likeCount": 1
+     },
+     "reactions": {
+      "like": false
+     }
+    },
+    "olderThesis": 0,
+    "newerThesis": 0
+   }
+  }
+ ]
+}
