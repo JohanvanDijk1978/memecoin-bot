@@ -298,7 +298,20 @@ to candidate paths. **Only `/trades/{id}` works** — `/v2/trades/{id}` is 404,
 ```
 
 This is the richest per-trade view in the API — realised PnL, entry/exit averages, cost
-basis and the trader's written thesis. Nothing in the bot uses it yet.
+basis and the trader's written thesis. The bot now uses trade-list and spotlight rows
+for profile metrics and tracking; the detail route remains available for future drill-down.
+
+The API does not expose historical market cap on saved examples. For Latest
+buys, the bot reconstructs it as `current market cap × avgEntryPrice ÷ current
+price`, using the most liquid DEX Screener pair for current market data. This is
+an inferred figure and is displayed with `~`; a future direct historical field
+would take precedence.
+
+The swaps route is also not a complete cross-chain history: Collectible's two
+WALL3 buys on Robinhood Chain (network 4663) were absent. The bot supplements it
+with the public Robinhood Chain Blockscout token-transfer API for the verified
+EVM wallet. An incoming token transfer counts as a buy only when the same
+transaction contains a stablecoin or otherwise USD-priced input.
 
 `GET /trades?userId={id}&orderBy=realizedPnlUsd` returns
 `{activeTrades[], closedTrades[], hasNextPage, closedCount}`. Note `userAddress` is
@@ -349,14 +362,17 @@ FOMO documents that its EVM accounts are ERC-4337 smart-contract wallets on
 Base and BNB Chain:
 https://fomo.family/blog/learn/fomo-security-wallet-architecture
 
-`fomo_evm.py` uses FomoScan's public handle lookup as the identity proof. It
-accepts only `wallets.evm.status == "verified"`, validates the address shape,
-then checks `eth_getCode` on Base and BSC. The verified Konito result is deployed
-on both chains, while its FOMO-published `evmAddress` is dead. The verified
-index also returns the exact Solana wallet independently established in §10.
+`fomo_evm.py` first attempts independent balance-fingerprint discovery for an
+uncached user with an open EVM position. It matches FOMO's exact token balance
+against the public holder set, confirms the candidate with live ERC-20
+`balanceOf`, and requires deployed smart-wallet code before caching it.
+FomoScan's public handle lookup is the fallback. Its verified Konito result is
+deployed on both chains, while FOMO's published `evmAddress` is dead.
 
-FomoScan is independent and unofficial. Its failure only omits the EVM field;
-it never affects the rest of `/fomo`. Unverified/empty results are not cached.
+FomoScan is independent and unofficial. Its failure only prevents discovery
+when a profile has neither a cached mapping nor a usable open-position balance
+fingerprint; it never affects the rest of `/fomo`. Unverified/empty results are
+not cached.
 
 When the index is stale but the operator has independently verified the owner,
 `evm_resolve.py --handle HANDLE --wallet 0x...` is the explicit fallback. It

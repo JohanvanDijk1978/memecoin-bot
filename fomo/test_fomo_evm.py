@@ -45,7 +45,104 @@ class FakeHttp:
         return FakeResponse({"jsonrpc": "2.0", "id": 1, "result": self.code})
 
 
+class FailoverHttp(FakeHttp):
+    def __init__(self, *, backup_works: bool) -> None:
+        super().__init__()
+        self.backup_works = backup_works
+        self.gets: list[str] = []
+
+    async def get(self, url: str, **_kwargs) -> FakeResponse:
+        self.gets.append(url)
+        if "primary.invalid" in url or not self.backup_works:
+            return FakeResponse({"error": "unavailable"}, 503)
+        return await super().get(url)
+
+
+class BalanceDiscoveryHttp(FakeHttp):
+    token = "0x1111111111111111111111111111111111111111"
+    amount = "123.456"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.index_gets = 0
+
+    async def get(self, *_args, **_kwargs) -> FakeResponse:
+        self.index_gets += 1
+        return FakeResponse({"error": "unavailable"}, 503)
+
+    async def post(self, url: str, **kwargs) -> FakeResponse:
+        request = kwargs.get("json")
+        if "coinmarketcap" in url:
+            return FakeResponse({"data": {"holders": [
+                {"walletAddress": ADDRESS, "balance": self.amount},
+                {"walletAddress": "0x0000000000000000000000000000000000000001",
+                 "balance": "1"},
+            ]}})
+        if isinstance(request, dict) and request.get("method") == "eth_call":
+            data = request["params"][0]["data"]
+            if data == "0x313ce567":
+                return FakeResponse({"jsonrpc": "2.0", "id": 1, "result": "0x12"})
+            raw = int(self.amount.replace(".", "")) * 10 ** 15
+            return FakeResponse({"jsonrpc": "2.0", "id": 2, "result": hex(raw)})
+        return FakeResponse({"jsonrpc": "2.0", "id": 3, "result": "0x6001"})
+
+
 class EvmWalletResolverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_fomo_balance_discovers_wallet_without_index(self) -> None:
+        balances = {"balances": [{
+            "balance": {
+                "tokenAddress": BalanceDiscoveryHttp.token,
+                "shiftedBalance": BalanceDiscoveryHttp.amount,
+            },
+            "tokenFilterResult": {"priceUSD": "2"},
+            "userToken": {"networkId": 8453},
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            http = BalanceDiscoveryHttp()
+            resolver = EvmWalletResolver(
+                http,
+                index_url="https://index.invalid",
+                rpcs={"base": "https://base.invalid"},
+                cache_path=path,
+            )
+            result = await resolver.resolve(
+                SimpleNamespace(handle="BalanceUser"), balances=balances
+            )
+            self.assertEqual(result, ADDRESS)
+            self.assertEqual(http.index_gets, 0)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["balanceuser"]["evmSource"], "balance+rpc")
+
+    async def test_index_uses_backup_after_primary_503(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            http = FailoverHttp(backup_works=True)
+            resolver = EvmWalletResolver(
+                http,
+                index_url=["https://primary.invalid", "https://backup.invalid"],
+                rpcs={"base": "https://base.invalid"},
+                cache_path=Path(directory) / "wallets.json",
+                index_retry_delays=(0.0,),
+            )
+            result = await resolver.resolve(SimpleNamespace(handle="Konito"))
+            self.assertEqual(result, ADDRESS)
+            self.assertEqual(len(http.gets), 2)
+
+    async def test_index_circuit_breaker_suppresses_repeat_503_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            http = FailoverHttp(backup_works=False)
+            resolver = EvmWalletResolver(
+                http,
+                index_url="https://primary.invalid",
+                rpcs={"base": "https://base.invalid"},
+                cache_path=Path(directory) / "wallets.json",
+                index_retry_delays=(0.0,),
+                index_cooldown=60,
+            )
+            self.assertIsNone(await resolver.resolve(SimpleNamespace(handle="first")))
+            self.assertIsNone(await resolver.resolve(SimpleNamespace(handle="second")))
+            self.assertEqual(len(http.gets), 1)
+
     async def test_verified_deployed_wallet_is_cached_without_losing_solana(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "wallets.json"

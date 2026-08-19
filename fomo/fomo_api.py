@@ -21,12 +21,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import aiohttp
 
 log = logging.getLogger("fomo")
 
 API_BASE = "https://prod-api.fomo.family"
+DEXSCREENER_API = "https://api.dexscreener.com"
 PRIVY_SESSIONS_URL = "https://auth.privy.io/api/v1/sessions"
 PRIVY_APP_ID = os.getenv("PRIVY_APP_ID", "cm6h485o300n3zj9yl6vpedq7")
 
@@ -434,15 +436,102 @@ class FomoClient:
                 raise
             return await self.user_by_handle(hits[0].handle)
 
-    async def swaps(self, user_id: str, limit: int = 10) -> dict[str, Any]:
+    async def swaps(self, user_id: str, limit: int = 10,
+                    fresh: bool = False) -> dict[str, Any]:
         """{'swaps': [...], 'hasNextPage': bool}. Pagination cursor is still unknown."""
-        return await self._get(f"/v2/users/{user_id}/swaps?limit={limit}")
+        return await self._get(f"/v2/users/{user_id}/swaps?limit={limit}",
+                               cache=not fresh)
 
     async def balances(self, user_id: str) -> dict[str, Any]:
         return await self._get(f"/v2/users/{user_id}/balances")
 
     async def spotlight(self, user_id: str) -> dict[str, Any]:
         return await self._get(f"/v2/users/{user_id}/spotlight")
+
+    async def trades(self, user_id: str, order_by: str | None = None,
+                     fresh: bool = False) -> dict[str, Any]:
+        """Active/closed trades; no order keeps the API's recent-trade order."""
+        query = {"userId": user_id}
+        if order_by:
+            query["orderBy"] = order_by
+        return await self._get(f"/trades?{urlencode(query)}", cache=not fresh)
+
+    async def token_market_data(
+        self, tokens: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        """Current price/market cap for buy-time market-cap reconstruction."""
+        if self._http is None:
+            return {}
+        chain_ids = {
+            "Solana": "solana",
+            "Base": "base",
+            "BSC": "bsc",
+            "Ethereum": "ethereum",
+            "Robinhood": "robinhood",
+        }
+        grouped: dict[str, list[str]] = {}
+        for chain, address in tokens:
+            if chain in chain_ids and address:
+                values = grouped.setdefault(chain, [])
+                if address.lower() not in {item.lower() for item in values}:
+                    values.append(address)
+
+        async def fetch(chain: str, addresses: list[str]) -> tuple[str, Any]:
+            encoded = ",".join(quote(address, safe="") for address in addresses[:30])
+            url = f"{DEXSCREENER_API}/tokens/v1/{chain_ids[chain]}/{encoded}"
+            try:
+                async with self._http.get(url) as response:
+                    if response.status != 200:
+                        return chain, []
+                    return chain, await response.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                return chain, []
+
+        responses = await asyncio.gather(
+            *(fetch(chain, addresses) for chain, addresses in grouped.items())
+        )
+        result: dict[tuple[str, str], dict[str, Any]] = {}
+        requested = {(chain, address.lower()) for chain, address in tokens}
+        scores: dict[tuple[str, str], float] = {}
+        for chain, pairs in responses:
+            for pair in pairs if isinstance(pairs, list) else []:
+                if not isinstance(pair, dict):
+                    continue
+                base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+                quote_token = pair.get("quoteToken") \
+                    if isinstance(pair.get("quoteToken"), dict) else {}
+                base_address = str(base.get("address") or "").lower()
+                quote_address = str(quote_token.get("address") or "").lower()
+                base_key = (chain, base_address)
+                quote_key = (chain, quote_address)
+                if base_key in requested:
+                    key = base_key
+                    market_cap = pair.get("marketCap")
+                    fdv = pair.get("fdv")
+                    price_usd = pair.get("priceUsd")
+                elif quote_key in requested:
+                    key = quote_key
+                    market_cap = None
+                    fdv = None
+                    try:
+                        price_usd = float(pair.get("priceUsd")) / float(pair.get("priceNative"))
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        continue
+                else:
+                    continue
+                liquidity = pair.get("liquidity") if isinstance(pair.get("liquidity"), dict) else {}
+                try:
+                    score = float(liquidity.get("usd") or 0)
+                except (TypeError, ValueError):
+                    score = 0.0
+                if key not in result or score > scores[key]:
+                    result[key] = {
+                        "marketCap": market_cap,
+                        "fdv": fdv,
+                        "priceUsd": price_usd,
+                    }
+                    scores[key] = score
+        return result
 
     async def leaderboard(self, period: str | None = None, limit: int = 10) -> list[FomoUser]:
         """period: None (all-time) or '24h'. limit is REQUIRED by the API."""

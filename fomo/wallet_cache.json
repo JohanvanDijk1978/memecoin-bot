@@ -46,7 +46,16 @@
   "wallet": "F2hA2zDVnHyDUiMQ6b3K9Gx9A2JAxJn66ASH9xZ9LqbG",
   "confirmed": 5,
   "checked": 6,
-  "resolvedAt": 1787065397
+  "resolvedAt": 1787065397,
+  "evmWallet": "0xfa2b3e71486f75b6b31aa17dbd5e687f253e3111",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T14:56:20.262Z",
+  "evmResolvedAt": 1787073131
  },
  "runecrypto_": {
   "wallet": "3CPHk5b7SRvAsTsocehAu1bA5YKMXJYMr3qc2SuMFkWY",
@@ -60,5 +69,232 @@
   ],
   "evmVerifiedAt": "2026-08-18T14:44:04.864Z",
   "evmResolvedAt": 1787066500
+ },
+ "giganiggay": {
+  "wallet": "8t6ogyVqX4Feyh2kkF2Mut1Hau9hwLCKgPT2BTnZF85y",
+  "confirmed": 1,
+  "resolvedAt": 1787067628
+ },
+ "dipwheeler": {
+  "wallet": "BMgsHTvcasRVtuevHJh8t6Vf5dmcWkDLAx6gSAQ3dsYm",
+  "confirmed": 1,
+  "resolvedAt": 1787069758,
+  "evmWallet": "0x28a92ff139536c780b3d8b172e68bd2d32a666a6",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T14:46:35.778Z",
+  "evmResolvedAt": 1787069758
+ },
+ "zenza": {
+  "wallet": "Ds14hiRypY3qqoQcWnjmHpKdcgqJ7omWktKK5TxkofKC",
+  "confirmed": 2,
+  "resolvedAt": 1787072746
+ },
+ "trader": {
+  "wallet": "4LWXdfSb13EemLs9DqEUcPFs9LM8xvMNwxWibyt57tw5",
+  "confirmed": 2,
+  "resolvedAt": 1787082984,
+  "evmWallet": "0x6549e03652de4ee63eefdd0553eff608497daee8",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T16:19:36.183Z",
+  "evmResolvedAt": 1787082986
+ },
+ "0xouroboros": {
+  "wallet": "354ZgC2TLJJPyTaVou4nQoFN2FLxjYGK8oDo8vQW2JK6",
+  "confirmed": 1,
+  "resolvedAt": 1787097733
+ },
+ "profitmaxxing": {
+  "wallet": "zMAwm917LbJofdmGT3szxtGnj3bZCB6eGRR8kEtrf6v",
+  "confirmed": 2,
+  "resolvedAt": 1787128688
+ },
+ "runitbackghost": {
+  "wallet": "Bf4zji6S979QySiGNjPJ2VMZ5i2SRVtAzfx8QUBScJm6",
+  "confirmed": 1,
+  "resolvedAt": 1787130901
+ },
+ "salem1299534": {
+  "wallet": "2yXwy5Dsa1XtEXcsrkFVRJeyuWD3qKkMN3pP3p5VTW3V",
+  "confirmed": 2,
+  "resolvedAt": 1787132325
+ },
+ "brazen": {
+  "wallet": "CiFVDSUpeZVSVQHgVVaa7bqoThUkwfRpYTronkaASWqY",
+  "confirmed": 1,
+  "resolvedAt": 1787132531
+ },
+ "kiennguyen_nft": {
+  "wallet": "5oLWTR6F2nRC1NyCCK9tWLPL4cQskTk8HWjTB8nqi2QH",
+  "confirmed": 2,
+  "resolvedAt": 1787132556
+ },
+ "aki11a": {
+  "wallet": "85o5GZhor1ygRCzGDNRcsRCJyiQ3daGTGYHNXvCTJ4J7",
+  "confirmed": 2,
+  "resolvedAt": 1787134832
+ },
+ "change": {
+  "wallet": "J9WiAZKf8JnCkHFL8fLCCXdEgdoLjLRqU2EGsDjdqYga",
+  "confirmed": 4,
+  "walletSource": "manual+fomo-sponsor",
+  "resolvedAt": 1787136439,
+  "evmWallet": "0x92bff72e6c943a1348aedf15d68e758e811dec64",
+  "evmStatus": "verified",
+  "evmChains": [
+   "robinhood"
+  ],
+  "evmSource": "activity+rpc",
+  "evmVerifiedAt": "2026-08-19T10:02:22.000Z",
+  "evmResolvedAt": 1787135932
+ },
+ "fmpumpguy": {
+  "evmWallet": "0xb0e9dcce59a1526c4277168a2505993d303f6060",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T15:09:14.304Z",
+  "evmResolvedAt": 1787136450
+ },
+ "altcoinist": {
+  "evmWallet": "0xccdeb7744e778992bfbff798f239638b76448e75",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-09T10:02:44.171Z",
+  "evmResolvedAt": 1787136920
+ },
+ "dumbcrayoneater": {
+  "evmWallet": "0x8f62a08537cede87d511aca6436274ab4ca080a3",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T15:27:04.234Z",
+  "evmResolvedAt": 1787138380
+ },
+ "frankdegods": {
+  "wallet": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ",
+  "confirmed": 3,
+  "walletSource": "manual+fomo-sponsor",
+  "resolvedAt": 1787142026,
+  "evmWallet": "0x696d1265c8fc4f14797abebfae3c43ebfa9d8e28",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-19T05:39:02.814Z",
+  "evmResolvedAt": 1787141133
+ },
+ "tigerredboom": {
+  "wallet": "9HQTRdo5BF6DKFgr6BAgVQCvYPNfs1rUMpGKyJ4txtss",
+  "confirmed": 1,
+  "walletSource": "fomo-sponsor",
+  "resolvedAt": 1787142913
+ },
+ "sunnydog06": {
+  "wallet": "ByUDHgDtJFVu75WhK8oetH6sy1kgqQV3Bjc7SbmpjCs",
+  "confirmed": 1,
+  "walletSource": "fomo-sponsor",
+  "resolvedAt": 1787142955,
+  "evmWallet": "0x540dfd404e7bd75dd955c9634ae38bc551487552",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T15:25:11.063Z",
+  "evmResolvedAt": 1787142955
+ },
+ "0xforgivable": {
+  "evmWallet": "0x0232b9afb9160fe479f25dade62fa60ef657bdc5",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T15:15:10.454Z",
+  "evmResolvedAt": 1787143280
+ },
+ "yayayayayey": {
+  "wallet": "CHmurt9dTTbbDj6uZELTENx2ZvKszLs6wd73iDmGHW35",
+  "confirmed": 2,
+  "walletSource": "fomo-sponsor",
+  "resolvedAt": 1787144781,
+  "evmWallet": "0x542414c3c691c9c15261d4bbee3327d56b94977f",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T15:32:13.023Z",
+  "evmResolvedAt": 1787144782
+ },
+ "vein": {
+  "wallet": "5uSNZfK1eLk9j6gR9jhYcfbHd4XtpgHnZP79fVMUcKQH",
+  "confirmed": 2,
+  "walletSource": "fomo-sponsor",
+  "resolvedAt": 1787145208,
+  "evmWallet": "0xa2aeb0cadc27bdd6a6656390c2d05f6e7cbed497",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T15:16:09.947Z",
+  "evmResolvedAt": 1787145209
+ },
+ "quanterty": {
+  "wallet": "8f39XhhZoRD8sYb6K5K9N7iSHXkL7BDmFFQNDF3TtsEr",
+  "confirmed": 2,
+  "walletSource": "balance+helius+fomo-sponsor",
+  "resolvedAt": 1787145651,
+  "evmWallet": "0x0121525f755c9e7bbc525bba6672716ab46ced57",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "robinhood"
+  ],
+  "evmSource": "fomoscan",
+  "evmVerifiedAt": "2026-08-18T14:55:06.811Z",
+  "evmResolvedAt": 1787145652
  }
 }

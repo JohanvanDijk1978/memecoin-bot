@@ -1,5 +1,11 @@
 .env
 .fomo_session.json
-.venv/
+.venv*/
 __pycache__/
 .chrome-profile/
+fomo_tracks.json
+fomo_tracks.json.tmp
+pump_tracks.json
+pump_tracks.json.tmp
+pump_evm_cache.json
+pump_evm_cache.json.tmp
