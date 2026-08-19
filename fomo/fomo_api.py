@@ -25,6 +25,8 @@ from urllib.parse import quote, urlencode
 
 import aiohttp
 
+from fomo_chains import SUPPORTED_CHAINS_HEADER
+
 log = logging.getLogger("fomo")
 
 API_BASE = "https://prod-api.fomo.family"
@@ -42,8 +44,10 @@ BROWSERISH = {
     "Origin": "https://fomo.family",
     "Referer": "https://fomo.family/",
     "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
     "sec-ch-ua-platform": '"Windows"',
+    "x-supported-chains": SUPPORTED_CHAINS_HEADER,
 }
 
 # Cloudflare fingerprints in a 403 body. A WAF block is HTML and carries cf-ray;
@@ -348,14 +352,23 @@ class FomoClient:
 
     # ---------------- transport ----------------
 
-    async def _get(self, path: str, *, cache: bool = True, _retry: bool = True) -> Any:
+    async def _get(
+        self,
+        path: str,
+        *,
+        cache: bool = True,
+        _retry: bool = True,
+        lane: str = "foreground",
+    ) -> Any:
         assert self._http is not None, "use FomoClient as an async context manager"
 
         if cache and (hit := self._cache.get(path)) and hit[0] > time.time():
             return hit[1]
 
         if self._browser is not None:
-            status, body, resp_headers = await self._browser.get(API_BASE + path)
+            status, body, resp_headers = await self._browser.get(
+                API_BASE + path, lane=lane
+            )
         else:
             token = await self._ensure_token()
             async with self._http.get(
@@ -365,18 +378,40 @@ class FomoClient:
                 status = resp.status
                 resp_headers = {k.lower(): v for k, v in resp.headers.items()}
 
+        return await self._decode_response(
+            path, status, body, resp_headers,
+            cache=cache, retry=_retry, lane=lane,
+        )
+
+    async def _decode_response(
+        self,
+        path: str,
+        status: int,
+        body: str,
+        resp_headers: dict[str, str],
+        *,
+        cache: bool,
+        retry: bool,
+        lane: str,
+    ) -> Any:
+        """Apply auth, envelope and cache semantics to one transport response."""
+
         if status == 403:
             raise FomoBlocked(describe_403(path, body, resp_headers))
-        if status == 401 and _retry:
+        if status == 401 and retry:
             if self._browser is not None:
                 # Nothing for us to refresh — the app owns the token. Reload the
                 # page so the SPA mints a new one, then try once more.
                 log.info("401 from FOMO, reloading the app page to re-mint the token")
                 await self._browser.reload()
-                return await self._get(path, cache=cache, _retry=False)
+                return await self._get(
+                    path, cache=cache, _retry=False, lane=lane
+                )
             log.info("401 from FOMO, forcing token refresh")
             await self._ensure_token(force=True)
-            return await self._get(path, cache=cache, _retry=False)
+            return await self._get(
+                path, cache=cache, _retry=False, lane=lane
+            )
 
         try:
             data = json.loads(body)
@@ -395,6 +430,73 @@ class FomoClient:
         if cache:
             self._cache[path] = (time.time() + self._cache_ttl, obj)
         return obj
+
+    async def _get_many(
+        self, paths: tuple[str, ...], *, lane: str = "foreground"
+    ) -> tuple[Any, ...]:
+        """Apply normal cache/auth semantics to one parallel browser batch."""
+        results: dict[str, Any] = {}
+        missing: list[str] = []
+        now = time.time()
+        for path in paths:
+            hit = self._cache.get(path)
+            if hit and hit[0] > now:
+                results[path] = hit[1]
+            else:
+                missing.append(path)
+
+        if missing and self._browser is not None:
+            urls = [API_BASE + path for path in missing]
+            try:
+                responses = await self._browser.get_many(urls, lane=lane)
+            except Exception as exc:
+                responses = {url: exc for url in urls}
+            for path, url in zip(missing, urls):
+                response = responses.get(url)
+                if isinstance(response, Exception):
+                    results[path] = response
+                    continue
+                if not isinstance(response, tuple):
+                    results[path] = FomoError(f"no browser response for {path}")
+                    continue
+                status, body, headers = response
+                try:
+                    results[path] = await self._decode_response(
+                        path, status, body, headers,
+                        cache=True, retry=True, lane=lane,
+                    )
+                except Exception as exc:
+                    results[path] = exc
+        elif missing:
+            fetched = await asyncio.gather(
+                *(self._get(path, lane=lane) for path in missing),
+                return_exceptions=True,
+            )
+            results.update(zip(missing, fetched))
+
+        return tuple(results.get(path) for path in paths)  # type: ignore[return-value]
+
+    async def profile_panels(self, user_id: str) -> tuple[Any, Any, Any, Any]:
+        """Fetch the four `/fomo` panels in one parallel in-browser batch."""
+        paths = (
+            f"/v2/users/{user_id}/balances",
+            f"/v2/users/{user_id}/spotlight",
+            f"/trades?{urlencode({'userId': user_id})}",
+            f"/v2/users/{user_id}/swaps?limit=50",
+        )
+        return await self._get_many(paths)  # type: ignore[return-value]
+
+    async def trade_details(
+        self, trade_ids: list[str], *, background: bool = True
+    ) -> tuple[Any, ...]:
+        """Fetch immutable trade histories together for wallet discovery."""
+        paths = tuple(f"/trades/{trade_id}" for trade_id in dict.fromkeys(trade_ids)
+                      if trade_id)
+        if not paths:
+            return ()
+        return await self._get_many(
+            paths, lane="background" if background else "foreground"
+        )
 
     # ---------------- public API ----------------
 
@@ -437,10 +539,12 @@ class FomoClient:
             return await self.user_by_handle(hits[0].handle)
 
     async def swaps(self, user_id: str, limit: int = 10,
-                    fresh: bool = False) -> dict[str, Any]:
+                    fresh: bool = False,
+                    background: bool = False) -> dict[str, Any]:
         """{'swaps': [...], 'hasNextPage': bool}. Pagination cursor is still unknown."""
         return await self._get(f"/v2/users/{user_id}/swaps?limit={limit}",
-                               cache=not fresh)
+                               cache=not fresh,
+                               lane="background" if background else "foreground")
 
     async def balances(self, user_id: str) -> dict[str, Any]:
         return await self._get(f"/v2/users/{user_id}/balances")
@@ -449,12 +553,17 @@ class FomoClient:
         return await self._get(f"/v2/users/{user_id}/spotlight")
 
     async def trades(self, user_id: str, order_by: str | None = None,
-                     fresh: bool = False) -> dict[str, Any]:
+                     fresh: bool = False,
+                     background: bool = False) -> dict[str, Any]:
         """Active/closed trades; no order keeps the API's recent-trade order."""
         query = {"userId": user_id}
         if order_by:
             query["orderBy"] = order_by
-        return await self._get(f"/trades?{urlencode(query)}", cache=not fresh)
+        return await self._get(
+            f"/trades?{urlencode(query)}",
+            cache=not fresh,
+            lane="background" if background else "foreground",
+        )
 
     async def token_market_data(
         self, tokens: list[tuple[str, str]]

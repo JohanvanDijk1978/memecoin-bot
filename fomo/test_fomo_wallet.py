@@ -8,6 +8,9 @@ from types import SimpleNamespace
 
 from fomo_wallet import (
     FOMO_SPONSOR,
+    SOLANA_NETWORK_ID,
+    Rpc,
+    RpcInvalidParams,
     SponsorIndex,
     WalletResolver,
     find_tx_via_sponsor,
@@ -83,8 +86,9 @@ class FakeRpc:
 
 
 class FakeResponse:
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: dict, status_code: int = 200) -> None:
         self.payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         return None
@@ -106,6 +110,19 @@ class FakeHeliusHttp:
             "amount": str(amount),
         }]
         return FakeResponse({"result": {"token_accounts": accounts}})
+
+
+class InvalidParamsHttp:
+    def __init__(self) -> None:
+        self.posts = 0
+
+    async def post(self, _url: str, **_kwargs: object) -> FakeResponse:
+        self.posts += 1
+        return FakeResponse({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32602, "message": "Invalid param: Invalid"},
+        })
 
 
 def balance_row(mint: str, raw: int, shifted: float, price: float = 1.0) -> dict:
@@ -179,6 +196,30 @@ class WalletDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             [MINT_A, MINT_B, MINT_A],
         )
 
+    def test_pick_swaps_excludes_evm_rows_from_mixed_chain_feed(self) -> None:
+        evm = {
+            "createdAt": "2026-08-19T10:00:00Z",
+            "networkId": 1,
+            "inTokenAddress": "0xa0b86991c6218b6c1d19d4a2e9eb0ce3606eb48",
+            "inHumanAmount": 100,
+            "outTokenAddress": "0xe172e9b6cfbeeb5593bdce3f077356fdb33af904",
+            "outHumanAmount": 1000,
+        }
+        solana = swap(MINT_A, 42.5)
+        solana["networkId"] = SOLANA_NETWORK_ID
+
+        self.assertEqual(pick_swaps([evm, solana]), [solana])
+
+    async def test_invalid_rpc_params_do_not_fail_over_or_start_cooldown(self) -> None:
+        http = InvalidParamsHttp()
+        rpc = Rpc(http, ["https://primary.invalid", "https://backup.invalid"])
+
+        with self.assertRaises(RpcInvalidParams):
+            await rpc("getSignaturesForAddress", ["0xnot-solana"])
+
+        self.assertEqual(http.posts, 1)
+        self.assertEqual(rpc._cooldown_until, 0.0)
+
     async def test_sponsor_fallback_requires_exact_wallet_delta(self) -> None:
         row = swap(MINT_A, 42.5)
         rpc = FakeRpc(row, transaction(MINT_A, 42.5))
@@ -237,7 +278,7 @@ class WalletDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                     "confirmed": 5,
                     "evmWallet": "0x03ba951f72e59899ac8dab30cb5624dbe5d52bb8",
                     "evmStatus": "verified",
-                    "evmSource": "fomoscan",
+                    "evmSource": "legacy+rpc",
                     "evmChains": ["base", "bsc"],
                 }
             }), encoding="utf-8")

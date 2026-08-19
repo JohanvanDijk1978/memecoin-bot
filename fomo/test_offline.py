@@ -71,15 +71,16 @@ async def main():
           fw.mint_delta(n, MINT) == [(TRADER, AMOUNT)])
 
     print("pick_swaps")
-    rows = [{"outTokenAddress": "AAA", "inTokenAddress": list(fw.QUOTES)[0],
+    mint_a, mint_b, mint_c = "A" * 32, "B" * 32, "C" * 32
+    rows = [{"outTokenAddress": mint_a, "inTokenAddress": list(fw.QUOTES)[0],
              "outHumanAmount": "1", "createdAt": "x"} for _ in range(3)] + \
-           [{"outTokenAddress": "BBB", "inTokenAddress": list(fw.QUOTES)[0],
+           [{"outTokenAddress": mint_b, "inTokenAddress": list(fw.QUOTES)[0],
              "outHumanAmount": "2", "createdAt": "x"},
-            {"outTokenAddress": "CCC", "inTokenAddress": list(fw.QUOTES)[0],
+            {"outTokenAddress": mint_c, "inTokenAddress": list(fw.QUOTES)[0],
              "outHumanAmount": "3", "createdAt": "x"}]
     picked = [r["outTokenAddress"] for r in fw.pick_swaps(rows, want=4)]
     check(f"spreads over distinct mints first: {picked}",
-          picked[:3] == ["AAA", "BBB", "CCC"] and len(picked) == 4)
+          picked[:3] == [mint_a, mint_b, mint_c] and len(picked) == 4)
 
     print("SponsorIndex")
     rpc = FakeRpc()

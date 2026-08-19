@@ -53,20 +53,31 @@ to Use Application Commands in the target channel.
 
 Wallet enrichment is enabled by default. `FOMO_RESOLVE_WALLETS=0` disables
 Solana resolution and `FOMO_RESOLVE_EVM=0` disables verified EVM resolution.
-Successful identity mappings are kept locally. The EVM resolver retries
-temporary failures across configured `FOMOSCAN_FALLBACK_URLS` and opens a
-15-minute circuit breaker during a provider outage so `/fomo` remains fast and
-cache-only instead of repeatedly hitting a failing service. HTTP request-line
-logging is disabled because RPC URLs can contain private API keys.
+`/fomo` no longer waits for this optional on-chain work: it sends the core
+profile first, includes any cached wallets immediately, and edits that same
+card when background enrichment completes. `FOMO_ENRICH_TIMEOUT` bounds the
+background work (20 seconds by default), so a slow RPC cannot hold the command
+open indefinitely. Its balances, spotlight, trades and swaps panels are fetched
+in one parallel in-browser batch. Tracking and post-response wallet discovery
+use a separate background browser page, so polling cannot queue ahead of an
+interactive profile lookup.
+Successful identity mappings are kept locally. Solana discovery now runs in
+parallel with the complete `EVM wallet → EVM activity` branch after the initial
+card is visible. EVM buys and sells therefore start as soon as the EVM wallet is
+known instead of waiting for Solana. HTTP request-line logging is disabled
+because RPC URLs can contain private API keys.
 
-FomoScan is now a fallback rather than the primary discovery method. For an
-uncached profile with an open EVM position, the bot matches FOMO's exact token
-balance against the public holder set, confirms ownership with live ERC-20
-`balanceOf`, requires deployed smart-wallet code, and then caches the address.
-This works while FomoScan is down and rejects ambiguous or rounded guesses.
+For an uncached profile, the bot batches several low-liquidity/older EVM
+trade-detail requests, searches each token's chain history near FOMO's
+timestamp, matches direction and exact token amount, validates the stablecoin
+value when it is available, and requires the same address across at least two
+independent transactions. It then requires deployed smart-wallet code on an
+evidence chain before caching the result. Current-balance matching is the
+second discovery path. `FOMO_EVM_DISCOVERY_TOKENS` and
+`FOMO_EVM_DISCOVERY_PAGES` bound this work.
 
-If FomoScan has not indexed a known verified EVM wallet yet, validate and cache
-the explicit mapping with `python evm_resolve.py --handle HANDLE --wallet 0x...`.
+An independently verified EVM wallet can be deployment-checked and cached with
+`python evm_resolve.py --handle HANDLE --wallet 0x...`.
 
 Then check the API works before wiring up Discord:
 
@@ -160,6 +171,11 @@ Robinhood through Blockscout. A non-stable transfer is classified as a swap
 only when the same transaction contains a stablecoin leg, which filters out
 airdrop spam. These results are merged with FOMO's own feed for both buys and
 sells.
+
+An uncached EVM wallet can be discovered even after its positions were sold.
+The resolver uses FOMO's per-trade history because the general swap feed is not
+complete for EVM networks. A single matching transfer is never cached, and
+different candidate wallets across the evidence are rejected as ambiguous.
 
 FOMO Solana wallet discovery uses the platform sponsor's transaction history
 and matches the non-quote token balance leg. It handles both buys (positive

@@ -36,6 +36,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from fomo_chains import SUPPORTED_CHAINS_HEADER
+
 log = logging.getLogger("fomo.browser")
 
 APP_ORIGIN = "https://fomo.family"
@@ -50,45 +52,49 @@ class BrowserUnavailable(RuntimeError):
 
 # The whole request happens inside the page. Returning a plain object keeps
 # everything JSON-serialisable across the CDP boundary.
-_FETCH_JS = """
-async ({ url, timeoutMs }) => {
+_FETCH_MANY_JS = """
+async ({ urls, timeoutMs }) => {
   const readToken = () => {
     for (const key of ['privy:token', 'privy:id_token']) {
       const raw = localStorage.getItem(key);
       if (!raw) continue;
-      // Privy stores it JSON-encoded, i.e. with surrounding quotes.
       try { const v = JSON.parse(raw); if (typeof v === 'string' && v) return v; }
       catch (_) { if (raw) return raw; }
     }
     return null;
   };
 
+  const token = readToken();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const token = readToken();
-    const headers = { 'Accept': 'application/json, text/plain, */*' };
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-
-    // cache:'no-store' matters — a 304 comes back with an empty body.
-    const r = await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      cache: 'no-store',
-      headers,
-      signal: ctrl.signal,
-    });
-    const body = await r.text();
-    const h = {};
-    r.headers.forEach((v, k) => { h[k] = v; });
-    return { ok: true, status: r.status, body, headers: h, hadToken: !!token };
-  } catch (e) {
-    return { ok: false, error: String(e && e.message ? e.message : e) };
+    return await Promise.all(urls.map(async (url) => {
+      try {
+        const headers = {
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'x-supported-chains': '__SUPPORTED_CHAINS__',
+        };
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+        const r = await fetch(url, {
+          method: 'GET', credentials: 'include', cache: 'no-store', headers,
+          signal: ctrl.signal,
+        });
+        const body = await r.text();
+        const h = {};
+        r.headers.forEach((v, k) => { h[k] = v; });
+        return { url, ok: true, status: r.status, body, headers: h,
+                 hadToken: !!token };
+      } catch (e) {
+        return { url, ok: false, error: String(e && e.message ? e.message : e),
+                 hadToken: !!token };
+      }
+    }));
   } finally {
     clearTimeout(timer);
   }
 }
-"""
+""".replace("__SUPPORTED_CHAINS__", SUPPORTED_CHAINS_HEADER)
 
 
 class BrowserTransport:
@@ -118,7 +124,9 @@ class BrowserTransport:
         self._pw: Any = None
         self._ctx: Any = None
         self._page: Any = None
+        self._background_page: Any = None
         self._lock = asyncio.Lock()
+        self._background_lock = asyncio.Lock()
 
     # ---------------- lifecycle ----------------
 
@@ -166,13 +174,14 @@ class BrowserTransport:
         log.info("browser transport ready (profile=%s, headless=%s)",
                  self._profile_dir, self._headless)
 
-    async def _goto_app(self) -> None:
-        assert self._page is not None
-        if not self._page.url.startswith(APP_ORIGIN):
-            await self._page.goto(APP_ORIGIN, wait_until="domcontentloaded",
-                                  timeout=NAV_TIMEOUT_MS)
+    async def _goto_app(self, page: Any = None) -> None:
+        page = page or self._page
+        assert page is not None
+        if not page.url.startswith(APP_ORIGIN):
+            await page.goto(APP_ORIGIN, wait_until="domcontentloaded",
+                            timeout=NAV_TIMEOUT_MS)
             # Give the SPA a moment to mint/restore the Privy token.
-            await self._page.wait_for_timeout(2500)
+            await page.wait_for_timeout(2500)
 
     async def close(self) -> None:
         try:
@@ -184,6 +193,7 @@ class BrowserTransport:
     async def _hard_stop(self) -> None:
         self._ctx = None
         self._page = None
+        self._background_page = None
         if self._pw:
             try:
                 await self._pw.stop()
@@ -192,36 +202,66 @@ class BrowserTransport:
 
     # ---------------- the actual request ----------------
 
-    async def get(self, url: str) -> tuple[int, str, dict[str, str]]:
-        if self._page is None:
-            raise BrowserUnavailable("transport not started — call start() first")
+    async def get(
+        self, url: str, *, lane: str = "foreground"
+    ) -> tuple[int, str, dict[str, str]]:
+        result = (await self.get_many([url], lane=lane))[url]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
-        # Serialise: one page, one fetch at a time. These calls are ~200ms and
-        # the bot's traffic is human-paced, so a lock is cheaper than tab churn.
-        async with self._lock:
-            await self._ensure_alive()
-            result = await self._page.evaluate(
-                _FETCH_JS, {"url": url, "timeoutMs": int(self._timeout * 1000)}
+    async def get_many(
+        self, urls: list[str], *, lane: str = "foreground"
+    ) -> dict[str, tuple[int, str, dict[str, str]] | Exception]:
+        """Fetch same-origin API URLs concurrently inside one browser page."""
+        if not urls:
+            return {}
+        lock = self._background_lock if lane == "background" else self._lock
+        async with lock:
+            page = await self._ensure_alive(lane)
+            results = await page.evaluate(
+                _FETCH_MANY_JS,
+                {"urls": urls, "timeoutMs": int(self._timeout * 1000)},
             )
 
-        if not result.get("ok"):
-            # A CORS rejection or an abort surfaces here, not as an HTTP status.
-            raise BrowserUnavailable(f"in-page fetch failed for {url}: {result.get('error')}")
+        output: dict[str, tuple[int, str, dict[str, str]] | Exception] = {}
+        for result in results or []:
+            url = str(result.get("url") or "")
+            if not result.get("ok"):
+                output[url] = BrowserUnavailable(
+                    f"in-page fetch failed for {url}: {result.get('error')}"
+                )
+                continue
+            if not result.get("hadToken"):
+                log.warning(
+                    "no Privy token in localStorage — profile may be logged out "
+                    "(run: python fomo_browser.py --login)"
+                )
+            headers = {
+                str(k).lower(): str(v)
+                for k, v in (result.get("headers") or {}).items()
+            }
+            output[url] = (
+                int(result["status"]), str(result.get("body") or ""), headers
+            )
+        return output
 
-        if not result.get("hadToken"):
-            log.warning("no Privy token in localStorage — profile may be logged out "
-                        "(run: python fomo_browser.py --login)")
-
-        headers = {str(k).lower(): str(v) for k, v in (result.get("headers") or {}).items()}
-        return int(result["status"]), str(result.get("body") or ""), headers
-
-    async def _ensure_alive(self) -> None:
+    async def _ensure_alive(self, lane: str = "foreground") -> Any:
         """Recover from a closed tab or a navigation that wandered off-origin."""
         try:
+            if self._ctx is None:
+                raise BrowserUnavailable("transport not started — call start() first")
+            if lane == "background":
+                if self._background_page is None or self._background_page.is_closed():
+                    self._background_page = await self._ctx.new_page()
+                    self._background_page.set_default_timeout(NAV_TIMEOUT_MS)
+                await self._goto_app(self._background_page)
+                return self._background_page
             if self._page is None or self._page.is_closed():
                 self._page = await self._ctx.new_page()
                 self._page.set_default_timeout(NAV_TIMEOUT_MS)
-            await self._goto_app()
+            await self._goto_app(self._page)
+            return self._page
         except Exception as exc:
             raise BrowserUnavailable(f"browser page is not usable: {exc}") from exc
 

@@ -47,7 +47,12 @@ from dotenv import load_dotenv
 # Wallet modules read their RPC/cache settings at import time.
 load_dotenv()
 
-from fomo_evm import EvmWalletResolver
+from fomo_evm import (
+    EvmWalletResolver,
+    cached_evm_wallet,
+    evm_trade_evidence,
+    evm_trade_ids,
+)
 from fomo_evm_activity import fetch_evm_activity
 from fomo_features import (
     TraderStats,
@@ -71,7 +76,12 @@ from fomo_tracking import (
     normalize_activity_filters,
     snapshot,
 )
-from fomo_wallet import CachedWalletMatch, WalletResolver, find_cached_wallets
+from fomo_wallet import (
+    CachedWalletMatch,
+    WalletResolver,
+    cached_wallet,
+    find_cached_wallets,
+)
 from fomo_api import (
     FomoBlocked,
     FomoClient,
@@ -132,6 +142,9 @@ RESOLVE_EVM = os.getenv("FOMO_RESOLVE_EVM", "1").strip() not in ("0", "false", "
 TRACK_FILE = Path(os.getenv("FOMO_TRACK_FILE", "fomo_tracks.json"))
 FOMO_TRACK_INTERVAL = max(1.0, float(os.getenv("FOMO_TRACK_INTERVAL", "60")))
 LARGE_SWAP_USD = max(0.0, float(os.getenv("FOMO_LARGE_SWAP_USD", "1000")))
+FOMO_ENRICH_TIMEOUT = max(
+    1.0, float(os.getenv("FOMO_ENRICH_TIMEOUT", "20"))
+)
 PUMP_TRACK_FILE = Path(os.getenv("PUMP_TRACK_FILE", "pump_tracks.json"))
 PUMP_TRACK_INTERVAL = max(
     0.25,
@@ -408,8 +421,8 @@ def build_embed(user: FomoUser, wallet: str | None = None,
         embed.add_field(name="Latest theses", value="No recent theses found.", inline=False)
 
     # Never use user.sol_address or user.evm_address: both are synthetic. The
-    # real Solana wallet is derived on chain; EVM is accepted only from the
-    # verified identity index plus an ERC-4337 deployment probe.
+    # real Solana wallet is derived on chain; EVM wallets are accepted only
+    # from corroborated on-chain evidence or an explicitly verified mapping.
     if wallet:
         embed.add_field(name="Solana wallet", value=f"◎ `{wallet}`", inline=False)
     if evm_wallet:
@@ -699,7 +712,26 @@ class FomoBot(discord.Client):
         self.tracking = TrackingStore(TRACK_FILE)
         self.pump_tracking = PumpTrackingStore(PUMP_TRACK_FILE)
         self._tracking_tasks: list[asyncio.Task[None]] = []
+        self._enrichment_tasks: set[asyncio.Task[None]] = set()
         self._guild_commands_synced = False
+
+    def create_enrichment_task(
+        self, awaitable: Awaitable[None], *, name: str
+    ) -> asyncio.Task[None]:
+        """Keep a strong reference to a bounded profile-enrichment task."""
+
+        async def guarded() -> None:
+            try:
+                await awaitable
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("background profile enrichment failed")
+
+        task = asyncio.create_task(guarded(), name=name)
+        self._enrichment_tasks.add(task)
+        task.add_done_callback(self._enrichment_tasks.discard)
+        return task
 
     async def setup_hook(self) -> None:
         self.fomo = FomoClient(
@@ -769,6 +801,13 @@ class FomoBot(discord.Client):
         self._guild_commands_synced = all_synced
 
     async def close(self) -> None:
+        enrichment_tasks = list(self._enrichment_tasks)
+        for task in enrichment_tasks:
+            task.cancel()
+        for task in enrichment_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._enrichment_tasks.clear()
         for task in self._tracking_tasks:
             task.cancel()
         for task in self._tracking_tasks:
@@ -803,8 +842,13 @@ class FomoBot(discord.Client):
         for key, entry in list(self.tracking.tracks.items()):
             try:
                 swaps_data, trades_data = await asyncio.gather(
-                    self.fomo.swaps(str(entry["userId"]), limit=25, fresh=True),
-                    self.fomo.trades(str(entry["userId"]), fresh=True),
+                    self.fomo.swaps(
+                        str(entry["userId"]), limit=25, fresh=True,
+                        background=True,
+                    ),
+                    self.fomo.trades(
+                        str(entry["userId"]), fresh=True, background=True
+                    ),
                 )
                 events = detect_events(swaps_data, trades_data, entry, LARGE_SWAP_USD)
                 state = snapshot(swaps_data, trades_data, entry)
@@ -997,6 +1041,123 @@ async def _reply_pump_error(
     await interaction.followup.send(message, ephemeral=True)
 
 
+async def _resolve_fomo_enrichment(
+    client: FomoBot,
+    user: FomoUser,
+    stats: TraderStats,
+    wallet: str | None,
+    evm_wallet: str | None,
+) -> tuple[str | None, str | None, TraderStats]:
+    """Complete optional wallet/activity panels after the base reply exists."""
+    async def resolve_solana() -> str | None:
+        if wallet is not None or not client.wallets or not client.fomo:
+            return wallet
+        try:
+            result = await client.wallets.resolve(client.fomo, user)
+            if result is None and stats.raw_balances is not None:
+                result = await client.wallets.resolve_from_balances(
+                    user, stats.raw_balances
+                )
+            return result
+        except Exception as exc:
+            log.warning("Solana wallet lookup failed for @%s: %s", user.handle, exc)
+            return None
+
+    async def resolve_evm() -> str | None:
+        if evm_wallet is not None or not client.evm_wallets:
+            return evm_wallet
+        try:
+            trade_details: tuple[Any, ...] = ()
+            existing_evidence = evm_trade_evidence(
+                stats.raw_swaps, stats.raw_trades
+            )
+            exact_evidence = sum(not item.aggregate for item in existing_evidence)
+            if (exact_evidence < 2 and client.fomo
+                    and hasattr(client.fomo, "trade_details")):
+                detail_ids = evm_trade_ids(stats.raw_trades)
+                if detail_ids:
+                    results = await client.fomo.trade_details(
+                        detail_ids, background=True
+                    )
+                    trade_details = tuple(
+                        item for item in results if not isinstance(item, Exception)
+                    )
+            return await client.evm_wallets.resolve(
+                user,
+                balances=stats.raw_balances,
+                swaps=stats.raw_swaps,
+                trades=stats.raw_trades,
+                trade_details=trade_details,
+            )
+        except Exception as exc:
+            log.warning("EVM wallet lookup failed for @%s: %s", user.handle, exc)
+            return None
+
+    async def resolve_evm_with_activity() -> tuple[str | None, TraderStats]:
+        resolved_wallet = await resolve_evm()
+        resolved_stats = stats
+        if resolved_wallet and client._http:
+            try:
+                evm_buys, evm_sells = await fetch_evm_activity(
+                    client._http, resolved_wallet
+                )
+                resolved_stats = merge_latest_buys(resolved_stats, evm_buys)
+                resolved_stats = merge_latest_sells(resolved_stats, evm_sells)
+            except Exception as exc:
+                log.warning("EVM activity lookup failed for @%s: %s", user.handle, exc)
+        return resolved_wallet, resolved_stats
+
+    wallet, evm_result = await asyncio.gather(
+        resolve_solana(), resolve_evm_with_activity()
+    )
+    evm_wallet, stats = evm_result
+    return wallet, evm_wallet, stats
+
+
+async def _enrich_fomo_message(
+    client: FomoBot,
+    message: Any,
+    user: FomoUser,
+    stats: TraderStats,
+    wallet: str | None,
+    evm_wallet: str | None,
+    *,
+    timeout: float = FOMO_ENRICH_TIMEOUT,
+) -> None:
+    """Bound optional enrichment and edit the already-visible profile card."""
+    initial = (wallet, evm_wallet, stats)
+    try:
+        enriched = await asyncio.wait_for(
+            _resolve_fomo_enrichment(
+                client, user, stats, wallet, evm_wallet
+            ),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        # A resolver may have completed and cached one identity before a later
+        # stage consumed the remaining budget. Preserve that partial progress.
+        handle = user.handle.lower()
+        enriched = (
+            cached_wallet(handle) if client.wallets else wallet,
+            cached_evm_wallet(handle) if client.evm_wallets else evm_wallet,
+            stats,
+        )
+        log.info(
+            "on-chain enrichment for @%s reached the %.1fs background deadline",
+            user.handle,
+            timeout,
+        )
+    if enriched == initial:
+        return
+    new_wallet, new_evm_wallet, new_stats = enriched
+    try:
+        await message.edit(
+            embed=build_embed(user, new_wallet, new_evm_wallet, new_stats)
+        )
+    except discord.HTTPException as exc:
+        log.debug("could not update enriched /fomo card for @%s: %s", user.handle, exc)
+
+
 @bot.tree.command(name="fomo", description="Look up a fomo.family trader")
 @app_commands.describe(handle="FOMO username, e.g. Binkieee")
 async def fomo_cmd(interaction: discord.Interaction, handle: str) -> None:
@@ -1008,34 +1169,25 @@ async def fomo_cmd(interaction: discord.Interaction, handle: str) -> None:
         await _reply_error(interaction, exc, handle)
         return
 
-    # Start the profile panels while wallet enrichment runs. Browser API calls
-    # serialize inside BrowserTransport; independent RPC work does not.
-    stats_task = asyncio.create_task(fetch_trader_stats(bot.fomo, user.id))
-
-    # Cached after the first lookup, so this is free from then on. Never fatal:
-    # resolve() swallows its own errors and returns None.
-    # Both use wallet_cache.json. Keep first-time writes sequential so one
-    # resolver cannot overwrite the other's freshly saved address. Each
-    # resolver degrades to None and becomes a permanent cache hit on success.
-    wallet = await bot.wallets.resolve(bot.fomo, user) if bot.wallets else None
-    stats = await stats_task
-    if wallet is None and bot.wallets and stats.raw_balances is not None:
-        wallet = await bot.wallets.resolve_from_balances(user, stats.raw_balances)
-    evm_wallet = (
-        await bot.evm_wallets.resolve(user, balances=stats.raw_balances)
-        if bot.evm_wallets else None
+    # Core FOMO panels are the response critical path. Wallet derivation and
+    # cross-chain activity are optional and can be much slower than the profile
+    # itself, so show cached identities immediately and enrich the same card in
+    # a bounded background task.
+    stats = await fetch_trader_stats(bot.fomo, user.id)
+    normalized_handle = user.handle.lower()
+    wallet = cached_wallet(normalized_handle) if bot.wallets else None
+    evm_wallet = cached_evm_wallet(normalized_handle) if bot.evm_wallets else None
+    message = await interaction.followup.send(
+        embed=build_embed(user, wallet, evm_wallet, stats),
+        wait=True,
     )
-    evm_activity_task = asyncio.create_task(fetch_evm_activity(bot._http, evm_wallet)) \
-        if evm_wallet and bot._http else None
-    if evm_activity_task:
-        try:
-            evm_buys, evm_sells = await evm_activity_task
-            stats = merge_latest_buys(stats, evm_buys)
-            stats = merge_latest_sells(stats, evm_sells)
-        except Exception as exc:
-            log.warning("EVM activity lookup failed for @%s: %s", user.handle, exc)
-    embed = build_embed(user, wallet, evm_wallet, stats)
-    await interaction.followup.send(embed=embed)
+    if bot.wallets or bot.evm_wallets or (evm_wallet and bot._http):
+        bot.create_enrichment_task(
+            _enrich_fomo_message(
+                bot, message, user, stats, wallet, evm_wallet
+            ),
+            name=f"fomo-enrich:{user.id}",
+        )
 
 
 @bot.tree.command(name="wallet", description="Find FOMO and Pump profiles by wallet")
@@ -1117,8 +1269,7 @@ def _wallet_match_verification(match: CachedWalletMatch) -> str:
         return f"◎ **Solana** · {evidence}"
     chains = ", ".join(chain.upper() for chain in match.chains)
     chain_text = f" · {chains}" if chains else ""
-    source = "FomoScan verified" if match.source == "fomoscan" else "Verified mapping"
-    return f"Ξ **EVM**{chain_text} · {source}"
+    return f"Ξ **EVM**{chain_text} · Verified mapping"
 
 
 def _short_wallet(address: str) -> str:

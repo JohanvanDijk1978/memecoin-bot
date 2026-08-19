@@ -1,5 +1,175 @@
 # fomo bot — handoff (2026-08-19)
 
+## Session 21 — FomoScan dependency removed
+
+The unofficial Railway-hosted FomoScan identity service has been removed from
+the runtime. The bot no longer configures or calls its `/get-user/{handle}`
+endpoint and no longer contains its retry, fallback-URL or circuit-breaker
+logic. `FOMOSCAN_PUBLIC_URL`, `FOMOSCAN_FALLBACK_URLS` and
+`FOMOSCAN_COOLDOWN_SECONDS` were removed from `.env.example`.
+
+FOMO EVM support remains enabled. Resolution now uses, in order: the permanent
+local cache, corroborated transaction-backed evidence, and exact current-token
+balance matching. Operators can still deployment-check and cache an
+independently verified mapping with `evm_resolve.py --handle HANDLE --wallet
+0x...`. Running that helper without `--wallet` only displays an existing cached
+mapping. Existing cached wallets are retained and require no external identity
+service.
+
+Active documentation and regression coverage now describe the on-chain-only
+resolver. A no-evidence regression proves the resolver returns without making
+an identity HTTP request, while cached mappings continue to resolve with zero
+network calls. Verification: 68 conventional unit tests, the standalone
+offline Solana suite and syntax compilation all pass.
+
+## Session 20 — mixed-chain Solana safety and deterministic EVM matching
+
+After the supported-chain header exposed the complete FOMO feed, the Solana
+resolver began receiving EVM contracts. It passed those `0x...` addresses to
+`getSignaturesForAddress`, where Solana providers correctly returned JSON-RPC
+`-32602 Invalid param`. The RPC wrapper treated that caller error as a provider
+outage, tried every endpoint and then unnecessarily paused discovery for 15
+seconds. A separate EVM failure occurred when equally close transfer matches
+caused Python to compare two non-orderable `EvmTransfer` objects while sorting.
+
+`fomo_wallet.py` now admits only valid base58 Solana mints and, when chain
+metadata is present, requires Solana network ID `1399811149`. The filter is
+applied when choosing evidence, resolving a wallet and verifying cached
+wallets. Older fixtures and payloads without network metadata remain supported
+when their mint is a valid Solana address. JSON-RPC `-32602` now raises the
+dedicated `RpcInvalidParams` error immediately: it does not fail over to healthy
+providers and does not activate the all-provider circuit breaker.
+
+`fomo_evm.py` now sorts nearby transfer candidates using scalar fields only:
+time delta, creation time, transaction hash and wallet. Equal timestamps are
+therefore deterministic and can no longer compare `EvmTransfer` instances.
+
+Regression coverage verifies mixed-chain filtering, invalid-parameter handling
+without failover/cooldown, and tied EVM candidates. Verification after both
+recent sessions: 65 conventional unit tests and every standalone
+`test_offline.py` Solana regression pass. `git diff --check` reports only the
+repository's existing CRLF warnings.
+
+### Next recommended optimization — remove the duplicate 50-swap request
+
+The core `/fomo` path already fetches `/swaps?limit=50` in
+`FomoClient.profile_panels()` and retains it as `TraderStats.raw_swaps`.
+Background `WalletResolver._resolve()` currently requests that same uncached
+endpoint again. This does not affect time to first result, but the duplicate,
+now larger multi-chain response delays enrichment behind the shared background
+browser lock and adds avoidable FOMO API pressure. The low-risk next change is
+to pass `stats.raw_swaps` into `WalletResolver.resolve()` and fetch only when no
+raw swaps were supplied. This optimization has been recommended but not yet
+implemented.
+
+## Session 19 — complete FOMO chain coverage and live Ouroboros proof
+
+The live `0xOuroboros` diagnostic found that the FOMO frontend always sends
+`x-supported-chains: 1,56,143,4663,8453,1399811149`. The bot omitted this
+header, so FOMO defaulted its API responses to Solana and no amount of Helius,
+Alchemy or explorer fallback could discover EVM evidence that never entered the
+application. Without the header the profile returned 41 Solana swaps and zero
+EVM evidence. With it, the same request returned a 50-item mixed-chain window,
+23 open/closed trades across Ethereum, BSC, Robinhood, Base and Solana, and 70
+EVM evidence items.
+
+The three supplied contracts were confirmed in 49 evidence items:
+
+- Ethereum: `0xe172e9b6cfbeeb5593bdce3f077356fdb33af904`
+- BSC: `0x4e8fc9e5a6d2b9c6e7ca8b923661ca4e78087777`
+- Robinhood: `0xb9972ca7188e511174947e3936a5315ac7073277`
+
+FOMO's spotlight, trade lists and trade detail endpoint expose the same wallet,
+`0xb089d6ac26e0fe26e1a3a5076e4feaaf4d797180`, for profile user ID
+`d5b00d6a-3881-5ba0-805b-25bfa0371932`.
+
+A single source of truth now lives in `fomo_chains.py`. Both the direct HTTP
+headers in `fomo_api.py` and browser-page requests in `fomo_browser.py` send the
+complete supported-chain list plus JSON content negotiation; browser requests
+continue to attach authorization when available. Regression tests cover both
+transports and prove mixed-chain Ouroboros evidence survives a Solana-heavy
+50-swap window. A live smoke test through the modified client returned chains
+1, 56, 4663, 8453 and 1399811149 and all three target contracts.
+
+## Session 18 — transaction-backed EVM identity discovery
+
+Profiles missing from FomoScan could only discover an EVM wallet from a current
+token balance. That failed after positions were sold and whenever the true
+wallet was outside the bounded public holder pages. The supplied `0xOuroboros`
+contracts also proved the trades span Ethereum, BSC and Robinhood while the
+identity index returns 404.
+
+`TraderStats` now retains the already-fetched raw trades and swaps. For an
+uncached identity, the bot selects up to six low-liquidity/older EVM trades and
+batches `/trades/{id}` through the background browser page. `fomo_evm.py`
+extracts exact buy/sell fingerprints, reads token transfer history through the
+configured Alchemy endpoints with Blockscout fallback, and matches chain,
+direction, timestamp and token amount. Stablecoin value is checked when the
+transaction exposes it. A wallet is accepted only when one unambiguous address
+explains at least two independent transactions and has deployed code on an
+evidence chain. The cache records `evmSource: transactions+rpc`, confirmation
+count and evidence tokens. Balance matching and FomoScan remain fallbacks.
+
+Solana discovery now runs concurrently with the complete `EVM wallet -> EVM
+activity` branch after the core profile card is sent. EVM buys and sells start
+as soon as the EVM wallet is available and no longer wait for Solana. The cache
+update sections are synchronous and merge the current entry, so the two wallet
+results preserve one another.
+
+Live provider validation confirmed `alchemy_getAssetTransfers` works without a
+known wallet for the supplied Ethereum, BSC and Robinhood token contracts.
+Regression coverage accepts two corroborating transactions, rejects one-off and
+split-wallet evidence, verifies RPC failover, detail batching/background
+routing, proves both wallet branches start concurrently, and proves EVM
+activity does not wait for Solana. Verification: 59 unit tests plus the
+standalone offline Solana suite pass.
+
+## Session 17 — batched foreground FOMO panels
+
+After the two-stage response removed wallet and explorer work from time to first
+result, the remaining core profile path still launched balances, spotlight,
+trades and swaps with `asyncio.gather` but serialized all four calls behind
+`BrowserTransport`'s single page lock. Four tracked profiles also generated
+eight uncached browser calls every five seconds through that same lock.
+
+`FomoClient.profile_panels()` now applies the existing per-path cache first and
+sends all remaining core panel URLs through one `BrowserTransport.get_many()`
+operation. The page executes them concurrently with `Promise.all`, while every
+response still passes through the existing FOMO auth, envelope, error and cache
+logic. Non-browser transport retains an `asyncio.gather` fallback.
+
+The browser transport now has independent foreground and background pages and
+locks inside the same authenticated persistent context. Tracker polls and the
+post-response Solana wallet lookup use the background lane; `/fomo` profile
+panels use the foreground lane. Background traffic therefore cannot queue ahead
+of a user lookup, while each lane remains internally serialized to avoid tab
+churn and overlapping tracker polls.
+
+Regression coverage verifies one four-URL foreground batch, cache reuse,
+background routing and page separation.
+
+## Session 16 — two-stage `/fomo` response latency
+
+`/fomo` previously waited for optional Solana wallet discovery, its Helius
+balance fallback, EVM identity discovery and multi-chain EVM activity before
+sending the Discord embed. A cold or unresolved identity could therefore hold
+the entire profile behind many RPC/explorer calls even though the core FOMO
+panels were already available.
+
+The command now fetches and sends the core FOMO profile first, including any
+permanently cached Solana/EVM wallets. It retains the returned Discord webhook
+message and completes missing wallet discovery plus EVM activity in a bounded
+background task, editing the same card only when enrichment adds data. The
+default background deadline is 20 seconds and is configurable with
+`FOMO_ENRICH_TIMEOUT`. Timed-out tasks preserve any identity already written to
+the cache, never delay the visible profile, and are canceled cleanly during bot
+shutdown. `FomoBot` keeps strong references to active enrichment tasks so they
+cannot be garbage-collected before completion.
+
+Regression coverage verifies that successful enrichment edits the existing
+card with both wallets and that a deadline returns cleanly without an edit when
+no partial result exists.
+
 ## Session 15 — sell-aware FOMO Solana wallet discovery
 
 `/fomo frankdegods` returned the verified EVM wallet but no Solana wallet. The

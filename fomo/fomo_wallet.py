@@ -47,6 +47,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -99,6 +100,7 @@ BATCH = 10
 SLOT_SECONDS = 0.4
 # Slots either side of the estimate that the block scan opens.
 BLOCK_SPAN = 10
+SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 def iso_epoch(s: str) -> int:
@@ -116,6 +118,10 @@ def close(a: float, b: float) -> bool:
         return True
     scale = max(abs(a), abs(b), 1e-9)
     return abs(a - b) / scale < AMOUNT_TOL
+
+
+class RpcInvalidParams(RuntimeError):
+    """The caller sent parameters that every healthy Solana RPC will reject."""
 
 
 class Rpc:
@@ -152,12 +158,21 @@ class Rpc:
                         raise RuntimeError("HTTP 429")
                     r.raise_for_status()
                     payload = r.json()
-                    if not isinstance(payload, dict) or payload.get("error"):
-                        detail = payload.get("error") if isinstance(payload, dict) else payload
+                    if not isinstance(payload, dict):
+                        raise RuntimeError(f"{method}: invalid JSON-RPC response")
+                    detail = payload.get("error")
+                    if isinstance(detail, dict) and detail.get("code") == -32602:
+                        raise RpcInvalidParams(f"{method}: {detail}")
+                    if detail:
                         raise RuntimeError(f"{method}: {detail}")
                     self.calls += 1
                     self._cooldown_until = 0.0
                     return payload.get("result")
+                except RpcInvalidParams:
+                    # Invalid parameters are deterministic caller errors. Trying
+                    # every provider and cooling down healthy RPCs only hides the
+                    # actual bug and pauses unrelated wallet lookups.
+                    raise
                 except Exception as exc:
                     last_error = exc
                     log.debug("Solana RPC %s failed: %s", rpc_display_name(url), exc)
@@ -555,6 +570,24 @@ def swap_search_leg(swap: dict) -> tuple[str | None, float, int]:
     return None, 0.0, 1
 
 
+def is_solana_swap(swap: dict) -> bool:
+    """True only when the selected token leg belongs to Solana."""
+    mint, _amount, direction = swap_search_leg(swap)
+    if not mint or not SOLANA_ADDRESS_RE.fullmatch(mint):
+        return False
+
+    side_network = swap.get("outNetworkId" if direction > 0 else "inNetworkId")
+    network = side_network if side_network is not None else swap.get("networkId")
+    if network is None:
+        # Older FOMO payloads predate networkId; a valid base58 mint is the
+        # strongest safe compatibility signal available for those rows.
+        return True
+    try:
+        return int(network) == SOLANA_NETWORK_ID
+    except (TypeError, ValueError):
+        return False
+
+
 async def locate_swap(rpc: Rpc, swap: dict, index: SponsorIndex | None = None,
                       deep: bool = False, verbose: bool = True
                       ) -> tuple[str | None, dict | None, str]:
@@ -614,7 +647,7 @@ async def verify_wallet(rpc: Rpc, wallet: str, swaps: list[dict],
     Returns (confirmed, checked).
     """
     say = _sayer(verbose)
-    todo = [s for s in swaps if s.get("createdAt")][:targets]
+    todo = [s for s in swaps if s.get("createdAt") and is_solana_swap(s)][:targets]
     if not todo:
         return 0, 0
     oldest = min(iso_epoch(s["createdAt"]) for s in todo)
@@ -668,6 +701,7 @@ def pick_swaps(rows: list[dict], want: int = 3) -> list[dict]:
     viral token would otherwise hand every attempt to the same unpageable
     mint and fail wholesale; distinct mints fail independently.
     """
+    rows = [row for row in rows if is_solana_swap(row)]
     buys = [r for r in rows
             if r.get("outTokenAddress") not in QUOTES
             and r.get("inTokenAddress") in QUOTES
@@ -891,8 +925,13 @@ class WalletResolver:
                 return None
 
     async def _resolve(self, fomo: Any, user: Any, handle: str, limit: int) -> str | None:
-        data = await fomo._get(f"/v2/users/{user.id}/swaps?limit={limit}", cache=False)
+        data = await fomo._get(
+            f"/v2/users/{user.id}/swaps?limit={limit}",
+            cache=False,
+            lane="background",
+        )
         rows = (data.get("swaps") if isinstance(data, dict) else data) or []
+        rows = [row for row in rows if isinstance(row, dict) and is_solana_swap(row)]
         if not rows:
             log.info("no Solana wallet match for %s: FOMO returned no swaps", handle)
             return None

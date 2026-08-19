@@ -362,19 +362,22 @@ FOMO documents that its EVM accounts are ERC-4337 smart-contract wallets on
 Base and BNB Chain:
 https://fomo.family/blog/learn/fomo-security-wallet-architecture
 
-`fomo_evm.py` first attempts independent balance-fingerprint discovery for an
-uncached user with an open EVM position. It matches FOMO's exact token balance
-against the public holder set, confirms the candidate with live ERC-20
-`balanceOf`, and requires deployed smart-wallet code before caching it.
-FomoScan's public handle lookup is the fallback. Its verified Konito result is
-deployed on both chains, while FOMO's published `evmAddress` is dead.
+`fomo_evm.py` first attempts transaction-backed discovery. It asks the
+`/trades/{id}` detail route for several low-liquidity/older EVM positions, then
+matches those historical swaps against token transfers on the corresponding
+chains. Direction, timestamp and token amount must agree; stablecoin value is
+also checked whenever the transaction exposes it. The same address must explain
+at least two independent transactions, and it must have smart-wallet code on an
+evidence chain before it is cached as `transactions+rpc`.
 
-FomoScan is independent and unofficial. Its failure only prevents discovery
-when a profile has neither a cached mapping nor a usable open-position balance
-fingerprint; it never affects the rest of `/fomo`. Unverified/empty results are
-not cached.
+Current balance-fingerprint discovery is the second path for an open EVM
+position. It matches FOMO's exact token balance against the public holder set,
+confirms the candidate with live ERC-20 `balanceOf`, and requires deployed
+smart-wallet code. If neither transaction evidence nor a unique current-balance
+fingerprint is available, automatic discovery returns no wallet and tries again
+on a later lookup. Empty results are not cached.
 
-When the index is stale but the operator has independently verified the owner,
+When the operator has independently verified the owner,
 `evm_resolve.py --handle HANDLE --wallet 0x...` is the explicit fallback. It
 requires contract code on at least one reachable configured chain and caches
 the source as `manual+rpc`. The deployment check proves that it is a live smart

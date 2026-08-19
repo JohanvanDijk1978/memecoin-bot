@@ -55,6 +55,8 @@ class TraderStats:
     latest_sells: tuple[TrackEvent, ...] = ()
     latest_theses: tuple[TrackEvent, ...] = ()
     raw_balances: Any = field(default=None, repr=False, compare=False)
+    raw_trades: Any = field(default=None, repr=False, compare=False)
+    raw_swaps: Any = field(default=None, repr=False, compare=False)
 
 
 def _number(value: Any) -> float | None:
@@ -337,18 +339,23 @@ def build_trader_stats(
         latest_sells=latest_sells,
         latest_theses=latest_theses,
         raw_balances=balances,
+        raw_trades=trades,
+        raw_swaps=swaps,
     )
 
 
 async def fetch_trader_stats(client: Any, user_id: str) -> TraderStats:
     """Fetch independent enrichments; one failed panel never hides the rest."""
-    results = await asyncio.gather(
-        client.balances(user_id),
-        client.spotlight(user_id),
-        client.trades(user_id),
-        client.swaps(user_id, limit=50),
-        return_exceptions=True,
-    )
+    if hasattr(client, "profile_panels"):
+        results = await client.profile_panels(user_id)
+    else:
+        results = await asyncio.gather(
+            client.balances(user_id),
+            client.spotlight(user_id),
+            client.trades(user_id),
+            client.swaps(user_id, limit=50),
+            return_exceptions=True,
+        )
     clean = [None if isinstance(value, Exception) else value for value in results]
     preliminary = build_trader_stats(*clean)
     tokens = [(buy.chain, buy.token_address) for buy in preliminary.latest_buys
