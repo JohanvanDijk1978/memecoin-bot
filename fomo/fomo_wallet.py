@@ -102,6 +102,21 @@ SLOT_SECONDS = 0.4
 BLOCK_SPAN = 10
 SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
+# The sponsor and mint routes are both capped at MAX_SIG_PAGES * 1000
+# signatures, and that cap is a moving target: as FOMO's throughput grows, the
+# same 12000 sponsored signatures cover less and less wall-clock time, so a
+# day-old swap falls behind the index. The block route depends on no account's
+# signature history at all, so it is the only route that survives that growth.
+# It is expensive, so the embed path runs it ONLY after the cheap routes miss,
+# and only on the newest few swaps.
+DEEP_DEFAULT = os.getenv("FOMO_WALLET_DEEP", "1").strip().lower() not in (
+    "0", "false", "no",
+)
+try:
+    DEEP_ATTEMPTS = max(1, int(os.getenv("FOMO_WALLET_DEEP_ATTEMPTS", "2")))
+except ValueError:
+    DEEP_ATTEMPTS = 2
+
 
 def iso_epoch(s: str) -> int:
     return int(datetime.fromisoformat(s.replace("Z", "+00:00"))
@@ -891,14 +906,19 @@ class WalletResolver:
 
     def __init__(self, http: Any, url: str | list[str] = RPC_URLS,
                  verify_targets: int = 2,
-                 deep: bool = False,
+                 deep: bool | None = None,
+                 deep_attempts: int = DEEP_ATTEMPTS,
                  cache_path: str | Path = CACHE) -> None:
         self.rpc = Rpc(http, url)
         self.cache_path = Path(cache_path)
         # The bot path stays snappy with a light verify; the CLI asks for more.
         self.verify_targets = verify_targets
-        # The block scan is thorough but expensive -- off on the embed path.
-        self.deep = deep
+        # The block scan is expensive but it is the only route FOMO's growth
+        # cannot outrun, so it runs as a bounded second pass rather than not at
+        # all. `deep=None` takes the FOMO_WALLET_DEEP default; pass False to
+        # force the cheap routes only.
+        self.deep = DEEP_DEFAULT if deep is None else deep
+        self.deep_attempts = max(1, deep_attempts)
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def resolve(self, fomo: Any, user: Any, limit: int = 50,
@@ -938,18 +958,37 @@ class WalletResolver:
 
         # One index for all four attempts -- the sponsor history is paged once.
         index = SponsorIndex(self.rpc)
+        picks = pick_swaps(rows, want=4)
         wallet = hit_sig = None
-        for sw in pick_swaps(rows, want=4):
-            _sig, tx, _route = await locate_swap(self.rpc, sw, index,
-                                                 deep=self.deep, verbose=False)
+        route = "sponsor"
+
+        # All three routes per swap, cheapest first, before moving to the next
+        # swap. The alternative -- every cheap route across every swap, then a
+        # block pass -- pays four full mint scans (12 pages of 1000 signatures
+        # each) before trying the one route that can still reach, which is the
+        # slow way to answer a handle whose history is already known to be
+        # behind the cap.
+        #
+        # The block route is bounded to the newest few swaps because it costs a
+        # slot search plus a getBlock per slot. The newest swap is both the
+        # likeliest to resolve and the cheapest slot to find, so the bound
+        # spends that budget where it pays. Swaps past the bound still get the
+        # cheap routes: a quiet mint is cheap and might still hit.
+        for position, sw in enumerate(picks):
+            use_blocks = self.deep and position < self.deep_attempts
+            _sig, tx, found = await locate_swap(self.rpc, sw, index,
+                                                deep=use_blocks, verbose=False)
             if tx:
                 wallet, _how = derive_trader(tx)
-                hit_sig = _sig
+                hit_sig, route = _sig, found
                 break
+
         if not wallet:
             log.info(
-                "no transaction-backed Solana wallet match for %s across %d usable swap(s)",
-                handle, len(pick_swaps(rows, want=4)),
+                "no transaction-backed Solana wallet match for %s across %d "
+                "usable swap(s)%s",
+                handle, len(picks),
+                "" if self.deep else " (block route off: set FOMO_WALLET_DEEP=1)",
             )
             return None
 
@@ -966,7 +1005,7 @@ class WalletResolver:
         entry.update({
             "wallet": wallet,
             "confirmed": confirmed,
-            "walletSource": "fomo-sponsor",
+            "walletSource": f"fomo-{route}",
             "resolvedAt": int(time.time()),
         })
         cache[handle] = entry
@@ -1095,6 +1134,75 @@ class WalletResolver:
                         and any(pubkey == owner and signer for pubkey, signer in parsed)):
                     return True
         return False
+
+    async def adopt_holder_matches(
+        self, matches: dict[str, str], token: str = "",
+    ) -> dict[str, str]:
+        """Persist wallet -> handle pairs found in FOMO's own holder list.
+
+        `/hodlers/top` states a trader's exact position and `/token` already
+        knows every on-chain owner, so an unambiguous amount match is an
+        identity for free -- no sponsor index, no mint scan, no block route.
+
+        A cached wallet is permanent and is trusted by `/fomo` and `/wallet`,
+        so this applies the same bar `_resolve_from_balances` uses for a single
+        fingerprint: the wallet must have co-signed a FOMO-sponsored
+        transaction. That is what separates a FOMO trader from a whale who
+        merely happens to hold the matching amount. Existing mappings are never
+        overwritten; a disagreement is logged and skipped.
+
+        Returns the pairs actually written.
+        """
+        written: dict[str, str] = {}
+        for wallet, handle in matches.items():
+            handle = (handle or "").lstrip("@").lower()
+            if not wallet or not handle:
+                continue
+            existing = cached_wallet(handle, self.cache_path)
+            if existing == wallet:
+                continue
+            if existing:
+                log.info(
+                    "holder match for %s (%s) disagrees with the cached wallet "
+                    "%s; keeping the cached one", handle, wallet, existing,
+                )
+                continue
+            claimed = [match.handle for match in
+                       find_cached_wallets(wallet, self.cache_path)
+                       if match.handle.lower() != handle]
+            if claimed:
+                log.info("wallet %s is already cached as @%s; not adopting @%s",
+                         wallet, claimed[0], handle)
+                continue
+            try:
+                corroborated = await self._has_fomo_sponsored_transaction(wallet)
+            except Exception as exc:
+                log.debug("sponsor check failed for %s: %s", wallet, exc)
+                continue
+            if not corroborated:
+                log.info(
+                    "holder match %s -> @%s not adopted: no FOMO-sponsored "
+                    "transaction on that wallet", wallet, handle,
+                )
+                continue
+
+            cache = _load_cache(self.cache_path)
+            entry = cache.get(handle)
+            if not isinstance(entry, dict):
+                entry = {}
+            entry.update({
+                "wallet": wallet,
+                "confirmed": 1,
+                "walletSource": "hodlers+amount+fomo-sponsor",
+                "resolvedAt": int(time.time()),
+            })
+            if token:
+                entry["hodlerToken"] = token
+            cache[handle] = entry
+            _save_cache(cache, self.cache_path)
+            written[wallet] = handle
+            log.info("adopted %s -> @%s from FOMO's holder list", wallet, handle)
+        return written
 
     def _save_balance_match(self, handle: str, owner: str, mints: list[str]) -> str:
         cache = _load_cache(self.cache_path)

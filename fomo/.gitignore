@@ -9,3 +9,5 @@ pump_tracks.json
 pump_tracks.json.tmp
 pump_evm_cache.json
 pump_evm_cache.json.tmp
+pump_profile_cache.json
+pump_profile_cache.json.tmp

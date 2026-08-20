@@ -54,17 +54,9 @@ from fomo_evm import (
     evm_trade_ids,
 )
 from fomo_evm_activity import fetch_evm_activity
-from fomo_hodlers import (
-    FomoHolder,
-    confident_matches,
-    match_holders_to_wallets,
-    network_id_for,
-    parse_token_holders,
-)
 from fomo_features import (
     TraderStats,
     fetch_trader_stats,
-    fmt_price,
     iso_to_datetime,
     iso_to_unix,
     merge_latest_buys,
@@ -106,6 +98,7 @@ from pump_api import (
     PumpCoin,
     PumpError,
     PumpHolding,
+    PumpNotFound,
     PumpPortfolio,
     PumpUser,
     pump_profile_url,
@@ -114,12 +107,6 @@ from pump_api import (
 )
 from pump_chain import PumpChainClient, PumpRpcError
 from pump_evm import EVM_RE, PumpEvmMatch, PumpEvmResolver
-from pump_profiles import (
-    CARD_TTL as PUMP_CARD_TTL,
-    PumpProfile,
-    PumpProfileResolver,
-    UNSUPPORTED as PUMP_UNSUPPORTED,
-)
 from pump_tracking import (
     PumpAlert,
     PumpTrackingStore,
@@ -151,11 +138,6 @@ REFRESH_TOKEN = os.getenv("FOMO_PRIVY_REFRESH_TOKEN", "")
 ACCESS_TOKEN = os.getenv("FOMO_PRIVY_ACCESS_TOKEN", "")
 # Derive each trader's real wallet on chain. Needs SOLANA_RPC + httpx.
 RESOLVE_WALLETS = os.getenv("FOMO_RESOLVE_WALLETS", "1").strip() not in ("0", "false", "no")
-# Write wallet -> handle pairs discovered from FOMO's own holder list into the
-# wallet cache, so /fomo and /wallet know them without an on-chain scan.
-ADOPT_HOLDER_WALLETS = os.getenv("FOMO_ADOPT_HOLDER_WALLETS", "1").strip() not in (
-    "0", "false", "no",
-)
 RESOLVE_EVM = os.getenv("FOMO_RESOLVE_EVM", "1").strip() not in ("0", "false", "no")
 TRACK_FILE = Path(os.getenv("FOMO_TRACK_FILE", "fomo_tracks.json"))
 FOMO_TRACK_INTERVAL = max(1.0, float(os.getenv("FOMO_TRACK_INTERVAL", "60")))
@@ -169,9 +151,6 @@ PUMP_TRACK_INTERVAL = max(
     float(os.getenv("PUMP_TRACK_INTERVAL", os.getenv("FOMO_TRACK_INTERVAL", "60"))),
 )
 PUMP_EVM_CACHE_FILE = Path(os.getenv("PUMP_EVM_CACHE_FILE", "pump_evm_cache.json"))
-PUMP_PROFILE_CACHE_FILE = Path(
-    os.getenv("PUMP_PROFILE_CACHE_FILE", "pump_profile_cache.json")
-)
 PUMP_MIN_TRADE_USD = max(0.0, float(os.getenv("PUMP_MIN_TRADE_USD", "0")))
 SOLANA_RPCS = env_rpc_urls(
     "SOLANA_RPC",
@@ -393,32 +372,6 @@ def _rank_line(user: FomoUser, period: str, label: str) -> str | None:
     return f"{arrow} **{label}** {fmt_usd(pnl)}  ·  {rank_txt}"
 
 
-def _fit_field(lines: list[str], limit: int = 1024) -> str:
-    """Keep an embed field inside Discord's 1,024-character limit.
-
-    Long Solana mints inside Padre links make these rows wide, and Discord
-    rejects the whole message rather than truncating the field.
-    """
-    kept: list[str] = []
-    used = 0
-    for index, line in enumerate(lines):
-        more = len(lines) - index
-        tail = f"\n… +{more} more" if more else ""
-        if used + len(line) + (1 if kept else 0) + len(tail) > limit:
-            kept.append(f"… +{more} more")
-            break
-        used += len(line) + (1 if kept else 0)
-        kept.append(line)
-    return "\n".join(kept)
-
-
-def _token_link(network_id: Any, token_address: str, symbol: str) -> str:
-    """`$TICKER` linked to Padre, or bold when Padre has no route for the chain."""
-    label = f"${(symbol or '').lstrip('$') or 'TOKEN'}"
-    trade_url = padre_trade_url(network_id, token_address or "")
-    return f"[{label}]({trade_url})" if trade_url else f"**{label}**"
-
-
 def build_embed(user: FomoUser, wallet: str | None = None,
                 evm_wallet: str | None = None,
                 stats: TraderStats | None = None,
@@ -486,7 +439,7 @@ def build_embed(user: FomoUser, wallet: str | None = None,
     show_theses = activity_filter in ("all", "theses")
     if show_buys and stats.latest_buys:
         lines = []
-        for activity in stats.latest_buys:
+        for index, activity in enumerate(stats.latest_buys, 1):
             when = iso_to_unix(activity.created_at)
             relative = f" · <t:{when}:R>" if when is not None else ""
             amount = f" · {fmt_usd(activity.usd_value)}" if activity.usd_value is not None else ""
@@ -496,11 +449,8 @@ def build_embed(user: FomoUser, wallet: str | None = None,
                 estimate = "~" if activity.market_cap_estimated else ""
                 market_cap = f" · MC {estimate}{fmt_usd(activity.market_cap)}"
             chain = f" · {activity.chain}" if activity.chain else ""
-            # Same treatment as sells: a green marker instead of an ordinal,
-            # and a ticker that opens the token on Padre.
             lines.append(
-                f"🟢 {_token_link(activity.chain, activity.token_address, activity.symbol)}"
-                f"{amount}{market_cap}{chain}{relative}"
+                f"`{index}.` **{activity.symbol}**{amount}{market_cap}{chain}{relative}"
             )
         embed.add_field(
             name="Latest buys",
@@ -517,28 +467,13 @@ def build_embed(user: FomoUser, wallet: str | None = None,
             relative = f" · <t:{when}:R>" if when is not None else ""
             amount = f" · {fmt_usd(event.usd_value)}" if event.usd_value is not None else ""
             chain = chain_name(event.network_id)
-            token = _token_link(event.network_id, event.token_address, event.symbol)
+            trade_url = padre_trade_url(event.network_id, event.token_address)
+            label = f"${event.symbol.lstrip('$') or 'TOKEN'}"
+            token = f"[{label}]({trade_url})" if trade_url else f"**{label}**"
             lines.append(f"🔴 {token}{amount} · {chain}{relative}")
         embed.add_field(name="Latest sells", value="\n".join(lines), inline=False)
     elif activity_filter == "sells":
         embed.add_field(name="Latest sells", value="No recent sells found.", inline=False)
-
-    if stats.open_positions:
-        lines = []
-        for position in stats.open_positions:
-            token = _token_link(position.network_id, position.token_address,
-                                position.symbol)
-            entry = f" · entry {fmt_price(position.entry_price)}"
-            size = f" · {fmt_count(int(position.amount))} · {fmt_usd(position.value_usd)}"
-            if position.pnl_usd is None:
-                marker, pnl = "⚪", " · PnL —"
-            else:
-                marker = "🟢" if position.pnl_usd >= 0 else "🔴"
-                sign = "+" if position.pnl_usd >= 0 else ""
-                roi = f" ({position.roi:+.1f}%)" if position.roi is not None else ""
-                pnl = f" · **{sign}{fmt_usd(position.pnl_usd)}**{roi}"
-            lines.append(f"{marker} {token}{entry}{size}{pnl}")
-        embed.add_field(name="Open positions", value=_fit_field(lines), inline=False)
 
     if show_theses and stats.latest_theses:
         lines = []
@@ -943,7 +878,6 @@ class FomoBot(discord.Client):
         self.evm_wallets: EvmWalletResolver | None = None
         self.pump: PumpClient | None = None
         self.pump_evm: PumpEvmResolver | None = None
-        self.pump_profiles: PumpProfileResolver | None = None
         self.pump_chain: PumpChainClient | None = None
         self.tokens: TokenIntelligenceClient | None = None
         self._http: Any = None
@@ -986,11 +920,6 @@ class FomoBot(discord.Client):
             self._http = httpx.AsyncClient(timeout=60)
             self.pump = PumpClient(self._http)
             self.pump_evm = PumpEvmResolver(self._http, PUMP_EVM_CACHE_FILE)
-            # One request per wallet, ever: /token, /wallet and /pump all go
-            # through this instead of calling PumpClient.resolve() directly.
-            self.pump_profiles = PumpProfileResolver(
-                self.pump, PUMP_PROFILE_CACHE_FILE, evm=self.pump_evm
-            )
             self.pump_chain = PumpChainClient(self._http, SOLANA_RPCS)
             self.tokens = TokenIntelligenceClient(self._http, SOLANA_RPCS)
             if RESOLVE_WALLETS:
@@ -1095,14 +1024,9 @@ class FomoBot(discord.Client):
                     event for event in events
                     if activity_allowed(_entry_activity_filters(entry), event.kind)
                 ]
-                try:
-                    if alerts:
-                        await self._send_track_alert(entry, alerts)
-                finally:
-                    # Baseline every observed event even when delivery fails.
-                    # Leaving the baseline behind replays this whole batch on
-                    # the next poll, and on every poll after it.
-                    self.tracking.update_state(key, state)
+                if alerts:
+                    await self._send_track_alert(entry, alerts)
+                self.tracking.update_state(key, state)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1147,17 +1071,11 @@ class FomoBot(discord.Client):
                     markets.get((reference[0], reference[1].lower()))
                 )
                 native_value = native_value_from_usd(event.usd_value, native_price)
-            try:
-                await channel.send(  # type: ignore[union-attr]
-                    embed=build_track_embed(
-                        handle, event, market_cap, native_value, native_symbol
-                    )
+            await channel.send(  # type: ignore[union-attr]
+                embed=build_track_embed(
+                    handle, event, market_cap, native_value, native_symbol
                 )
-            except Exception as exc:
-                # One malformed event must not abandon the rest of the batch.
-                log.warning(
-                    "could not deliver %s alert for @%s: %s", event.kind, handle, exc
-                )
+            )
 
     async def _poll_pump_tracking(self) -> None:
         if not self.pump:
@@ -1279,6 +1197,17 @@ async def _reply_error(interaction: discord.Interaction, exc: Exception, term: s
         log.exception("lookup failed for %s", term)
         msg = f"FOMO lookup failed: `{str(exc)[:180]}`"
     await interaction.followup.send(msg, ephemeral=True)
+
+
+async def _reply_pump_error(
+    interaction: discord.Interaction, exc: Exception, term: str
+) -> None:
+    if isinstance(exc, PumpNotFound):
+        message = f"No Pump.fun profile found for **{term}**."
+    else:
+        log.warning("Pump lookup failed for %s: %s", term, exc)
+        message = f"Pump.fun lookup failed: `{str(exc)[:180]}`"
+    await interaction.followup.send(message, ephemeral=True)
 
 
 async def _resolve_fomo_enrichment(
@@ -1476,45 +1405,6 @@ async def fomo_cmd(interaction: discord.Interaction, handle: str) -> None:
     )
 
 
-async def _resolve_pump_user(
-    interaction: discord.Interaction, term: str, *, max_age: float | None = None
-) -> PumpUser | None:
-    """The cached Pump profile for a command term, or an explained refusal.
-
-    Every Pump command goes through this so the profile is fetched at most
-    once per wallet per TTL, and so a wallet Pump has no profile for is
-    answered from the negative cache rather than by asking again. `max_age`
-    lets a card demand fresher numbers than holder labelling needs.
-    """
-    if not bot.pump_profiles:
-        await interaction.followup.send(
-            "Pump support is unavailable: httpx is not installed.", ephemeral=True
-        )
-        return None
-    result = await bot.pump_profiles.lookup(term, max_age=max_age)
-    if result.profile is not None:
-        return result.profile.to_user()
-    if (result.status == PUMP_UNSUPPORTED
-            and EVM_RE.fullmatch(term.strip().strip("`").strip().lower())):
-        await interaction.followup.send(
-            "That EVM wallet has not been discovered yet. Run `/pump <handle>` "
-            "once to discover and cache the profile\u2019s EVM wallet.",
-            ephemeral=True,
-        )
-        return None
-    if result.definitive_miss:
-        await interaction.followup.send(
-            f"No Pump.fun profile found for **{term}**.", ephemeral=True
-        )
-        return None
-    log.warning("Pump lookup failed for %s: %s", term, result.error)
-    await interaction.followup.send(
-        f"Pump.fun lookup failed: `{str(result.error or 'unavailable')[:180]}`",
-        ephemeral=True,
-    )
-    return None
-
-
 @bot.tree.command(name="wallet", description="Find FOMO and Pump profiles by wallet")
 @app_commands.describe(address="Solana or EVM wallet address")
 async def wallet_cmd(interaction: discord.Interaction, address: str) -> None:
@@ -1534,14 +1424,13 @@ async def wallet_cmd(interaction: discord.Interaction, address: str) -> None:
                 # unavailable or a handle has changed capitalization.
                 pass
 
-    pump_profile: PumpProfile | None = None
+    pump_user: PumpUser | None = None
     pump_evm = bot.pump_evm.cached(query) if bot.pump_evm else None
-    if bot.pump_profiles:
-        # The resolver already translates a discovered EVM wallet to its Pump
-        # profile, caches the answer and remembers a definitive "no profile".
-        pump_profile = await bot.pump_profiles.resolve(
-            pump_evm.solana if pump_evm else query
-        )
+    if bot.pump:
+        try:
+            pump_user = await bot.pump.resolve(pump_evm.solana if pump_evm else query)
+        except (PumpError, asyncio.TimeoutError):
+            pass
 
     lines: list[str] = []
     for match in fomo_matches:
@@ -1554,12 +1443,12 @@ async def wallet_cmd(interaction: discord.Interaction, address: str) -> None:
             f"{verification}"
         )
 
-    if pump_profile:
+    if pump_user:
         network = "EVM + Solana" if pump_evm else "Solana"
         lines.append(
             f"🟢 **Pump.fun** · "
-            f"{_pump_username_link(pump_profile.username, pump_profile.address)} · "
-            f"{_pump_wallet_link(pump_profile.address)}\n"
+            f"{_pump_username_link(pump_user.username, pump_user.address)} · "
+            f"{_pump_wallet_link(pump_user.address)}\n"
             f"◎ **{network}** · Public Pump profile mapping"
         )
 
@@ -1584,8 +1473,8 @@ async def wallet_cmd(interaction: discord.Interaction, address: str) -> None:
         user = users.get(fomo_matches[0].handle)
         if user and user.avatar:
             embed.set_thumbnail(url=user.avatar)
-    elif len(lines) == 1 and pump_profile and pump_profile.profile_image:
-        embed.set_thumbnail(url=pump_profile.profile_image)
+    elif len(lines) == 1 and pump_user and pump_user.profile_image:
+        embed.set_thumbnail(url=pump_user.profile_image)
     embed.set_footer(text=f"FOMO + Pump identity search • {len(lines)} {noun}")
     await interaction.followup.send(embed=embed)
 
@@ -1657,106 +1546,27 @@ def _discord_line_chunks(lines: list[str], limit: int = 1024) -> list[str]:
     return ["\n".join(chunk) for chunk in chunks if chunk]
 
 
-async def _fomo_holder_matches(
-    token: TokenIntelligence,
-) -> dict[str, FomoHolder]:
-    """Name this token's on-chain holders from FOMO's own Holders tab.
-
-    Identity used to come only from `wallet_cache.json`, so a FOMO trader who
-    had never been through `/fomo` showed as a bare address. `/hodlers/top`
-    reports every top holder's handle and exact position; matching that
-    position against the owners `/token` already computed names them without
-    any cached mapping.
-    """
-    network_id = network_id_for(token.chain)
-    if not bot.fomo or not network_id or not token.holders:
-        return {}
-    try:
-        payload = await bot.fomo.token_holders(token.address, network_id)
-    except (FomoError, asyncio.TimeoutError) as exc:
-        log.debug("FOMO holder lookup failed for %s: %s", token.address, exc)
-        return {}
-    holders, total = parse_token_holders(payload)
-    onchain = [(row.address, float(row.balance)) for row in token.holders]
-    matches = match_holders_to_wallets(holders, onchain)
-    log.info(
-        "FOMO holders for %s: %d of %s named %d on-chain wallet(s)",
-        token.address, len(holders), total, len(matches),
-    )
-
-    # Every confident pair is an identity /fomo and /wallet would otherwise pay
-    # a sponsor index or a block scan for. Adopting runs in the background: it
-    # costs RPC calls for corroboration and must not delay the token card.
-    if ADOPT_HOLDER_WALLETS and (bot.wallets or bot.evm_wallets):
-        strong = {
-            wallet: holder.handle
-            for wallet, holder in confident_matches(holders, onchain).items()
-        }
-        if strong:
-            bot.create_enrichment_task(
-                _adopt_holder_wallets(strong, token.address, token.chain),
-                name=f"hodler-adopt:{token.address[:12]}",
-            )
-    return matches
-
-
-async def _adopt_holder_wallets(
-    matches: dict[str, str], token: str, chain: str
-) -> None:
-    """Background: corroborate and cache holder-derived wallet identities.
-
-    The chain decides both the destination field and the corroboration. A BSC
-    holder's `0x…` address is an EVM smart wallet, not a Solana one: writing it
-    to the Solana field would be wrong, and a Solana sponsor-signature probe
-    against it is a JSON-RPC error rather than a check.
-    """
-    solana = chain == "Solana"
-    resolver = bot.wallets if solana else bot.evm_wallets
-    if resolver is None:
-        return
-    try:
-        if solana:
-            written = await resolver.adopt_holder_matches(matches, token=token)
-        else:
-            written = await resolver.adopt_holder_matches(
-                matches, token=token, chain=chain.lower()
-            )
-    except Exception as exc:
-        log.warning("adopting holder wallets for %s failed: %s", token, exc)
-        return
-    if written:
-        log.info("cached %d new %s identity(ies) from %s's holder list",
-                 len(written), "Solana" if solana else "EVM", token)
-
-
-async def _holder_label(holder: TokenHolder, chain: str,
-                        fomo_match: FomoHolder | None = None) -> str:
+async def _holder_label(holder: TokenHolder, chain: str) -> str:
     identities: list[str] = []
     pump_wallet: str | None = None
-    named = {match.handle.lower() for match in find_cached_wallets(holder.address)}
     for match in find_cached_wallets(holder.address):
         identities.append(
             f"🔵 [@{match.handle}](https://fomo.family/profile/{match.handle})"
         )
-    if fomo_match and fomo_match.handle.lower() not in named:
-        dev = " 🛠️" if fomo_match.is_dev else ""
-        identities.append(
-            f"🔵 [@{fomo_match.handle}]"
-            f"(https://fomo.family/profile/{fomo_match.handle}){dev}"
-        )
 
     pump_match = bot.pump_evm.cached(holder.address) if bot.pump_evm else None
+    pump_user: PumpUser | None = None
     if pump_match:
         pump_wallet = pump_match.solana
         identities.append(_pump_identity(pump_match.handle, pump_wallet))
-    elif chain == "Solana" and bot.pump_profiles:
-        # `token_cmd` has already prefetched the whole holder list, so this is
-        # normally a cache read. A wallet with no Pump profile is remembered as
-        # such, so the next /token does not re-ask Pump for a known 404.
-        pump_profile = await bot.pump_profiles.resolve(holder.address)
-        if pump_profile:
-            pump_wallet = pump_profile.address
-            identities.append(_pump_identity(pump_profile.username, pump_wallet))
+    elif chain == "Solana" and bot.pump:
+        try:
+            pump_user = await bot.pump.resolve(holder.address)
+        except (PumpError, asyncio.TimeoutError):
+            pass
+        if pump_user:
+            pump_wallet = pump_user.address
+            identities.append(_pump_identity(pump_user.username, pump_wallet))
 
     explorer = _holder_explorer(chain, holder.address)
     wallet = _short_wallet(holder.address)
@@ -1821,23 +1631,8 @@ async def token_cmd(
         )
         return
 
-    fomo_matches = await _fomo_holder_matches(token)
-    # One deduplicated, bounded batch for every Solana holder before the rows
-    # render, so the labelling below costs no requests at all. A holder already
-    # named by the Pump EVM cache is skipped -- its profile is known.
-    if token.chain == "Solana" and bot.pump_profiles:
-        pending = [
-            holder.address for holder in token.holders
-            if not (bot.pump_evm and bot.pump_evm.cached(holder.address))
-        ]
-        try:
-            await bot.pump_profiles.prefetch(pending)
-        except Exception as exc:
-            # Identity is never load-bearing: the card renders without it.
-            log.debug("pump holder prefetch failed for %s: %s", token.address, exc)
     holder_lines = await asyncio.gather(
-        *(_holder_label(holder, token.chain, fomo_matches.get(holder.address))
-          for holder in token.holders)
+        *(_holder_label(holder, token.chain) for holder in token.holders)
     )
     numbered = [f"`{index}.` {line}" for index, line in enumerate(holder_lines, 1)]
     market_cap = fmt_usd(token.market_cap) if token.market_cap is not None else "—"
@@ -2105,10 +1900,10 @@ async def pump_cmd(interaction: discord.Interaction, handle: str) -> None:
     if not bot.pump:
         await interaction.followup.send("Pump support is unavailable: httpx is not installed.", ephemeral=True)
         return
-    # The card shows follower counts and an avatar, which move; holder
-    # labelling does not care. One store, a shorter freshness bar here.
-    user = await _resolve_pump_user(interaction, handle, max_age=PUMP_CARD_TTL)
-    if user is None:
+    try:
+        user = await bot.pump.resolve(handle)
+    except (PumpError, asyncio.TimeoutError) as exc:
+        await _reply_pump_error(interaction, exc, handle)
         return
 
     results = await asyncio.gather(
@@ -2148,10 +1943,17 @@ async def pump_wallet_cmd(interaction: discord.Interaction, address: str) -> Non
         return
     query = address.strip().strip("`").strip()
     cached_evm = bot.pump_evm.cached(query) if bot.pump_evm else None
-    user = await _resolve_pump_user(
-        interaction, cached_evm.solana if cached_evm else query
-    )
-    if user is None:
+    try:
+        user = await bot.pump.resolve(cached_evm.solana if cached_evm else query)
+    except (PumpError, asyncio.TimeoutError) as exc:
+        if EVM_RE.fullmatch(query.lower()) and not cached_evm:
+            await interaction.followup.send(
+                "That EVM wallet has not been discovered yet. Run `/pump <handle>` "
+                "once to discover and cache the profile's EVM wallet.",
+                ephemeral=True,
+            )
+            return
+        await _reply_pump_error(interaction, exc, query)
         return
     embed = discord.Embed(
         title="🟩 Pump wallet match",
@@ -2184,8 +1986,10 @@ async def pump_track_cmd(interaction: discord.Interaction, handle: str) -> None:
     if not bot.pump:
         await interaction.followup.send("Pump support is unavailable.", ephemeral=True)
         return
-    user = await _resolve_pump_user(interaction, handle)
-    if user is None:
+    try:
+        user = await bot.pump.resolve(handle)
+    except (PumpError, asyncio.TimeoutError) as exc:
+        await _reply_pump_error(interaction, exc, handle)
         return
 
     callout_result, signature_result = await asyncio.gather(
@@ -2293,8 +2097,10 @@ async def pump_untrack_cmd(interaction: discord.Interaction, handle: str) -> Non
     if not bot.pump:
         await interaction.followup.send("Pump support is unavailable.", ephemeral=True)
         return
-    user = await _resolve_pump_user(interaction, handle)
-    if user is None:
+    try:
+        user = await bot.pump.resolve(handle)
+    except (PumpError, asyncio.TimeoutError) as exc:
+        await _reply_pump_error(interaction, exc, handle)
         return
     removed = bot.pump_tracking.remove(interaction.channel_id, user.address)
     linked_user = _pump_username_link(user.username, user.address)

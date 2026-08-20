@@ -104,6 +104,66 @@ Only `/v2/users/userHandle/{handle}` is real.
 | GET | `/v2/leaderboard?limit=…` | `limit` is **required** (nan → 400) |
 | GET | `/v2/leaderboard/{period}?limit=…` | `24h` confirmed → "24H Leaderboard found" |
 
+### The Holders tab — `GET /hodlers/top` (found 2026-08-20)
+
+**It is spelled `hodlers`.** Every `/holders` probe 404'd for that reason alone.
+Recorded off the wire by `token_page_sniff.py` while loading
+`https://fomo.family/tokens/solana/<address>` and clicking Holders:
+
+```
+GET /hodlers/top?tokens=[{"address":"<mint>","networkId":1399811149}]
+    -> [{ tokenAddress, networkId, totalHolders, topHolders: [...] }]
+
+GET /hodlers/devs?tokenAddress=<mint>&networkId=1399811149
+    -> { tokenAddress, networkId, devHoldings }
+```
+
+`tokens` is a JSON **array** in the query string, so one call can cover several
+tokens. `totalHolders` matched the UI's `Holders (1,005)`. The identity rows sit
+nested under `topHolders`, which is why a top-level shape check reported this as
+a miss on the first pass.
+
+Other routes the same page used, none documented before:
+
+| route | returns |
+|---|---|
+| `/feed/token?tokenAddress=&networkId=&excludeThesis=true&threshold=` | token activity feed with `displayName`, `marketCap`, `price` |
+| `/feed/token/thesis` / `/feed/token/sortedThesis` | theses on the token, with `equity` and `authorTrade` |
+| `/feed/tradingActivity?limit=&threshold=` | global recent trades |
+| `/trades?userId=&orderBy=closedAt&tokenAddress=` | **`tokenAddress` filters the trades list** |
+| `/v2/users?userIds=<id>&userIds=<id>` | batch user lookup — repeated `userIds` params |
+| `/v2/users/{id}/swaps?tokenAddress=` | per-token swap history |
+| `/proxy/tokenDetails`, `/proxy/tokenWarnings`, `/proxy/verifiedTokens` | market data and safety flags |
+| `/tokenAllowList/detailed`, `/watchlist`, `/config` | app configuration |
+
+`/v2/users?userIds=` is the natural partner to `/hodlers/top`: whatever user
+identifiers the holder rows carry can be resolved to handles in one batch call.
+
+### Probed 2026-08-20 — `userTokens` is per-user, not per-token
+
+`/v2/userTokens/aggregatedSnapshot`, `/aggregatedSnapshotById` and
+`/aggregatedSnapshot/interval` all exist (400 `ERR_VALIDATION_FAILED`, not 404)
+and every one of them requires `query.userId`:
+
+| route | required query |
+|---|---|
+| `/v2/userTokens/aggregatedSnapshot` | `userId`, `timestamp` |
+| `/v2/userTokens/aggregatedSnapshotById` | `userId`, `snapshotId` (number) |
+| `/v2/userTokens/aggregatedSnapshot/interval` | `userId` |
+
+So this family is one trader's portfolio over time, **not** the token page's
+Holders tab — confirmed live, the page calls it as
+`aggregatedSnapshotById?userId=<id>&snapshotId=<unix>` and gets back
+`{equity, pnl, snapshotId}`. No `/holders`-style route responded on any prefix
+because the real one is spelled `/hodlers` (above). `/token`'s
+FOMO identities therefore still come from the local `wallet_cache.json` reverse
+lookup, which can only name handles `/fomo` has already resolved.
+`token_page_sniff.py` records what the token page actually calls. That page is
+chain-scoped: `https://fomo.family/tokens/{chain}/{address}`, e.g.
+`https://fomo.family/tokens/solana/E3i7sTY5QYEBh3itepnomZQt7Eh5kzmHFk1vkm2pump`
+— the unscoped `/tokens/{address}` and `/token/{address}` shapes do not
+render.
+
 ### Seen in the bundle, not yet probed
 
 `/v2/users/{id}/followingPaginate`, `/mutuals`, `/recommendedUsers`, `/referrals`,

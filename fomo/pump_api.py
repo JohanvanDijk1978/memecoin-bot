@@ -37,6 +37,11 @@ class PumpNotFound(PumpError):
     pass
 
 
+def pump_profile_url(address: str) -> str:
+    """Return Pump's canonical wallet-address profile URL."""
+    return f"https://pump.fun/profile/{quote(address.strip(), safe='')}"
+
+
 def _number(value: Any) -> float | None:
     try:
         number = float(value)
@@ -98,7 +103,7 @@ class PumpUser:
 
     @property
     def profile_url(self) -> str:
-        return f"https://pump.fun/profile/{quote(self.username, safe='')}"
+        return pump_profile_url(self.address)
 
     @property
     def x_url(self) -> str | None:

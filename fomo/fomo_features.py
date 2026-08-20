@@ -35,6 +35,26 @@ class BestTrade:
 
 
 @dataclass(frozen=True)
+class OpenPosition:
+    """One still-open trade, priced from FOMO's own trade row.
+
+    PnL is derived per unit -- `amount x (current - entry)` -- rather than from
+    `totalCostBasis`, because that basis covers the whole trade including any
+    portion already sold. Per-unit keeps a partially-closed position honest.
+    """
+    symbol: str
+    token_address: str
+    network_id: Any
+    amount: float
+    entry_price: float | None
+    current_price: float | None
+    value_usd: float | None
+    pnl_usd: float | None
+    roi: float | None
+    trade_id: str | None = None
+
+
+@dataclass(frozen=True)
 class LatestActivity:
     action: str
     symbol: str
@@ -54,6 +74,7 @@ class TraderStats:
     latest_buys: tuple[LatestActivity, ...] = ()
     latest_sells: tuple[TrackEvent, ...] = ()
     latest_theses: tuple[TrackEvent, ...] = ()
+    open_positions: tuple[OpenPosition, ...] = ()
     raw_balances: Any = field(default=None, repr=False, compare=False)
     raw_trades: Any = field(default=None, repr=False, compare=False)
     raw_swaps: Any = field(default=None, repr=False, compare=False)
@@ -306,6 +327,75 @@ def _latest_buys(swaps: Any, trades: Any, balances: Any = None,
     return tuple(activities)
 
 
+def fmt_price(value: float | None) -> str:
+    """Token prices span nine orders of magnitude; $0.00 is not a price.
+
+    `fmt_usd` rounds to cents, which erases every memecoin entry. This keeps
+    four significant digits below a cent and stays readable above it.
+    """
+    if value is None:
+        return "—"
+    magnitude = abs(float(value))
+    if magnitude == 0:
+        return "$0"
+    if magnitude >= 1:
+        return f"${value:,.4f}".rstrip("0").rstrip(".")
+    decimals = 4
+    probe = magnitude
+    while probe < 0.1 and decimals < 12:
+        probe *= 10
+        decimals += 1
+    return f"${value:.{decimals}f}".rstrip("0").rstrip(".")
+
+
+def open_positions(trades: Any, limit: int = 5) -> tuple[OpenPosition, ...]:
+    """Active trades, largest position first.
+
+    FOMO's trade row already carries the average entry, the amount still held
+    and the token's current price, so the open book needs no extra request.
+    """
+    rows = trades.get("activeTrades") if isinstance(trades, dict) else None
+    positions: list[OpenPosition] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        trade = row.get("trade") if isinstance(row.get("trade"), dict) else row
+        if not isinstance(trade, dict):
+            continue
+        amount = _number(trade.get("humanTokenAmount"))
+        if amount is None or amount <= 0:
+            continue
+        metadata = (trade.get("tokenMetadata")
+                    if isinstance(trade.get("tokenMetadata"), dict) else {})
+        entry = next(
+            (_number(trade.get(key)) for key in ("avgEntryPrice", "avgTransferInPrice")
+             if _number(trade.get(key))),
+            None,
+        )
+        if entry is None:
+            cost = _number(trade.get("totalCostBasis"))
+            entry = cost / amount if cost and cost > 0 else None
+        current = _number(metadata.get("currentPrice"))
+        value = amount * current if current is not None else None
+        pnl = amount * (current - entry) if (current is not None and entry) else None
+        roi = ((current / entry) - 1) * 100 if (current is not None and entry) else None
+        positions.append(OpenPosition(
+            symbol=str(metadata.get("symbol") or "")
+            or _short_token(str(trade.get("tokenAddress") or "")),
+            token_address=str(trade.get("tokenAddress") or ""),
+            network_id=trade.get("networkId"),
+            amount=amount,
+            entry_price=entry,
+            current_price=current,
+            value_usd=value,
+            pnl_usd=pnl,
+            roi=roi,
+            trade_id=str(trade.get("id") or "") or None,
+        ))
+    positions.sort(key=lambda item: (item.value_usd is None, -(item.value_usd or 0.0)))
+    return tuple(positions[:limit])
+
+
 def _short_token(address: str) -> str:
     return f"{address[:5]}…{address[-4:]}" if len(address) > 12 else (address or "token")
 
@@ -338,6 +428,7 @@ def build_trader_stats(
         latest_buys=_latest_buys(swaps, trades, balances, market_data),
         latest_sells=latest_sells,
         latest_theses=latest_theses,
+        open_positions=open_positions(trades),
         raw_balances=balances,
         raw_trades=trades,
         raw_swaps=swaps,

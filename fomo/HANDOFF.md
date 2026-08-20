@@ -1,4 +1,526 @@
-# fomo bot — handoff (2026-08-19)
+# fomo bot — handoff (2026-08-20)
+
+## Where this stands
+
+Sessions 26-32 were one continuous run on wallet identity: why it failed, why
+it silently failed, and how to stop paying a chain scan for it. Session 33
+carried the same discipline to Pump, where the mapping is published rather than
+inferred and the only thing worth engineering is not asking twice.
+
+The arc, shortest version:
+
+0. Pump's mapping needed no discovery, only a cache: `pump_profiles.py` makes
+   wallet -> profile one request ever, remembers the wallets that have no
+   profile, and stops `/token` re-asking them on every render.
+1. `/fomo` hid every resolution failure -- `fomo_resolve_diag.py` now names the
+   stage that lost the wallet, for both chains, in one command.
+2. The bot had never run the block route, and FOMO's growth had pushed the
+   sponsor and mint routes past their 12000-signature reach. It runs now,
+   bounded, and `@397397` resolves.
+3. FOMO publishes exact positions (`/hodlers/top`, and `topHoldings` on the
+   leaderboard). Matching those against on-chain owners is a wallet for the
+   price of one holder query -- no sponsor index, no block scan. `/token` names
+   holders from it live, and confirmed matches are adopted into the cache.
+
+### Run these first on a fresh session
+
+```powershell
+python fomo_map_top.py --dry-run        # match rate before writing anything
+python fomo_map_top.py --top 100        # bulk-label the leaderboard
+python fomo_resolve_diag.py <handle>    # why one handle still has no wallet
+python pump_map_top.py --dry-run        # Pump profiles for wallets we know
+python pump_resolve_diag.py <wallet>    # why one wallet has no Pump profile
+```
+
+`fomo_map_top.py` has never been run live -- the sandbox has no RPC or
+fomo.family egress (section 5). Its first real run is the open item.
+
+### Open
+
+1. **`FOMO_ENRICH_TIMEOUT` cancels, it does not just stop waiting.**
+   `_enrich_fomo_message()` wraps enrichment in `asyncio.wait_for`, so a block
+   scan running past 20s is discarded mid-flight and repeated on the next
+   `/fomo` -- the handle never converges. Raising the timeout is the one-line
+   mitigation; the structural fix is a detached task that outlives the card's
+   edit budget, analysed in session 27 and not implemented.
+2. **The duplicate 50-swap request** (session 20) is still unimplemented:
+   `WalletResolver._resolve()` re-fetches swaps that `stats.raw_swaps` already
+   holds.
+3. **`fomo/` is still untracked in git.** First commit remains Johan's call.
+4. **Adoption is unproven at scale.** Every gate is unit-tested and the
+   matching logic was validated against a known pair (@Quanterty), but no
+   adopted mapping has been checked against a hand-traced wallet yet. Spot-check
+   a few from `fomo_map_top.py --csv` before trusting the cache wholesale.
+5. **`/hodlers/top` pagination is unknown.** It returned 48 rows for a token
+   with 1006 holders; no cursor parameter has been looked for.
+6. **Pump has no known batch profile route.** `pump_profiles` batches by
+   bounded concurrency over `/users/{term}`, which is what the site itself
+   does. If a multi-user endpoint exists, `lookup_many()` is the one place to
+   swap it in.
+7. **`pump_map_top.py` and `pump_resolve_diag.py` have never run live** — same
+   sandbox egress limit as `fomo_map_top.py` (section 5).
+
+## Session 33 — `/pump` stops re-asking Pump the same question
+
+`/token` on a Solana mint called `PumpClient.resolve()` once per holder row,
+live, on every invocation — including the rows Pump has no profile for, whose
+`404` was re-asked forever. Nothing was cached, nothing was deduplicated, and
+`/pump`, `/wallet`, `/pumpwallet`, `/pumptrack` and `/pumpuntrack` each paid the
+same request independently. Sessions 26-32 had already solved this shape for
+FOMO; this session applies it to Pump without pretending the two sources are
+the same thing.
+
+They are not. FOMO does not publish its traders' wallets, so `fomo_wallet.py`
+has to *find* one — sponsor index, mint scan, block route — and the result is
+cached **forever** because it was proved on chain. Pump publishes the mapping
+outright: **a Pump profile IS a Solana wallet**, `GET /users/{wallet}` and
+`GET /users/{username}` return the same record, and `address` on it is the
+canonical identifier (session 23 already made every profile URL use it). There
+is no discovery stage, no corroboration gate and no ambiguity to reject. What
+remained worth copying from `/fomo` was only the expensive lesson: ask once.
+
+`wallet_profile_cache.py` is the part both flows genuinely share, extracted
+rather than duplicated: tolerant JSON reads, an **atomic** write (temp file +
+`os.replace`, which `fomo_wallet._save_cache` still does not do), `KeyedLocks`
+— `WalletResolver._locks` verbatim in behaviour — and a `ProfileCache` keyed
+store with aliases. Nothing in it knows what a profile is.
+
+`pump_profiles.PumpProfileResolver` is the Pump-specific half. `lookup()`
+returns a `PumpLookup` carrying the *reason*, not a bare `None`, because
+`/pumpwallet` has to tell "Pump has no profile for this wallet" apart from
+"Pump did not answer". Statuses: `cached`, `cached-missing`, `resolved`,
+`missing`, `unavailable`, `unsupported`.
+
+Three deliberate differences from the FOMO cache:
+
+1. **Positive entries expire.** A wallet proved by an on-chain signature is
+   permanent; a Pump username, avatar and follower count are not.
+   `PUMP_PROFILE_TTL` is 7 days, and `/pump`'s card passes the much shorter
+   `PUMP_PROFILE_CARD_TTL` (300s) as `max_age` against the same store — one
+   cache, two freshness bars, so holder labelling stays free while the card
+   stays current.
+2. **Negative caching, which `/fomo` deliberately does not do.** A FOMO miss
+   means a scan did not reach far enough and a later run may fix it, so writing
+   it off would be wrong. A Pump miss is an authoritative 404 from the only
+   source of truth. It is cached for `PUMP_PROFILE_NEGATIVE_TTL` (6h) — this is
+   the whole `/token` saving. A **transient** failure (timeout, 5xx, transport)
+   is never written as an absence, so a Pump outage cannot poison the cache for
+   six hours; that distinction is unit-tested from both sides.
+3. **The alias direction is reversed.** FOMO caches handle -> wallet. Pump's
+   canonical key is the wallet and the username is a mutable alias pointing at
+   it, so `/pump zinc` warms the wallet entry and vice versa — one request
+   answers every spelling.
+
+Session 20's `-32602` lesson carries over unchanged in spirit: an `0x…` term is
+never sent to Pump's Solana profile route. When `pump_evm.py` has already
+discovered which profile owns that EVM wallet the query is rewritten to it;
+otherwise the caller is told `unsupported` rather than being charged a request
+that must 404.
+
+`/token` now prefetches its entire Solana holder list through one bounded,
+deduplicated batch before any row renders, so `_holder_label()` is a pure cache
+read. Holders the Pump EVM cache already names are excluded from that batch.
+A prefetch failure is swallowed — the card renders without identities, exactly
+as before.
+
+`pump_map_top.py` is `fomo_map_top.py`'s counterpart, and the difference is
+instructive: `fomo_map_top.py` *infers* wallets from published positions,
+`pump_map_top.py` only pays requests in advance. It seeds from
+`wallet_cache.json`, `pump_evm_cache.json` and `pump_tracks.json` by default —
+so every wallet `/fomo` proved on chain becomes a candidate Pump profile and
+the two caches compound — plus `--token`, `--wallets` and `--file`. `--dry-run`
+learns in memory and writes nothing. For `--token` it prefers Helius DAS
+`getTokenAccounts` over `getTokenLargestAccounts` for the same reason session 32
+did: the latter stops at 20.
+
+`pump_resolve_diag.py` is `fomo_resolve_diag.py`'s counterpart. Same
+construction — it drives the resolver the bot drives and installs a temporary
+handler on the `pump.*` loggers, so it cannot diverge — and its stages
+(`input`, `cache`, `evm-map`, `profile`, `panels`) exist mainly to make the
+three kinds of "no" distinguishable at a glance. Full addresses in the summary,
+`--csv`, `--json`, exit 0/1/2, `--no-write` for a read-only run.
+
+`_reply_pump_error()` is gone, replaced by `_resolve_pump_user()`, which every
+Pump command now shares — so the resolver is the only path to a Pump profile in
+the bot and no command can accidentally bypass the cache.
+
+Regression coverage (48 new tests in `test_pump_profiles.py`): a wallet is
+asked about once across calls, across six concurrent callers, across a batch
+containing repeats, and across a process restart; a 404 is remembered and a
+timeout/5xx/unexpected exception is not; an `0x…` address never reaches the
+Solana route and a discovered one resolves through its Solana profile; a
+username and its wallet share one entry; a corrupt cached row is refetched
+rather than believed; `--dry-run` writes no file; rendering the same `/token`
+card three times makes exactly two requests; a Pump outage leaves the holder
+row intact; and every Pump command path returns the right one of the three
+refusals. Verification: **230** conventional unit tests (48 pump-profile, 182
+pre-existing — unchanged), the standalone offline Solana suite, `pyflakes`
+clean against the pre-existing baseline, and `py_compile` on every module.
+
+An end-to-end trace over the whole stack (fake transport under `PumpClient`,
+so `_get` is exercised too) confirms the shape: three holder wallets, one with
+a profile, cost **three** HTTP GETs — total, across two `/token` renders, a
+`/pump` card, a `/pump <username>` alias hit, a `/wallet` on a profile-less
+wallet, and a third `/token` render after a simulated process restart. Before
+this change the first two renders alone cost six, and every render after that
+cost three more.
+
+Not verified live: the sandbox has no Pump egress (section 5), so
+`pump_map_top.py` and `pump_resolve_diag.py` have never made a real request.
+Their first live run is on borz, same as `fomo_map_top.py`.
+
+## Session 32 — bulk wallet labelling from published positions
+
+`fomo_map_top.py` labels the top N leaderboard traders without a single sponsor
+index, mint scan or block scan. The insight is that `/v2/leaderboard?limit=100`
+already returns `topHoldings` per trader — `tokenAddress`, `networkId` and the
+exact `humanAmount` — which is the same fingerprint `/hodlers/top` supplies.
+One leaderboard call seeds ~300 (handle, token, amount) fingerprints across the
+top 100.
+
+Per distinct token it then fetches the on-chain owner set once and matches
+amounts. Solana uses Helius DAS `getTokenAccounts`, which pages every holder;
+`getTokenLargestAccounts` stops at 20 and would silently miss anyone below that
+line. EVM reuses `TokenIntelligenceClient._holders`. Each token is also queried
+through `/hodlers/top`, so traders far outside the top 100 get labelled as a
+side effect of sharing a token — the yield compounds well beyond the seed list.
+
+Everything is written through `adopt_holder_matches()`, so the corroboration is
+unchanged: Solana needs a FOMO-sponsored transaction on the wallet, EVM needs
+contract code on the chain whose token is held, existing mappings are never
+overwritten. `--dry-run` reports the same numbers without writing. The run ends
+by listing the handles no token could explain; those are the only ones that
+still need `fomo_resolve_diag.py <handle> --fresh`.
+
+Regression coverage: holdings group by (token, chain), the amounts survive as
+match fingerprints end to end, malformed holding rows are skipped rather than
+fatal, and every FOMO network id has a display name. Verification: 164
+conventional unit tests, the standalone offline Solana suite and `py_compile`
+pass. The live run has to happen on borz.
+
+## Session 31 — EVM holders reach the cache too
+
+`/token 0xb0c2…7777` (CETS, BSC) named @Drillpig_, @admiralfinest and @vydamo_
+from the holder list, but `/wallet 0x11631d…202a` immediately afterwards
+reported no profile. Adoption was written for Solana only and dispatched every
+match to `WalletResolver` regardless of chain, so an EVM holder hit two walls:
+its `0x…` address would have gone into the Solana `wallet` field, and its
+corroboration was `getSignaturesForAddress` against a `0x` address, which is a
+JSON-RPC `-32602` rather than a check. The exception was caught and the pair
+skipped, so nothing was corrupted — but nothing was ever cached either, and
+`/wallet`'s reverse lookup is cache-only.
+
+`_adopt_holder_wallets()` now routes by the token's chain.
+`EvmWalletResolver.adopt_holder_matches()` is the EVM counterpart, writing
+`evmWallet` with `evmSource: hodlers+amount+rpc` and `evmStatus: verified` so
+`find_cached_wallets()` reports it. Corroboration is the bar this module
+already trusts: the address must have **deployed contract code on the chain
+whose token the trader holds**. FOMO wallets are ERC-4337 contracts; an EOA
+whale holding the matching amount has none. Code on some other chain does not
+count.
+
+Conflict handling matches the Solana path — an existing mapping wins, and a
+wallet already claimed by another handle is refused, both before any RPC. One
+extra check was needed here: `find_cached_wallets()` only reports EVM records
+marked `verified`, so adoption also scans the raw cache; an unverified record
+still means another handle owns that address.
+
+Regression coverage: an EVM holder reaches the EVM resolver and never the
+Solana one, the chain slug is passed through, code-less and wrong-chain
+addresses are refused, existing Solana records survive adoption, and a Solana
+address is never adopted as an EVM wallet. Verification: 160 conventional unit
+tests, the standalone offline Solana suite and `py_compile` pass.
+
+## Session 30 — `/token` names FOMO holders, and the cache learns from them
+
+`/token E3i7…pump` showed three of the token's FOMO holders as bare wallets.
+Nothing was missing: they were rows 4, 5 and 6, and their balances matched the
+FOMO UI exactly. Identity was the gap. `_holder_label()` resolved handles only
+through `find_cached_wallets()` over `wallet_cache.json`, so a trader who had
+never been through `/fomo` had no name — @rowdy and @quanterty were labelled
+because they happened to be cached.
+
+The Holders tab has a source, and route-guessing never found it because **it is
+spelled `hodlers`**:
+
+    GET /hodlers/top?tokens=[{"address":"<mint>","networkId":1399811149}]
+
+Found by `token_page_sniff.py`, which drives the persistent Chrome profile to
+`https://fomo.family/tokens/solana/<mint>`, clicks Holders and records every
+`prod-api.fomo.family` call. Two earlier dead ends are documented in
+FOMO_API.md so they are not re-walked: every `/holders` spelling 404s, and the
+`/v2/userTokens/aggregatedSnapshot*` family is keyed by `query.userId` — one
+trader's portfolio, not a token's holders.
+
+`user.address` on those rows is FOMO's synthetic address and still is not a
+wallet. `humanAmount` is the join: FOMO reports the exact position, `/token`
+already computes on-chain owners, and one unambiguous amount match names a
+wallet. `fomo_hodlers.match_holders_to_wallets()` accepts a pairing only when
+the amount identifies exactly one wallet AND that wallet matches exactly one
+trader, so two holders of near-identical size leave both unnamed rather than
+guessing. Rounding is tolerated because FOMO truncates `humanAmount` for
+display.
+
+The rule was validated against a known-good pair before shipping: `/token` had
+already named `8f39Xh…tsEr` as @Quanterty from the cache, and `/hodlers/top`
+independently reports Quanterty holding 16,682,532.40 of the same mint. Against
+the live capture, 48 published holders named every FOMO wallet in the top ten.
+
+A failed or slow holder lookup returns `{}` and the card renders exactly as
+before. Dev holders get a 🛠️ marker.
+
+### Adoption — the holder list as a wallet resolver
+
+Every confident match is also a wallet→handle mapping, so `/token` now feeds
+the wallet cache. This is the cheapest identity source in the project: no
+sponsor index, no mint scan, no block route — FOMO states the position and the
+chain says who holds it.
+
+A cached wallet is permanent and is trusted by `/fomo` and `/wallet`, so
+adoption is gated harder than display:
+
+1. **Separation.** `confident_matches()` additionally requires the runner-up
+   balance to be `CACHE_SEPARATION` (50) tolerances away. A neighbour close
+   enough to raise doubt is still labelled on the card — that is reversible —
+   but never written.
+2. **Corroboration.** `WalletResolver.adopt_holder_matches()` requires the
+   wallet to have co-signed a FOMO-sponsored transaction, the same bar
+   `_resolve_from_balances` applies to a single balance fingerprint. A whale
+   who merely happens to hold the matching amount fails it.
+3. **No overwrites.** An existing mapping wins; a disagreement is logged and
+   skipped, and a wallet already claimed by another handle is refused. Both
+   checks run before the RPC call, so a re-run of the same token costs nothing.
+
+Records land as `walletSource: hodlers+amount+fomo-sponsor` with the token that
+produced them in `hodlerToken`. Adoption runs as a background enrichment task,
+so the token card never waits for it, and `FOMO_ADOPT_HOLDER_WALLETS=0` keeps
+the naming while turning off persistence.
+
+### Not yet used
+
+The holder rows also carry `value`, `pnl`, `unrealizedPnl`, `realizedPnl`,
+`costBasis`, `averageEntryPrice` and `averageHoldTimeSeconds` — everything
+FOMO's own Holders table shows. `/token` uses only the handle and the dev flag.
+
+Worth considering: `/hodlers/top` accepts an array of tokens, so a deliberate
+cache-warming pass over trending mints would resolve many handles per call.
+
+Verification: 133 conventional unit tests (19 hodlers, 25 response, 27
+features, 32 diagnostic, 22 wallet, 3 API + others), the standalone offline
+Solana suite and `py_compile` pass.
+
+## Session 29 — Wide buys match sells, and an open position book
+
+Wide's Latest buys were the only activity list still numbered `1. 2. 3.` with a
+plain bold ticker, while sells and theses used a colour marker and a Padre link.
+Buys now render `🟢 [$TICKER](padre) · USD · MC · chain · relative`, identical in
+shape to the sell rows. `_token_link()` is the single constructor for a linked
+ticker and is shared by buys, sells and the new position rows; a chain Padre
+cannot route (Robinhood) still falls back to a bold ticker rather than a dead
+link.
+
+`Open positions` is a new Wide field listing the trader's active book, largest
+position first: linked ticker, average entry, size in tokens and USD, and PnL
+with ROI. `fomo_features.open_positions()` derives it from the `activeTrades`
+rows already fetched for the profile, so the field costs no extra request.
+
+Two deliberate choices in that derivation. PnL is per unit --
+`amount x (current - entry)` -- not `value - totalCostBasis`, because that basis
+covers units already sold and would report a half-closed winner as a loser. And
+prices use a new `fmt_price()` rather than `fmt_usd()`, which rounds to cents and
+renders every memecoin entry as `$0.00`; `fmt_price` keeps four significant
+digits below a cent. A position FOMO has not priced lists with `⚪` and `PnL —`
+rather than an invented number.
+
+Rows are packed through `_fit_field()` against Discord's 1,024-character field
+limit -- the same failure that truncated holder rows in session 14, except an
+over-long field rejects the entire message.
+
+Verification: 102 conventional unit tests (27 features, 20 response, 32
+diagnostic, 15 wallet, 3 API + others), the standalone offline Solana suite and
+`py_compile` pass.
+
+## Session 28 — exportable diagnostic summary
+
+Running `fomo_resolve_diag.py` over a batch of handles produced a summary whose
+wallets were truncated to ten characters, which is useless for the thing a batch
+run is for: collecting the addresses. The summary now prints full addresses in
+aligned columns, shows `[stage]` in place of a missing wallet, and reports how
+many handles missed. `--csv PATH` exports the same rows as
+`handle, solana, solana_status, evm, evm_status, error` for a spreadsheet or a
+tracker; `--json` still carries the whole per-stage report. Single-chain runs
+emit only that chain's columns.
+
+Verification: 55 conventional unit tests (37 diagnostic, 15 wallet, 3 API), the
+standalone offline Solana suite, and `py_compile` pass.
+
+## Session 27 — the block route is no longer opt-in
+
+`/fomo 397397` returned an EVM wallet and no Solana one, while
+`fomo_resolve_diag.py 397397 --deep` resolved
+`5dB6rj9CoXMLQCAymoC5UXCb1LtFjbM5rbut3MNuj9Q` in 35 RPC calls. Nothing had
+regressed: `fomo_bot.py` constructs `WalletResolver(self._http, SOLANA_RPCS)`,
+whose `deep` defaulted to `False`, so the embed path has never run the block
+route. What changed is FOMO, not the code.
+
+Both cheap routes are capped at `MAX_SIG_PAGES * 1000` = 12000 signatures. That
+cap is a moving target: it buys less and less wall-clock time as FOMO's
+throughput grows. For this handle the sponsor index stopped 12000 signatures
+back, short of a swap barely a day old, and the mint route hit the same wall on
+all four picked mints. The balance fallback then found 6 exact fingerprints but
+no unambiguous owner. The block route reads the chain at `createdAt` and depends
+on no account's signature history, so it is the only route FOMO's growth cannot
+outrun — and it matched in slot 440184488 on the first swap it was given.
+
+`WalletResolver` now tries all three routes per swap, cheapest first, before
+moving to the next swap -- and allows the block route on the newest
+`FOMO_WALLET_DEEP_ATTEMPTS` (default 2) picks only. A two-pass shape was tried
+first and rejected: running every cheap route across every swap before any
+block scan pays four full mint scans (12 pages of 1000 signatures each) before
+reaching the one route that can still answer, which is precisely the wrong
+order for a handle already known to be behind the cap. Swaps past the bound
+still get the cheap routes, since a quiet mint is cheap and might still hit.
+
+`deep` now defaults to `FOMO_WALLET_DEEP` (default 1) instead of `False`;
+passing `deep=False` still forces the old behaviour, and that case now says so
+in its log line. The cache records the winning route as
+`walletSource: fomo-sponsor | fomo-mint | fomo-blocks`.
+
+Cost is bounded and one-time: a resolution that would previously have failed
+now spends a slot search plus a `getBlock` per slot on at most two swaps, and a
+resolved handle is cached forever. A handle that resolves via sponsor or mint
+pays nothing extra — pass 2 never runs.
+
+`fomo_resolve_diag.py` follows the same default: `--deep/--no-deep` now defaults
+to `FOMO_WALLET_DEEP`, so the diagnostic reproduces the bot rather than
+diverging from it, and it prints a `routes` line naming which routes will run.
+
+### Known operational limit
+
+`_enrich_fomo_message()` wraps enrichment in `asyncio.wait_for(...,
+FOMO_ENRICH_TIMEOUT)`, which **cancels** the coroutine on timeout and then reads
+whatever reached the cache. A block scan that runs past the 20s default is
+therefore discarded rather than finished, and the next `/fomo` starts it over --
+the handle never converges. Raising `FOMO_ENRICH_TIMEOUT` is the one-line
+mitigation. The structural fix is to let resolution run as a detached task that
+survives the card's edit budget, so the cache is written even when the edit
+deadline passes; not implemented.
+
+Regression coverage: the block route reaches the newest swap without waiting on
+the others, is bounded to the newest N picks while older ones keep the cheap
+routes, is skipped entirely on a cheap-route hit, and the disabled case names
+`FOMO_WALLET_DEEP` in its log. Verification: 50 conventional unit tests (15
+wallet, 32 diagnostic, 3 API), the standalone offline Solana suite, and
+`py_compile` all pass.
+
+## Session 26 — one-command wallet-resolution triage
+
+`/fomo` hides every resolution failure: an unresolved handle shows no wallet
+line, and the reason is only ever written to the bot's own log at INFO/DEBUG.
+There was no way to ask "why did this handle not get a Solana or EVM wallet"
+without reading the running bot's log or reaching for `evm_diag.py`, which
+answers only the EVM half and needs a known-correct wallet to trace.
+
+`fomo_resolve_diag.py` takes one or more handles and prints a per-chain report:
+cache state, RPC/provider configuration, how much usable evidence FOMO actually
+returned, which swaps discovery picked, and a verdict naming the stage that lost
+the wallet plus the fix. It drives the same calls the bot's enrichment path
+makes — `WalletResolver.resolve()`, `WalletResolver.resolve_from_balances()`,
+`EvmWalletResolver.resolve()` — and installs a temporary handler on the `fomo`
+logger, so the resolvers' own explanations are captured rather than
+reimplemented and the tool cannot drift from the bot.
+
+Stages: `config`, `rpc`, `panels`, `evidence`, `discovery`, `transfers`,
+`ranking`, `deployment`, `balances`. Two facts the logs never carried are
+computed locally: the swap window broken down by why each row was rejected
+(`non-Solana mint (EVM contract)`, `networkId 56 (bsc)`, `no usable token leg`),
+which separates an EVM-only trader from a broken panel; and which chains have
+the Alchemy endpoint `alchemy_getAssetTransfers` requires, since Blockscout does
+not cover BSC.
+
+    python fomo_resolve_diag.py Rowdy
+    python fomo_resolve_diag.py Rowdy frankdegods --fresh
+    python fomo_resolve_diag.py Rowdy --chain solana --deep
+    python fomo_resolve_diag.py Rowdy --details -v
+    python fomo_resolve_diag.py Rowdy --json hunt_out/diag_rowdy.json
+
+Exit code 0 when every requested chain resolved, 1 when any did not, 2 on a
+setup error. `evm_diag.py` remains the microscope for the EVM half once triage
+points at `discovery`.
+
+Regression coverage is 30 offline tests over the pure classification: swap
+rejection reasons, exact vs aggregate EVM evidence counting, Alchemy provider
+detection, and every verdict rule. Verification: `test_fomo_resolve_diag` (30
+tests) and `py_compile` pass in a sandbox with no network egress; the live path
+still has to run on borz per §5.
+
+## Session 25 — global-only Discord commands
+
+The bot no longer copies or syncs its command tree as guild-specific commands.
+`setup_hook()` always performs one global sync, and `DISCORD_GUILD_ID` was
+removed from runtime configuration and `.env.example`.
+
+Older versions already registered duplicate guild commands in Discord, so
+simply stopping future copies was insufficient. On the first `on_ready()` of a
+process, the bot now clears the local guild command tree and syncs that empty
+tree to every connected guild. This deletes the legacy server-specific entries
+while leaving the global command tree untouched. Successful cleanup is retained
+for the process; an HTTP failure is logged and retried on a later ready event.
+
+Regression coverage verifies the cleanup performs only `clear_commands(guild)`
+and `sync(guild)` and never copies globals into a guild. Verification: 78
+conventional unit tests and the standalone offline Solana suite pass.
+
+## Session 24 — Compact wallet querying state
+
+The initial Compact `/fomo` card now renders `Linked wallets: Querying ⏳` when
+either enabled wallet resolver still has work to do. The pending state is
+explicitly passed through the initial renderer and enrichment task. Completion
+forces one final Compact edit even when neither resolver found a wallet, so the
+card cannot remain stuck on Querying; it changes to the verified wallet lines
+or the final no-wallet result. Wide rendering is unchanged.
+
+Regression coverage verifies both the pending placeholder and its empty-result
+completion. Verification: 77 conventional unit tests and the standalone
+offline Solana suite pass.
+
+## Session 23 — wallet-address Pump profile links
+
+Every Pump profile URL is now constructed from the profile's full Solana wallet
+rather than its username. `pump_api.pump_profile_url()` is the single URL
+constructor, and `PumpUser.profile_url` delegates to it. When Discord displays
+a Pump username with a wallet, both the `@username` and readable shortened
+wallet are clickable and target the profile URL containing the complete wallet
+address.
+
+The rule is applied to the main `/pump` card, `/wallet`, `/pumpwallet`, token
+holder identity rows, `/pumptracked`, and Pump tracking alerts. Holder rows do
+not repeat the explorer wallet when the linked Pump wallet is the same address.
+No active Python path constructs `pump.fun/profile` from a handle or username.
+
+Regression coverage checks the model URL, main profile card, holder-style
+identity row and tracking alert. Verification: 75 conventional unit tests, the
+standalone offline Solana suite and syntax compilation all pass.
+
+## Session 22 — interactive Compact and Wide `/fomo` layouts
+
+`/fomo <handle>` now responds with a requester-only Discord selector before
+performing the lookup. Its two options are visually labeled and described:
+Compact contains essential profile information only, while Wide contains the
+full profile with all available information. Other users cannot operate the
+requester's selector, and the selection message reports generation progress.
+
+Wide delegates to the original `build_embed()` function unchanged. Compact has
+a separate strict renderer containing only the profile picture, display name
+and handle, Social, Strategy, Portfolio, linked X/Twitter account, and one
+combined Linked wallets field. It omits the bio, clan, best trade, recent
+buys/sells/theses, PnL ranks, FOMO link field, privacy/join metadata and footer.
+
+Both choices call the same `_generate_fomo_profile()` fetch and enrichment
+pipeline. The chosen layout is passed only to the initial render and subsequent
+wallet-enrichment edit, so Compact cannot turn into Wide when a background
+wallet arrives. Verification: 72 conventional unit tests, the standalone
+offline Solana suite and syntax compilation all pass.
 
 ## Session 21 — FomoScan dependency removed
 

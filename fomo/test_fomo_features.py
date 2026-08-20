@@ -6,11 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fomo_features import build_trader_stats, iso_to_datetime
+from fomo_features import build_trader_stats, fmt_price, iso_to_datetime, open_positions
 from fomo_evm_activity import _activity, _alchemy_activities, fetch_robinhood_buys
 from fomo_features import TraderStats, merge_latest_buys, merge_latest_sells
 from fomo_tracking import (
+    SEEN_ID_LIMIT,
     TrackingStore,
+    _remember_ids,
     activity_allowed,
     activity_filter_label,
     detect_events,
@@ -198,6 +200,46 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(event.symbol, "MEME")
         refreshed = snapshot(sell, {}, baseline)
         self.assertEqual(refreshed["tokens"]["active-1"]["tokenMetadata"]["symbol"], "MEME")
+
+    def test_returning_trade_row_is_not_reannounced(self) -> None:
+        """FOMO drops rows from /trades and brings them back a poll later."""
+        def rows(*ids: str) -> dict:
+            return {"activeTrades": [
+                {"trade": {"id": trade_id, "tokenAddress": f"0x{trade_id}",
+                           "networkId": 56, "createdAt": "2026-08-11T23:48:00Z",
+                           "totalCostBasis": 100,
+                           "tokenMetadata": {"symbol": "TSLAB"}}}
+                for trade_id in ids
+            ], "closedTrades": []}
+
+        baseline = snapshot({}, rows("a", "b"))
+        flapped = snapshot({}, rows("a"), baseline)
+
+        self.assertIn("b", flapped["tradeIds"])
+        self.assertEqual(detect_events({}, rows("a", "b"), flapped, 10), [])
+
+    def test_returning_swap_is_not_reannounced(self) -> None:
+        def rows(*ids: str) -> dict:
+            return {"swaps": [
+                {"id": swap_id, "outTradeId": "trade-1", "outTokenAddress": "0xaa",
+                 "outNetworkId": 56, "humanUsdAmountIn": 500,
+                 "createdAt": "2026-08-11T23:48:00Z"}
+                for swap_id in ids
+            ]}
+
+        baseline = snapshot(rows("s1", "s2"), {})
+        flapped = snapshot(rows("s1"), {}, baseline)
+
+        self.assertEqual(detect_events(rows("s1", "s2"), {}, flapped, 10), [])
+
+    def test_remembered_ids_are_bounded_and_newest_first(self) -> None:
+        older = [f"old-{index}" for index in range(SEEN_ID_LIMIT)]
+
+        merged = _remember_ids(["fresh"], older)
+
+        self.assertEqual(merged[0], "fresh")
+        self.assertEqual(len(merged), SEEN_ID_LIMIT)
+        self.assertNotIn(f"old-{SEEN_ID_LIMIT - 1}", merged)
 
     def test_tracking_store_persists_and_removes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -396,6 +438,72 @@ class EvmActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(event)
         self.assertEqual(event.kind, "sell")  # type: ignore[union-attr]
         self.assertEqual(event.usd_value, 125)  # type: ignore[union-attr]
+
+
+OPEN_TRADES = {"activeTrades": [
+    {"trade": {"id": "sol-1", "tokenAddress": "TOKEN", "networkId": 1399811149,
+               "humanTokenAmount": "1200000", "avgEntryPrice": "0.00042",
+               "totalCostBasis": 504, "realizedPnlUsd": 0,
+               "tokenMetadata": {"symbol": "WALL3", "currentPrice": "0.00058"}}},
+    {"trade": {"id": "base-9", "tokenAddress": "0xbasecoin", "networkId": 8453,
+               "humanTokenAmount": "500", "totalCostBasis": 2000,
+               "tokenMetadata": {"symbol": "BASEY", "currentPrice": "3.1"}}},
+    {"trade": {"id": "dust", "tokenAddress": "0xdust", "networkId": 56,
+               "humanTokenAmount": "0", "tokenMetadata": {"symbol": "DUST"}}},
+], "closedTrades": [{"trade": {"id": "closed", "realizedPnlUsd": 100}}]}
+
+
+class OpenPositionTests(unittest.TestCase):
+    def test_positions_are_priced_from_the_trade_row(self) -> None:
+        positions = {item.symbol: item for item in open_positions(OPEN_TRADES)}
+        wall3 = positions["WALL3"]
+        self.assertAlmostEqual(wall3.entry_price, 0.00042)
+        self.assertAlmostEqual(wall3.value_usd, 696.0)
+        self.assertAlmostEqual(wall3.pnl_usd, 192.0, places=6)
+        self.assertAlmostEqual(wall3.roi, 38.095, places=2)
+
+    def test_pnl_is_per_unit_so_a_partial_sell_cannot_distort_it(self) -> None:
+        """totalCostBasis covers sold units too; entry x amount does not."""
+        half_sold = {"activeTrades": [{"trade": {
+            "id": "p", "tokenAddress": "TOKEN", "networkId": 1399811149,
+            "humanTokenAmount": "500", "avgEntryPrice": "1.0",
+            "totalCostBasis": 1000, "realizedPnlUsd": 250,
+            "tokenMetadata": {"symbol": "HALF", "currentPrice": "1.5"},
+        }}]}
+        position = open_positions(half_sold)[0]
+        self.assertAlmostEqual(position.pnl_usd, 250.0)   # not 1.5*500 - 1000
+        self.assertAlmostEqual(position.roi, 50.0)
+
+    def test_entry_falls_back_to_cost_basis_when_the_average_is_absent(self) -> None:
+        basey = {item.symbol: item for item in open_positions(OPEN_TRADES)}["BASEY"]
+        self.assertAlmostEqual(basey.entry_price, 4.0)
+
+    def test_empty_and_closed_rows_are_excluded(self) -> None:
+        symbols = [item.symbol for item in open_positions(OPEN_TRADES)]
+        self.assertNotIn("DUST", symbols)
+        self.assertEqual(len(symbols), 2)
+
+    def test_largest_position_leads_and_the_limit_holds(self) -> None:
+        self.assertEqual(open_positions(OPEN_TRADES)[0].symbol, "BASEY")
+        self.assertEqual(len(open_positions(OPEN_TRADES, limit=1)), 1)
+
+    def test_missing_payload_is_not_an_error(self) -> None:
+        self.assertEqual(open_positions(None), ())
+        self.assertEqual(open_positions({"activeTrades": "nope"}), ())
+
+    def test_stats_expose_the_open_book(self) -> None:
+        stats = build_trader_stats(None, None, OPEN_TRADES, None)
+        self.assertEqual([item.symbol for item in stats.open_positions],
+                         ["BASEY", "WALL3"])
+
+    def test_memecoin_prices_survive_formatting(self) -> None:
+        """fmt_usd rounds to cents, which renders every memecoin entry as $0.00."""
+        self.assertEqual(fmt_price(0.00042), "$0.00042")
+        self.assertEqual(fmt_price(0.00000123), "$0.00000123")
+        self.assertEqual(fmt_price(3.1), "$3.1")
+        self.assertEqual(fmt_price(1234.5), "$1,234.5")
+        self.assertEqual(fmt_price(None), "—")
+        self.assertEqual(fmt_price(0), "$0")
 
 
 if __name__ == "__main__":

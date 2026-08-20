@@ -26,7 +26,12 @@ from pump_chain import (
     parse_pump_trades,
 )
 from pump_evm import PumpEvmResolver
-from pump_tracking import PumpTrackingStore, new_callouts, pump_snapshot
+from pump_tracking import PumpAlert, PumpTrackingStore, new_callouts, pump_snapshot
+from fomo_bot import (
+    _pump_identity,
+    build_pump_embed,
+    build_pump_track_embed,
+)
 
 
 def pubkey(seed: int) -> bytes:
@@ -74,7 +79,7 @@ class PumpModelTests(unittest.TestCase):
         user = PumpUser.from_raw({
             "address": "wallet", "username": "rowdy", "followers": 12,
         })
-        self.assertEqual(user.profile_url, "https://pump.fun/profile/rowdy")
+        self.assertEqual(user.profile_url, "https://pump.fun/profile/wallet")
         coin = PumpCoin.from_raw({
             "mint": "mint", "symbol": "TEST", "market_cap": 2,
             "usd_market_cap": 123_456, "quote_decimals": 6,
@@ -86,6 +91,47 @@ class PumpModelTests(unittest.TestCase):
         }})
         self.assertEqual(portfolio.total_value, 100)
         self.assertEqual(portfolio.unrealized_usd, -5)
+
+    def test_pump_profile_renders_plain_username_and_linked_wallet(self) -> None:
+        wallet = "5uSNZfK1eLk9j6gR9jhYcfbHd4XtpgHnZP79fVMUcKQH"
+        user = PumpUser(address=wallet, username="bubblywhale4907")
+        embed = build_pump_embed(user)
+
+        self.assertEqual(embed.title, "@bubblywhale4907")
+        self.assertEqual(embed.url, f"https://pump.fun/profile/{wallet}")
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertIn(
+            f"https://pump.fun/profile/{wallet}", fields["Solana wallet"]
+        )
+        self.assertNotIn("profile/bubblywhale4907", str(embed.to_dict()))
+
+    def test_pump_identity_links_short_wallet_not_username(self) -> None:
+        wallet = "9gTHWg123456789012345678901234567890123UF1N"
+        rendered = _pump_identity("oldstarfish8933", wallet)
+
+        self.assertIn("**@oldstarfish8933**", rendered)
+        self.assertIn("[**@oldstarfish8933**]", rendered)
+        self.assertEqual(rendered.count(f"https://pump.fun/profile/{wallet}"), 2)
+        self.assertIn("9gTHWg…UF1N", rendered)
+
+    def test_pump_alert_uses_wallet_profile_url(self) -> None:
+        wallet = "5uSNZfK1eLk9j6gR9jhYcfbHd4XtpgHnZP79fVMUcKQH"
+        embed = build_pump_track_embed(
+            "bubblywhale4907",
+            wallet,
+            PumpAlert(
+                id="callout-1",
+                kind="callout",
+                mint="TokenMint1111111111111111111111111111111",
+                symbol="TEST",
+                created_at="2026-08-19T10:00:00Z",
+                detail="Test callout",
+            ),
+        )
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertEqual(embed.url, f"https://pump.fun/profile/{wallet}")
+        self.assertIn(f"https://pump.fun/profile/{wallet}", fields["Pump profile"])
+        self.assertNotIn("profile/bubblywhale4907", str(embed.to_dict()))
 
     def test_quote_values_support_sol_and_stables(self) -> None:
         self.assertEqual(quote_value_usd(WSOL_MINT, 2_000_000_000, 9, 75), 150)

@@ -159,6 +159,26 @@ def _image_url(trade: dict[str, Any]) -> str | None:
     return str(value) if isinstance(value, str) and value.startswith(("https://", "http://")) else None
 
 
+# How many event ids each subscription remembers. FOMO's trade response holds
+# well under this, so an id only ages out once it has been absent for a long
+# time.
+SEEN_ID_LIMIT = 500
+
+
+def _remember_ids(current: list[str], previous: Any,
+                  limit: int = SEEN_ID_LIMIT) -> list[str]:
+    """Merge this poll's ids into the ids already seen, newest first.
+
+    ``/trades?userId=`` is unordered and its membership is not stable: a row
+    drops out of one poll's response and comes back in the next. Rebuilding
+    the baseline from the current response alone makes that reappearance look
+    like new activity, so the same position is announced again every time it
+    flaps. Keeping a bounded rolling memory makes a returning row a no-op.
+    """
+    known = [str(value) for value in previous] if isinstance(previous, list) else []
+    return list(dict.fromkeys([*current, *known]))[:limit]
+
+
 def snapshot(swaps: Any, trades: Any, previous: dict[str, Any] | None = None) -> dict[str, Any]:
     swap_ids = [str(row["id"]) for row in ((swaps or {}).get("swaps") or [])
                 if isinstance(row, dict) and row.get("id")]
@@ -186,10 +206,11 @@ def snapshot(swaps: Any, trades: Any, previous: dict[str, Any] | None = None) ->
     # Keep enough history to identify a later sell even after the original
     # trade has fallen outside the current trades response.
     tokens = dict(list(tokens.items())[-250:])
+    known = previous or {}
     return {
-        "swapIds": list(dict.fromkeys(swap_ids))[:100],
-        "tradeIds": list(dict.fromkeys(trade_ids))[:100],
-        "thesisIds": list(dict.fromkeys(thesis_ids))[:100],
+        "swapIds": _remember_ids(swap_ids, known.get("swapIds")),
+        "tradeIds": _remember_ids(trade_ids, known.get("tradeIds")),
+        "thesisIds": _remember_ids(thesis_ids, known.get("thesisIds")),
         "tokens": tokens,
     }
 

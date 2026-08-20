@@ -26,6 +26,7 @@ from urllib.parse import quote, urlencode
 import aiohttp
 
 from fomo_chains import SUPPORTED_CHAINS_HEADER
+from fomo_hodlers import holders_query
 
 log = logging.getLogger("fomo")
 
@@ -485,6 +486,19 @@ class FomoClient:
             f"/v2/users/{user_id}/swaps?limit=50",
         )
         return await self._get_many(paths)  # type: ignore[return-value]
+
+    async def token_holders(
+        self, address: str, network_id: int, *, background: bool = False
+    ) -> Any:
+        """FOMO's own top-holder list -- what the token page's Holders tab calls.
+
+        Spelled `hodlers`. Rows carry the full user object plus that trader's
+        position, entry, PnL and hold time; see `fomo_hodlers.py`.
+        """
+        return await self._get(
+            holders_query(address, network_id),
+            lane="background" if background else "foreground",
+        )
 
     async def trade_details(
         self, trade_ids: list[str], *, background: bool = True

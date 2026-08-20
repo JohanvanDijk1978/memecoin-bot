@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from fomo_wallet import CACHE, _load_cache, _save_cache
+from fomo_wallet import CACHE, _load_cache, _save_cache, find_cached_wallets
 from rpc_config import (
     env_rpc_urls,
     normalize_rpc_urls,
@@ -1193,6 +1193,76 @@ class EvmWalletResolver:
         self._save(handle, address, deployed, None, source="manual+rpc")
         log.info("cached manual EVM %s -> %s (%s)", handle, address, ", ".join(deployed))
         return address
+
+    async def adopt_holder_matches(
+        self, matches: dict[str, str], token: str = "", chain: str = "",
+    ) -> dict[str, str]:
+        """Persist wallet -> handle pairs found in FOMO's own holder list.
+
+        The EVM counterpart of `WalletResolver.adopt_holder_matches`. A Solana
+        sponsor-signature check is meaningless for a `0x` address, so the
+        corroboration here is the one this module already trusts: FOMO's
+        wallets are ERC-4337 contracts, so the address must have deployed code
+        on the chain whose token the trader is holding. An EOA whale that
+        merely holds the matching amount has no code and is refused.
+
+        Returns the pairs actually written.
+        """
+        required = (chain or "").strip().lower()
+        written: dict[str, str] = {}
+        for wallet, handle in matches.items():
+            handle = (handle or "").lstrip("@").strip().lower()
+            wallet = (wallet or "").strip().lower()
+            if not handle or not EVM_RE.fullmatch(wallet):
+                continue
+            existing = cached_evm_wallet(handle, self.cache_path)
+            if existing == wallet:
+                continue
+            if existing:
+                log.info(
+                    "holder match for %s (%s) disagrees with the cached EVM "
+                    "wallet %s; keeping the cached one", handle, wallet, existing,
+                )
+                continue
+            # find_cached_wallets only reports EVM records marked verified, so
+            # scan the raw cache as well: an unverified record still means
+            # another handle owns this address, and duplicating it is wrong.
+            cache = (_load_cache() if self.cache_path == Path(CACHE)
+                     else _load_cache(self.cache_path))
+            claimed = [
+                name for name, record in cache.items()
+                if isinstance(record, dict) and name.lower() != handle
+                and str(record.get("evmWallet") or "").lower() == wallet
+            ] + [match.handle for match in
+                 find_cached_wallets(wallet, self.cache_path)
+                 if match.handle.lower() != handle]
+            if claimed:
+                log.info("EVM wallet %s is already cached as @%s; not adopting @%s",
+                         wallet, claimed[0], handle)
+                continue
+            try:
+                deployed, checked = await self._deployed_chains(wallet)
+            except Exception as exc:
+                log.debug("deployment probe failed for %s: %s", wallet, exc)
+                continue
+            if not checked or not deployed:
+                log.info("holder match %s -> @%s not adopted: no contract code",
+                         wallet, handle)
+                continue
+            if required and required not in deployed:
+                log.info(
+                    "holder match %s -> @%s not adopted: no code on %s, the "
+                    "chain of the token it holds", wallet, handle, required,
+                )
+                continue
+            self._save(
+                handle, wallet, deployed, None, source="hodlers+amount+rpc",
+                confirmations=1, evidence_tokens=[token] if token else None,
+            )
+            written[wallet] = handle
+            log.info("adopted EVM %s -> @%s from FOMO's holder list (%s)",
+                     wallet, handle, ", ".join(deployed))
+        return written
 
     async def _deployed_chains(self, address: str) -> tuple[list[str], list[str]]:
         async def probe(name: str, urls: list[str]) -> tuple[str, bool]:

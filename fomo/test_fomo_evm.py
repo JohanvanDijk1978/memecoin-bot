@@ -760,5 +760,113 @@ class EvmWalletResolverTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(result)
 
 
+class AdoptEvmHolderMatchesTests(unittest.IsolatedAsyncioTestCase):
+    """FOMO's holder list resolves EVM identities the same way it does Solana.
+
+    A `0x` holder of a BSC token is an EVM smart wallet. Sending it to the
+    Solana resolver wrote it to the wrong cache field and probed it with
+    getSignaturesForAddress, so `/wallet` could not find a trader `/token` had
+    just named. Corroboration here is deployed contract code on the chain whose
+    token the trader holds — FOMO wallets are ERC-4337 contracts, an EOA whale
+    holding the same amount is not.
+    """
+
+    def _resolver(self, path: Path, code: str = "0x6001") -> EvmWalletResolver:
+        return EvmWalletResolver(
+            FakeHttp(code=code),
+            rpcs={"bsc": "https://bsc.invalid", "base": "https://base.invalid"},
+            cache_path=path,
+        )
+
+    async def test_a_deployed_match_is_cached_as_an_evm_wallet(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            written = await self._resolver(path).adopt_holder_matches(
+                {ADDRESS.upper(): "Drillpig_"}, token=TOKEN_A, chain="bsc",
+            )
+            self.assertEqual(written, {ADDRESS: "drillpig_"})
+            entry = json.loads(path.read_text())["drillpig_"]
+            self.assertEqual(entry["evmWallet"], ADDRESS)
+            self.assertEqual(entry["evmSource"], "hodlers+amount+rpc")
+            self.assertEqual(entry["evmEvidenceTokens"], [TOKEN_A])
+            self.assertNotIn("wallet", entry)  # never the Solana field
+
+    async def test_an_address_without_code_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            written = await self._resolver(path, code="0x").adopt_holder_matches(
+                {ADDRESS: "whale"}, chain="bsc",
+            )
+            self.assertEqual(written, {})
+            self.assertFalse(path.exists())
+
+    async def test_code_on_another_chain_does_not_count(self) -> None:
+        """The trader holds a BSC token, so the wallet must exist on BSC."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = EvmWalletResolver(
+                FakeHttp(), rpcs={"base": "https://base.invalid"}, cache_path=path,
+            )
+            self.assertEqual(
+                await resolver.adopt_holder_matches({ADDRESS: "elsewhere"},
+                                                    chain="bsc"),
+                {},
+            )
+
+    async def test_an_existing_evm_mapping_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            path.write_text(json.dumps({"drillpig_": {
+                "evmWallet": OTHER_ADDRESS, "evmStatus": "verified",
+            }}))
+            resolver = self._resolver(path)
+            self.assertEqual(
+                await resolver.adopt_holder_matches({ADDRESS: "drillpig_"},
+                                                    chain="bsc"),
+                {},
+            )
+            self.assertEqual(json.loads(path.read_text())["drillpig_"]["evmWallet"],
+                             OTHER_ADDRESS)
+            self.assertEqual(resolver.http.posts, 0)  # refused before any RPC
+
+    async def test_a_wallet_claimed_by_another_handle_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            path.write_text(json.dumps({"konito": {"evmWallet": ADDRESS}}))
+            resolver = self._resolver(path)
+            self.assertEqual(
+                await resolver.adopt_holder_matches({ADDRESS: "impostor"},
+                                                    chain="bsc"),
+                {},
+            )
+            self.assertNotIn("impostor", json.loads(path.read_text()))
+
+    async def test_an_existing_solana_record_survives_adoption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            path.write_text(json.dumps({"vydamo_": {
+                "wallet": "SolanaWallet1111111111111111111111111111111",
+                "confirmed": 3,
+            }}))
+            await self._resolver(path).adopt_holder_matches(
+                {ADDRESS: "vydamo_"}, chain="bsc",
+            )
+            entry = json.loads(path.read_text())["vydamo_"]
+            self.assertEqual(entry["wallet"],
+                             "SolanaWallet1111111111111111111111111111111")
+            self.assertEqual(entry["evmWallet"], ADDRESS)
+
+    async def test_a_solana_address_is_not_an_evm_wallet(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            self.assertEqual(
+                await self._resolver(path).adopt_holder_matches(
+                    {"93fjdwW7S3Aw4TkrnMzy51sZ5pP4ArpvtmFYujNyDVgH": "konito"},
+                    chain="bsc",
+                ),
+                {},
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

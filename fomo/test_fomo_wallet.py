@@ -5,7 +5,9 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
+import fomo_wallet
 from fomo_wallet import (
     FOMO_SPONSOR,
     SOLANA_NETWORK_ID,
@@ -28,6 +30,7 @@ MINT_B = "MintB111111111111111111111111111111111111111"
 WALLET = "Wallet11111111111111111111111111111111111111"
 SOL_MINT_A = "E7Kc6aU15bGirh27P6DEgTzuSAQSTtJi7TrKM1wYpump"
 SOL_MINT_B = "zj1jpp7QMveWHLs61vL9KMZf254KvW7j4AAmBF8ry2k"
+SOL_MINT_C = "CX2v7JSHkVPRZzUGpPTsLpMFHrTSAQSTtJi7TrKMwpum"
 
 
 def swap(mint: str, amount: float, created: str = "2026-08-18T13:05:59.531Z") -> dict:
@@ -301,6 +304,233 @@ class WalletDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(find_cached_wallets(
                 "czU8MaRcwvwUoNkwJFLbvtFWJugcEXAhDDQqNFE4ybb7", path
             ), [])
+
+
+class BoundedBlockRouteTests(unittest.IsolatedAsyncioTestCase):
+    """The block route runs on the embed path, bounded to the newest swaps.
+
+    Both cheap routes stop at MAX_SIG_PAGES * 1000 signatures. That cap covers
+    less wall-clock time every time FOMO's throughput grows, so an active
+    trader's day-old swap sits behind it and only the block route still
+    reaches. The bot used to run with the block route off entirely, which is
+    why such handles resolved an EVM wallet and no Solana one.
+    """
+
+    def setUp(self) -> None:
+        self.rows = {"swaps": [
+            swap(SOL_MINT_A, 1, "2026-08-19T03:08:09.000Z"),
+            swap(SOL_MINT_B, 2, "2026-08-18T12:30:13.000Z"),
+            swap(SOL_MINT_C, 3, "2026-08-15T18:12:12.000Z"),
+        ]}
+        self.fomo = SimpleNamespace(_get=lambda *_a, **_k: _async(self.rows))
+        self.user = SimpleNamespace(id="uid", handle="397397")
+
+    def _resolver(self, path: Path, **kwargs: object) -> WalletResolver:
+        return WalletResolver(
+            SimpleNamespace(), "https://rpc.test", verify_targets=0,
+            cache_path=path, **kwargs,  # type: ignore[arg-type]
+        )
+
+    @staticmethod
+    def _recorder(calls: list[tuple[str, bool]], hit_on: str | None = None):
+        async def fake_locate(_rpc, sw, _index=None, deep=False, verbose=True):
+            mint = sw["outTokenAddress"]
+            calls.append((mint, deep))
+            if hit_on is not None and mint == hit_on and deep:
+                return "sig-1", transaction(mint, sw["outHumanAmount"]), "blocks"
+            return None, None, "not found"
+        return fake_locate
+
+    async def test_blocks_are_tried_on_the_newest_swap_before_older_ones(self) -> None:
+        """Every route per swap, not every cheap route across every swap.
+
+        Draining four mint scans first is the slow way to answer a handle whose
+        history is already known to be behind the signature cap.
+        """
+        calls: list[tuple[str, bool]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            with mock.patch.object(fomo_wallet, "locate_swap",
+                                   self._recorder(calls, hit_on=SOL_MINT_A)):
+                found = await self._resolver(path, deep=True).resolve(
+                    self.fomo, self.user
+                )
+            self.assertEqual(found, WALLET)
+            # One swap, one call -- the newest swap never waited on the others.
+            self.assertEqual(calls, [(SOL_MINT_A, True)])
+            entry = json.loads(path.read_text(encoding="utf-8"))["397397"]
+            self.assertEqual(entry["walletSource"], "fomo-blocks")
+
+    async def test_block_route_is_bounded_to_the_newest_swaps(self) -> None:
+        calls: list[tuple[str, bool]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            with mock.patch.object(fomo_wallet, "locate_swap",
+                                   self._recorder(calls)):
+                resolver = self._resolver(path, deep=True, deep_attempts=2)
+                self.assertIsNone(await resolver.resolve(self.fomo, self.user))
+            # Blocks on the two newest; the third still gets the cheap routes,
+            # because a quiet mint is cheap and might still hit.
+            self.assertEqual(calls, [(SOL_MINT_A, True), (SOL_MINT_B, True),
+                                     (SOL_MINT_C, False)])
+
+    async def test_disabled_deep_never_asks_for_blocks(self) -> None:
+        calls: list[tuple[str, bool]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            with mock.patch.object(fomo_wallet, "locate_swap",
+                                   self._recorder(calls)), \
+                    self.assertLogs("fomo.wallet", "INFO") as logs:
+                resolver = self._resolver(path, deep=False)
+                self.assertIsNone(await resolver.resolve(self.fomo, self.user))
+            self.assertEqual([deep for _mint, deep in calls], [False, False, False])
+            self.assertIn("block route off", "\n".join(logs.output))
+
+    async def test_cheap_route_hit_never_pays_for_blocks(self) -> None:
+        seen: list[str] = []
+
+        async def fake_locate(_rpc, sw, _index=None, deep=False, verbose=True):
+            seen.append(sw["outTokenAddress"])
+            return "sig-1", transaction(sw["outTokenAddress"],
+                                        sw["outHumanAmount"]), "sponsor"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            with mock.patch.object(fomo_wallet, "locate_swap", fake_locate):
+                found = await self._resolver(path, deep=True).resolve(
+                    self.fomo, self.user
+                )
+            self.assertEqual(found, WALLET)
+            self.assertEqual(seen, [SOL_MINT_A])
+            entry = json.loads(path.read_text(encoding="utf-8"))["397397"]
+            self.assertEqual(entry["walletSource"], "fomo-sponsor")
+
+    def test_deep_defaults_to_the_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            self.assertEqual(self._resolver(path).deep, fomo_wallet.DEEP_DEFAULT)
+            self.assertIs(self._resolver(path, deep=False).deep, False)
+            self.assertIs(self._resolver(path, deep=True).deep, True)
+
+
+class AdoptHolderMatchesTests(unittest.IsolatedAsyncioTestCase):
+    """FOMO's holder list is an identity source, if it survives corroboration.
+
+    `/hodlers/top` states a trader's exact position and `/token` already knows
+    every on-chain owner, so an unambiguous amount match is a wallet for free.
+    A cached wallet is permanent and feeds `/fomo` and `/wallet`, so the same
+    sponsor-signature bar `_resolve_from_balances` applies to a single
+    fingerprint applies here.
+    """
+
+    def _resolver(self, path: Path, sponsored: bool = True) -> WalletResolver:
+        resolver = WalletResolver(SimpleNamespace(), "https://rpc.test",
+                                  cache_path=path)
+        self.checked: list[str] = []
+
+        async def sponsor_check(wallet: str) -> bool:
+            self.checked.append(wallet)
+            return sponsored
+
+        resolver._has_fomo_sponsored_transaction = sponsor_check  # type: ignore[method-assign]
+        return resolver
+
+    async def test_a_corroborated_match_is_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            written = await self._resolver(path).adopt_holder_matches(
+                {WALLET: "ChunDoohwann"}, token=SOL_MINT_A,
+            )
+            self.assertEqual(written, {WALLET: "chundoohwann"})
+            entry = json.loads(path.read_text(encoding="utf-8"))["chundoohwann"]
+            self.assertEqual(entry["wallet"], WALLET)
+            self.assertEqual(entry["walletSource"], "hodlers+amount+fomo-sponsor")
+            self.assertEqual(entry["hodlerToken"], SOL_MINT_A)
+            self.assertEqual(self.checked, [WALLET])
+
+    async def test_a_wallet_with_no_fomo_transaction_is_refused(self) -> None:
+        """A whale holding the matching amount is not therefore a FOMO trader."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            written = await self._resolver(path, sponsored=False)\
+                .adopt_holder_matches({WALLET: "stranger"})
+            self.assertEqual(written, {})
+            self.assertFalse(path.exists())
+
+    async def test_an_existing_mapping_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            path.write_text(json.dumps({"rowdy": {
+                "wallet": "OriginalWallet111111111111111111111111111111",
+                "confirmed": 5, "walletSource": "fomo-sponsor",
+            }}), encoding="utf-8")
+            resolver = self._resolver(path)
+            self.assertEqual(await resolver.adopt_holder_matches({WALLET: "rowdy"}), {})
+            entry = json.loads(path.read_text(encoding="utf-8"))["rowdy"]
+            self.assertEqual(entry["wallet"],
+                             "OriginalWallet111111111111111111111111111111")
+            self.assertEqual(self.checked, [])  # refused before spending RPC
+
+    async def test_a_wallet_already_claimed_by_another_handle_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            path.write_text(json.dumps({"konito": {
+                "wallet": WALLET, "confirmed": 5, "walletSource": "fomo-sponsor",
+            }}), encoding="utf-8")
+            resolver = self._resolver(path)
+            self.assertEqual(
+                await resolver.adopt_holder_matches({WALLET: "impostor"}), {}
+            )
+            self.assertNotIn("impostor",
+                             json.loads(path.read_text(encoding="utf-8")))
+
+    async def test_re_adopting_the_same_pair_is_a_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            resolver = self._resolver(path)
+            await resolver.adopt_holder_matches({WALLET: "chundoohwann"})
+            self.checked.clear()
+            self.assertEqual(
+                await resolver.adopt_holder_matches({WALLET: "ChunDoohwann"}), {}
+            )
+            self.assertEqual(self.checked, [])  # no repeat RPC cost
+
+    async def test_an_existing_evm_record_survives_adoption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            path.write_text(json.dumps({"luver": {
+                "evmWallet": "0x0232b9afb9160fe479f25dade62fa60ef657bdc5",
+                "evmStatus": "verified",
+            }}), encoding="utf-8")
+            await self._resolver(path).adopt_holder_matches({WALLET: "luver"})
+            entry = json.loads(path.read_text(encoding="utf-8"))["luver"]
+            self.assertEqual(entry["wallet"], WALLET)
+            self.assertEqual(entry["evmWallet"],
+                             "0x0232b9afb9160fe479f25dade62fa60ef657bdc5")
+
+    async def test_a_failing_sponsor_check_does_not_stop_the_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            resolver = WalletResolver(SimpleNamespace(), "https://rpc.test",
+                                      cache_path=path)
+
+            async def flaky(wallet: str) -> bool:
+                if wallet == "BadWallet1111111111111111111111111111111111":
+                    raise RuntimeError("all Solana RPCs failed")
+                return True
+
+            resolver._has_fomo_sponsored_transaction = flaky  # type: ignore[method-assign]
+            written = await resolver.adopt_holder_matches({
+                "BadWallet1111111111111111111111111111111111": "broken",
+                WALLET: "worked",
+            })
+            self.assertEqual(written, {WALLET: "worked"})
+
+
+def _async(value):
+    async def run():
+        return value
+    return run()
 
 
 if __name__ == "__main__":
