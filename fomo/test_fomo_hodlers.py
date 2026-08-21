@@ -14,11 +14,18 @@ from fomo_hodlers import (
     CACHE_SEPARATION,
     CHAIN_NAMES_BY_ID,
     FomoHolder,
+    HolderThesis,
     confident_matches,
     holders_query,
     match_holders_to_wallets,
+    holders_query_many,
     network_id_for,
+    parse_holder_groups,
+    parse_thesis_feed,
     parse_token_holders,
+    rank_theses,
+    thesis_feed_query,
+    theses_from_trades,
 )
 
 MINT = "E3i7sTY5QYEBh3itepnomZQt7Eh5kzmHFk1vkm2pump"
@@ -262,3 +269,149 @@ class LeaderboardHoldingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThesisParsingTests(unittest.TestCase):
+    """`/thesis` reads two routes; neither may be trusted to keep its shape."""
+
+    def test_the_feed_query_carries_the_token_and_network(self) -> None:
+        path = thesis_feed_query(MINT, 1399811149, limit=25)
+        query = parse_qs(urlsplit(path).query)
+        self.assertTrue(urlsplit(path).path.endswith("/feed/token/sortedThesis"))
+        self.assertEqual(query["tokenAddress"], [MINT])
+        self.assertEqual(query["networkId"], ["1399811149"])
+        self.assertEqual(query["limit"], ["25"])
+
+    def test_a_feed_row_becomes_a_holder_thesis(self) -> None:
+        rows = [{
+            "user": {
+                "userHandle": "Eagle_0X",
+                "displayName": "Eagle",
+                "twitter": "https://x.com/Eagle_0X",
+            },
+            "comment": {"comment": "In hindsight it was obvious"},
+            "equity": 39_100.0,
+            "pnl": 34_500.0,
+            "averageHoldTimeSeconds": 118_800,
+            "tradeId": "trade-eagle",
+        }]
+        theses = parse_thesis_feed(rows)
+        self.assertEqual(len(theses), 1)
+        self.assertEqual(theses[0].handle, "Eagle_0X")
+        self.assertEqual(theses[0].text, "In hindsight it was obvious")
+        self.assertEqual(theses[0].value_usd, 39_100.0)
+        self.assertEqual(theses[0].pnl_usd, 34_500.0)
+        self.assertEqual(theses[0].hold_seconds, 118_800)
+
+    def test_the_feed_is_read_through_common_envelopes(self) -> None:
+        row = {"user": {"userHandle": "malk"}, "comment": "zero or hero"}
+        for payload in (
+            [row],
+            {"responseObject": [row]},
+            {"theses": [row]},
+            {"responseObject": {"items": [row]}},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    [thesis.handle for thesis in parse_thesis_feed(payload)], ["malk"]
+                )
+
+    def test_an_unrecognised_feed_shape_yields_nothing_rather_than_junk(self) -> None:
+        # This is what makes the fallback safe: a shape we cannot read has to
+        # look like "no theses here", never like a half-parsed card.
+        for payload in (None, 42, "theses", {"unexpected": {"nested": 1}},
+                        [{"user": {"userHandle": "x"}}],   # no text
+                        [{"comment": "orphaned"}]):        # no handle
+            with self.subTest(payload=payload):
+                self.assertEqual(parse_thesis_feed(payload), [])
+
+    def test_trade_details_supply_the_text_for_holder_rows(self) -> None:
+        holders, _total = parse_token_holders(PAYLOAD)
+        details = [
+            {"trade": {"id": f"trade-{holders[0].handle}"},
+             "comment": {"comment": "soon worldwide!"}},
+            RuntimeError("503 upstream"),          # _get_many returns these inline
+            {"trade": {"id": "trade-unknown"}, "comment": {"comment": "orphan"}},
+        ]
+        theses = theses_from_trades(holders, details)
+        self.assertEqual([thesis.handle for thesis in theses], [holders[0].handle])
+        self.assertEqual(theses[0].text, "soon worldwide!")
+        self.assertEqual(theses[0].value_usd, holders[0].value_usd)
+        self.assertEqual(theses[0].hold_seconds, holders[0].hold_seconds)
+
+    def test_a_trade_without_a_comment_is_not_a_thesis(self) -> None:
+        holders, _total = parse_token_holders(PAYLOAD)
+        details = [{"trade": {"id": f"trade-{holders[0].handle}"}, "comment": None},
+                   {"trade": {"id": f"trade-{holders[1].handle}"},
+                    "comment": {"comment": "   "}}]
+        self.assertEqual(theses_from_trades(holders, details), [])
+
+    def test_ranking_puts_the_biggest_position_first(self) -> None:
+        theses = rank_theses([
+            HolderThesis("small", "small", "c", value_usd=100.0),
+            HolderThesis("big", "big", "a", value_usd=39_100.0),
+            HolderThesis("mid", "mid", "b", value_usd=1_000.0),
+        ])
+        self.assertEqual([thesis.handle for thesis in theses], ["big", "mid", "small"])
+
+    def test_an_unpriced_position_ranks_last_not_first(self) -> None:
+        theses = rank_theses([
+            HolderThesis("unpriced", "unpriced", "a", value_usd=None),
+            HolderThesis("priced", "priced", "b", value_usd=1.0),
+        ])
+        self.assertEqual([thesis.handle for thesis in theses], ["priced", "unpriced"])
+
+    def test_one_entry_per_handle_and_the_larger_wins(self) -> None:
+        theses = rank_theses([
+            HolderThesis("Dup", "Dup", "older", value_usd=10.0),
+            HolderThesis("dup", "dup", "newer", value_usd=500.0),
+        ])
+        self.assertEqual(len(theses), 1)
+        self.assertEqual(theses[0].text, "newer")
+
+
+class HolderGroupTests(unittest.TestCase):
+    """Wallet resolution asks about a whole position list in one request.
+
+    `parse_token_holders` flattens every token's rows together, which is right
+    for `/token` and wrong here: which amount belongs to which token is the
+    whole point.
+    """
+
+    OTHER = "zj1jpp7QMveWHLs61vL9KMZf254KvW7j4AAmBF8ry2k"
+
+    def _payload(self) -> list:
+        return [
+            {"tokenAddress": MINT, "networkId": 1399811149, "totalHolders": 1006,
+             "topHolders": [holder_row("chun", 24339588.53)]},
+            {"tokenAddress": self.OTHER, "networkId": 1399811149,
+             "totalHolders": 12, "topHolders": [holder_row("luver", 500.0)]},
+        ]
+
+    def test_the_query_carries_every_token_in_one_array(self) -> None:
+        path = holders_query_many([(MINT, 1399811149), (self.OTHER, 1399811149)])
+        tokens = json.loads(parse_qs(urlsplit(path).query)["tokens"][0])
+        self.assertEqual([entry["address"] for entry in tokens],
+                         [MINT, self.OTHER])
+        self.assertTrue(all(entry["networkId"] == 1399811149 for entry in tokens))
+
+    def test_the_single_token_query_is_unchanged(self) -> None:
+        self.assertEqual(holders_query(MINT, 1399811149),
+                         holders_query_many([(MINT, 1399811149)]))
+
+    def test_each_token_keeps_its_own_holders(self) -> None:
+        groups = parse_holder_groups(self._payload())
+        self.assertEqual([group.address for group in groups], [MINT, self.OTHER])
+        self.assertEqual([group.total for group in groups], [1006, 12])
+        self.assertEqual([[row.handle for row in group.holders] for group in groups],
+                         [["chun"], ["luver"]])
+
+    def test_flattening_still_works_for_the_token_card(self) -> None:
+        holders, total = parse_token_holders(self._payload())
+        self.assertEqual([row.handle for row in holders], ["chun", "luver"])
+        self.assertEqual(total, 12)
+
+    def test_a_junk_payload_is_no_groups_rather_than_an_exception(self) -> None:
+        for payload in (None, 7, "rows", {"unexpected": 1}, [None, 3]):
+            with self.subTest(payload=payload):
+                self.assertEqual(parse_holder_groups(payload), [])

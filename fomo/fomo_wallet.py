@@ -52,8 +52,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
+from fomo_hodlers import confident_matches, parse_holder_groups
 from rpc_config import env_rpc_urls, normalize_rpc_urls, rpc_display_name
 
 log = logging.getLogger("fomo.wallet")
@@ -116,6 +117,11 @@ try:
     DEEP_ATTEMPTS = max(1, int(os.getenv("FOMO_WALLET_DEEP_ATTEMPTS", "2")))
 except ValueError:
     DEEP_ATTEMPTS = 2
+
+# How many of the trader's own positions the holder route asks FOMO about.
+# They go in one request, so this bounds the on-chain half: only the tokens
+# whose published holder list names this trader cost a query.
+HODLER_TOKENS = 8
 
 
 def iso_epoch(s: str) -> int:
@@ -708,6 +714,18 @@ async def verify_wallet(rpc: Rpc, wallet: str, swaps: list[dict],
     return confirmed, checked
 
 
+def swap_rows(payload: Any) -> list[dict]:
+    """Swap rows out of either shape FOMO's swaps panel arrives in.
+
+    `/v2/users/{id}/swaps` answers `{"swaps": [...]}`, but callers pass around
+    both that envelope and the bare list. Iterating the envelope by mistake
+    yields its keys, which look like "no usable swaps" instead of like an
+    error -- so the unwrapping lives in one place.
+    """
+    rows = payload.get("swaps") if isinstance(payload, dict) else payload
+    return [row for row in (rows or []) if isinstance(row, dict)]
+
+
 def pick_swaps(rows: list[dict], want: int = 3) -> list[dict]:
     """Prefer recent BUYS -- the received amount is the distinctive number,
     and recent means a short walk back through the mint's signatures.
@@ -950,8 +968,7 @@ class WalletResolver:
             cache=False,
             lane="background",
         )
-        rows = (data.get("swaps") if isinstance(data, dict) else data) or []
-        rows = [row for row in rows if isinstance(row, dict) and is_solana_swap(row)]
+        rows = [row for row in swap_rows(data) if is_solana_swap(row)]
         if not rows:
             log.info("no Solana wallet match for %s: FOMO returned no swaps", handle)
             return None
@@ -1013,10 +1030,79 @@ class WalletResolver:
         log.info("resolved %s -> %s (%d confirmation(s))", handle, wallet, confirmed)
         return wallet
 
-    async def resolve_from_balances(
-        self, user: Any, balances: Any, use_cache: bool = True
+    async def _corroborate(
+        self, handle: str, wallet: str, swaps: Sequence[dict] = ()
+    ) -> tuple[bool, str, int]:
+        """Is this candidate really this trader's wallet?
+
+        Two gates, strongest first.
+
+        `verify_wallet` scans the CANDIDATE's own signature history for the
+        swaps FOMO reports for this trader. That ties the wallet to *these
+        trades*, not merely to the platform, and it is the direction that
+        scales -- a trader's account runs to hundreds of signatures where a
+        viral mint runs to tens of thousands. It needs the trader's swap rows.
+
+        `_has_fomo_sponsored_transaction` is the older gate and much weaker: it
+        only asks whether the wallet ever co-signed a FOMO-sponsored
+        transaction, and it looks at the newest 40 alone, so a wallet with
+        recent non-FOMO activity or airdrop spam fails it while a whale that
+        happens to hold the matching amount passes anything short of it. It is
+        the fallback for callers that have no swaps -- `/token`'s adoption
+        path, which would otherwise pay a FOMO request per holder.
+
+        The distinction that matters is refuted vs inconclusive. `verify_wallet`
+        returns (confirmed, checked); `checked == 0` means it found no
+        signatures near any swap time and therefore never got to look, so the
+        weaker gate still gets its turn. `checked > 0 and confirmed == 0` means
+        it looked at this wallet's own history and this trader's swaps are not
+        in it -- that is a refusal, and falling through to a weaker check after
+        it would be throwing away the better answer.
+
+        Returns (corroborated, how, confirmations); `how` becomes part of
+        `walletSource`, so the cache records which gate let a wallet in.
+        """
+        usable = [row for row in swap_rows(swaps) if row.get("createdAt")]
+        if usable:
+            confirmed, checked = await verify_wallet(
+                self.rpc, wallet, usable,
+                targets=max(1, self.verify_targets), verbose=False,
+            )
+            if confirmed:
+                return True, f"verify{confirmed}", confirmed
+            if checked:
+                log.info(
+                    "candidate %s for %s explains none of %d checked swap(s); "
+                    "rejected", wallet, handle, checked,
+                )
+                return False, "verify0", 0
+            log.debug(
+                "verify found no signatures near %s's swaps on %s; falling back "
+                "to the sponsor check", handle, wallet,
+            )
+        return await self._has_fomo_sponsored_transaction(wallet), "fomo-sponsor", 1
+
+    async def resolve_from_holders(
+        self, fomo: Any, user: Any, balances: Any,
+        swaps: Sequence[dict] = (), use_cache: bool = True,
     ) -> str | None:
-        """Fallback: map exact FOMO SPL balances to their on-chain owner."""
+        """FOMO's own holder list, asked about this trader's own positions.
+
+        The cheapest identity source in the project, and until now it only ran
+        as a side effect of somebody typing `/token`. FOMO publishes each
+        holder's exact position; the chain says who holds that amount; one
+        unambiguous match is a wallet with no sponsor index, no mint scan and
+        no block scan.
+
+        Two things make it cheaper than the balance fallback it sits in front
+        of. One request covers every position, and its answer says which tokens
+        publish a row naming this trader -- so the on-chain query is paid only
+        where it can possibly pay off. And the match itself is the one from
+        `fomo_hodlers`, which tolerates the rounding FOMO applies to
+        `humanAmount` and demands uniqueness in both directions: the amount
+        must identify exactly one wallet AND that wallet must match exactly one
+        trader.
+        """
         handle = (getattr(user, "handle", "") or "").lower()
         if not handle:
             return None
@@ -1027,12 +1113,171 @@ class WalletResolver:
             if use_cache and (hit := cached_wallet(handle, self.cache_path)):
                 return hit
             try:
-                return await self._resolve_from_balances(handle, balances)
+                return await self._resolve_from_holders(handle, fomo, balances, swaps)
+            except Exception as exc:
+                log.warning("Solana holder discovery failed for %s: %s", handle, exc)
+                return None
+
+    async def _holder_groups(self, fomo: Any, mints: list[str]) -> dict[str, Any]:
+        """`/hodlers/top` for several tokens, by token address.
+
+        The batch shape is what FOMO's own token page uses and the `tokens`
+        parameter is an array, but it has only ever been observed with one
+        entry. Any token the batch does not answer for is asked about on its
+        own rather than silently dropped, so a cap on the server side costs
+        requests instead of costing the route.
+        """
+        groups: dict[str, Any] = {}
+        try:
+            batch = await fomo.token_holders_many(mints, SOLANA_NETWORK_ID)
+        except Exception as exc:
+            log.info("batched holder lookup failed: %s", exc)
+            batch = []
+        for group in parse_holder_groups(batch):
+            if group.address:
+                groups[group.address] = group
+
+        missing = [mint for mint in mints if mint not in groups]
+        if missing and len(missing) < len(mints):
+            log.info("holder batch answered %d of %d token(s); asking for the rest "
+                     "one at a time", len(groups), len(mints))
+        for mint in missing:
+            try:
+                single = await fomo.token_holders(mint, SOLANA_NETWORK_ID,
+                                                  background=True)
+            except Exception as exc:
+                log.debug("holder lookup failed for %s: %s", mint, exc)
+                continue
+            for group in parse_holder_groups(single):
+                groups[group.address or mint] = group
+        return groups
+
+    async def _solana_owner_amounts(self, mint: str) -> list[tuple[str, float]]:
+        """(owner, human amount) for one mint, for the holder matcher.
+
+        `_helius_token_balances` returns raw integers because the balance
+        route fingerprints them exactly; `/hodlers/top` publishes a rounded
+        human amount, so this scales by the mint's decimals to meet it.
+        """
+        totals = await self._helius_token_balances(mint)
+        if not totals:
+            return []
+        supply = await self.rpc("getTokenSupply", [mint])
+        decimals = ((supply or {}).get("value") or {}).get("decimals")
+        if decimals is None:
+            log.debug("no decimals for %s; cannot scale holder amounts", mint)
+            return []
+        scale = 10 ** int(decimals)
+        return [(owner, raw / scale) for owner, raw in totals.items()]
+
+    async def _resolve_from_holders(
+        self, handle: str, fomo: Any, balances: Any, swaps: Sequence[dict]
+    ) -> str | None:
+        positions = solana_balance_positions(balances)[:HODLER_TOKENS]
+        if not positions:
+            log.info("no Solana wallet match for %s: no usable Solana balances", handle)
+            return None
+
+        groups = await self._holder_groups(fomo, [p.mint for p in positions])
+        if not groups:
+            log.info(
+                "no Solana wallet match for %s: FOMO published no holder list "
+                "for any of its %d position(s)", handle, len(positions),
+            )
+            return None
+
+        # A token whose published holder list does not name this trader can
+        # never name their wallet, and finding that out costs no on-chain call.
+        named = [group for position in positions
+                 if (group := groups.get(position.mint))
+                 and any(row.handle.lower() == handle for row in group.holders)]
+        if not named:
+            log.info(
+                "no Solana wallet match for %s: not in the published top holders "
+                "of any of its %d position(s)", handle, len(positions),
+            )
+            return None
+        log.info(
+            "holder route: %s is a published top holder of %d of its %d position(s)",
+            handle, len(named), len(positions),
+        )
+
+        evidence: dict[str, list[str]] = {}
+        for group in named:
+            onchain = await self._solana_owner_amounts(group.address)
+            if not onchain:
+                continue
+            # The cache-grade matcher: tolerant of FOMO's display rounding,
+            # and unique in both directions or it refuses to pair at all.
+            matches = confident_matches(group.holders, onchain)
+            owners = [wallet for wallet, holder in matches.items()
+                      if holder.handle.lower() == handle]
+            if len(owners) != 1:
+                log.debug(
+                    "holder route: %s matched %d wallet(s) on %s",
+                    handle, len(owners), group.address,
+                )
+                continue
+            owner = owners[0]
+            evidence.setdefault(owner, []).append(group.address)
+            if len(evidence[owner]) >= 2:
+                return self._save_derived_match(
+                    handle, owner,
+                    source="hodlers+amount+2tokens",
+                    confirmed=len(evidence[owner]),
+                    detail=f"{len(evidence[owner])} published holder position(s)",
+                    extra={"hodlerToken": evidence[owner][0]},
+                )
+
+        singles = [(owner, tokens) for owner, tokens in evidence.items()
+                   if len(tokens) == 1]
+        if len(singles) == 1:
+            owner, tokens = singles[0]
+            ok, how, confirmed = await self._corroborate(handle, owner, swaps)
+            if ok:
+                return self._save_derived_match(
+                    handle, owner,
+                    source=f"hodlers+amount+{how}",
+                    confirmed=confirmed,
+                    detail=f"a published holder position on {tokens[0][:12]}",
+                    extra={"hodlerToken": tokens[0]},
+                )
+
+        log.info(
+            "no Solana wallet match for %s: %d published position(s), "
+            "%d unambiguous owner(s), no verified owner",
+            handle, len(named), len(evidence),
+        )
+        return None
+
+    async def resolve_from_balances(
+        self, user: Any, balances: Any, swaps: Sequence[dict] = (),
+        use_cache: bool = True,
+    ) -> str | None:
+        """Fallback: map exact FOMO SPL balances to their on-chain owner.
+
+        `swaps` is optional and only reaches the corroboration gate, where it
+        upgrades the check from "this wallet has touched FOMO" to "this wallet
+        made these trades".
+        """
+        handle = (getattr(user, "handle", "") or "").lower()
+        if not handle:
+            return None
+        if use_cache and (hit := cached_wallet(handle, self.cache_path)):
+            return hit
+        lock = self._locks.setdefault(handle, asyncio.Lock())
+        async with lock:
+            if use_cache and (hit := cached_wallet(handle, self.cache_path)):
+                return hit
+            try:
+                return await self._resolve_from_balances(handle, balances, swaps)
             except Exception as exc:
                 log.warning("Solana balance discovery failed for %s: %s", handle, exc)
                 return None
 
-    async def _resolve_from_balances(self, handle: str, balances: Any) -> str | None:
+    async def _resolve_from_balances(
+        self, handle: str, balances: Any, swaps: Sequence[dict] = ()
+    ) -> str | None:
         positions = solana_balance_positions(balances)[:6]
         if not positions:
             log.info("no Solana wallet match for %s: no usable Solana balances", handle)
@@ -1046,23 +1291,30 @@ class WalletResolver:
                 if amount in position.raw_amounts
             }
             if len(matches) != 1:
+                log.debug(
+                    "balance fingerprint for %s on %s matched %d owner(s)",
+                    handle, position.mint, len(matches),
+                )
                 continue
             owner = next(iter(matches))
             evidence.setdefault(owner, []).append(position.mint)
             if len(evidence[owner]) >= 2:
                 return self._save_balance_match(handle, owner, evidence[owner])
 
-        # One exact balance is high-entropy evidence, but confirm that the owner
-        # actually co-signed a FOMO-sponsored transaction before caching it.
+        # One exact balance is high-entropy evidence, but confirm the owner
+        # really is this trader before caching it -- against their own swaps
+        # where the caller supplied them, against the sponsor otherwise.
         singles = [(owner, mints) for owner, mints in evidence.items() if len(mints) == 1]
         if len(singles) == 1:
             owner, mints = singles[0]
-            if await self._has_fomo_sponsored_transaction(owner):
-                return self._save_balance_match(handle, owner, mints)
+            ok, how, confirmed = await self._corroborate(handle, owner, swaps)
+            if ok:
+                return self._save_balance_match(handle, owner, mints, how, confirmed)
 
         log.info(
-            "no Solana wallet match for %s: %d balance fingerprint(s), no verified owner",
-            handle, len(positions),
+            "no Solana wallet match for %s: %d balance fingerprint(s), "
+            "%d unambiguous owner(s), no verified owner",
+            handle, len(positions), len(evidence),
         )
         return None
 
@@ -1137,6 +1389,7 @@ class WalletResolver:
 
     async def adopt_holder_matches(
         self, matches: dict[str, str], token: str = "",
+        swaps_by_handle: dict[str, Sequence[dict]] | None = None,
     ) -> dict[str, str]:
         """Persist wallet -> handle pairs found in FOMO's own holder list.
 
@@ -1146,12 +1399,15 @@ class WalletResolver:
 
         A cached wallet is permanent and is trusted by `/fomo` and `/wallet`,
         so this applies the same bar `_resolve_from_balances` uses for a single
-        fingerprint: the wallet must have co-signed a FOMO-sponsored
-        transaction. That is what separates a FOMO trader from a whale who
-        merely happens to hold the matching amount. Existing mappings are never
-        overwritten; a disagreement is logged and skipped.
+        fingerprint, through the same `_corroborate` gate. `/token` renders a
+        card for a token, not for a trader, so it holds no swap rows for the
+        handles it names and cannot get them without a FOMO request each --
+        which means this path takes the weaker sponsor check. `swaps_by_handle`
+        is there for callers that already have the rows; supplying them
+        upgrades the gate to the candidate's own trade history.
 
-        Returns the pairs actually written.
+        Existing mappings are never overwritten; a disagreement is logged and
+        skipped. Returns the pairs actually written.
         """
         written: dict[str, str] = {}
         for wallet, handle in matches.items():
@@ -1175,14 +1431,16 @@ class WalletResolver:
                          wallet, claimed[0], handle)
                 continue
             try:
-                corroborated = await self._has_fomo_sponsored_transaction(wallet)
+                corroborated, how, confirmed = await self._corroborate(
+                    handle, wallet, (swaps_by_handle or {}).get(handle, ()),
+                )
             except Exception as exc:
-                log.debug("sponsor check failed for %s: %s", wallet, exc)
+                log.debug("corroboration failed for %s: %s", wallet, exc)
                 continue
             if not corroborated:
                 log.info(
-                    "holder match %s -> @%s not adopted: no FOMO-sponsored "
-                    "transaction on that wallet", wallet, handle,
+                    "holder match %s -> @%s not adopted: %s did not corroborate "
+                    "that wallet", wallet, handle, how,
                 )
                 continue
 
@@ -1192,8 +1450,8 @@ class WalletResolver:
                 entry = {}
             entry.update({
                 "wallet": wallet,
-                "confirmed": 1,
-                "walletSource": "hodlers+amount+fomo-sponsor",
+                "confirmed": confirmed,
+                "walletSource": f"hodlers+amount+{how}",
                 "resolvedAt": int(time.time()),
             })
             if token:
@@ -1204,21 +1462,39 @@ class WalletResolver:
             log.info("adopted %s -> @%s from FOMO's holder list", wallet, handle)
         return written
 
-    def _save_balance_match(self, handle: str, owner: str, mints: list[str]) -> str:
+    def _save_balance_match(
+        self, handle: str, owner: str, mints: list[str],
+        how: str = "", confirmed: int | None = None,
+    ) -> str:
+        """Record a derived match and, honestly, what let it in.
+
+        Two independent tokens agreeing needs no third-party gate, and used to
+        be filed as `fomo-sponsor` anyway -- a check that path never ran.
+        """
+        gate = how or f"{len(mints)}mints"
+        return self._save_derived_match(
+            handle, owner,
+            source=f"balance+helius+{gate}",
+            confirmed=len(mints) if confirmed is None else confirmed,
+            detail=f"{len(mints)} exact balance fingerprint(s)",
+        )
+
+    def _save_derived_match(
+        self, handle: str, owner: str, *, source: str, confirmed: int,
+        detail: str, extra: dict[str, Any] | None = None,
+    ) -> str:
         cache = _load_cache(self.cache_path)
         entry = cache.get(handle)
         if not isinstance(entry, dict):
             entry = {}
         entry.update({
             "wallet": owner,
-            "confirmed": len(mints),
-            "walletSource": "balance+helius+fomo-sponsor",
+            "confirmed": confirmed,
+            "walletSource": source,
             "resolvedAt": int(time.time()),
+            **(extra or {}),
         })
         cache[handle] = entry
         _save_cache(cache, self.cache_path)
-        log.info(
-            "resolved Solana %s -> %s from %d exact balance fingerprint(s)",
-            handle, owner, len(mints),
-        )
+        log.info("resolved Solana %s -> %s from %s", handle, owner, detail)
         return owner

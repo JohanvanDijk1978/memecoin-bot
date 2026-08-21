@@ -11,3 +11,5 @@ pump_evm_cache.json
 pump_evm_cache.json.tmp
 pump_profile_cache.json
 pump_profile_cache.json.tmp
+connected_cache.json
+connected_cache.json.tmp

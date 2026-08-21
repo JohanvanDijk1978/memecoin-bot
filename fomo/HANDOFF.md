@@ -1,11 +1,25 @@
-# fomo bot — handoff (2026-08-20)
+# fomo bot — handoff (2026-08-21)
 
 ## Where this stands
 
 Sessions 26-32 were one continuous run on wallet identity: why it failed, why
 it silently failed, and how to stop paying a chain scan for it. Session 33
 carried the same discipline to Pump, where the mapping is published rather than
-inferred and the only thing worth engineering is not asking twice.
+inferred and the only thing worth engineering is not asking twice. Session 34
+turned to the surface itself: fourteen slash commands became eight, `/token`
+grew to a paged top 50, and `/thesis` reads what those holders wrote. Session
+35 went back to identity: the published-position route now runs for a single
+handle and runs *first*, and every derived route shares one corroboration gate
+that asks whether a candidate made this trader's trades rather than whether it
+has ever touched FOMO. Session 36 widened the surface again: `/token` grew a
+Top Traders list beside its holders, and `/connected` is a new command that
+looks for wallets in the same cluster as a trader's — and refuses to claim
+ownership from a transaction pattern. Session 37 fixed what that trader list
+was measuring: it ranked on tokens moved, which is activity, and it now runs a
+cost-basis ledger and ranks on PnL and ROI. Session 38 fixed what it was
+measuring it *over*: the sample reached 218 transactions of a live memecoin and
+ranked its newest buyers, so depth is now treated as a correctness parameter
+and the card says whether it read the token's full history.
 
 The arc, shortest version:
 
@@ -21,10 +35,17 @@ The arc, shortest version:
    leaderboard). Matching those against on-chain owners is a wallet for the
    price of one holder query -- no sponsor index, no block scan. `/token` names
    holders from it live, and confirmed matches are adopted into the cache.
+4. Holders are a ranked query; traders are an aggregation. `/token`'s Top
+   Traders reads transfer history from the same providers, says what window it
+   covers, and throws away the venue rather than ranking it. `/connected`
+   applies the same discipline to identity: score the evidence, cap the band by
+   how many independent signals agree, and exclude infrastructure structurally
+   rather than by reputation.
 
 ### Run these first on a fresh session
 
 ```powershell
+python fomo_resolve_diag.py scrill777 --chain solana -v   # session 35's open run
 python fomo_map_top.py --dry-run        # match rate before writing anything
 python fomo_map_top.py --top 100        # bulk-label the leaderboard
 python fomo_resolve_diag.py <handle>    # why one handle still has no wallet
@@ -33,7 +54,8 @@ python pump_resolve_diag.py <wallet>    # why one wallet has no Pump profile
 ```
 
 `fomo_map_top.py` has never been run live -- the sandbox has no RPC or
-fomo.family egress (section 5). Its first real run is the open item.
+fomo.family egress (section 5). Its first real run is the open item, and
+`/thesis` on a real token is the second (session 34).
 
 ### Open
 
@@ -59,6 +81,637 @@ fomo.family egress (section 5). Its first real run is the open item.
    swap it in.
 7. **`pump_map_top.py` and `pump_resolve_diag.py` have never run live** — same
    sandbox egress limit as `fomo_map_top.py` (section 5).
+8. **`/feed/token/sortedThesis` has never been probed.** `/thesis` prefers it
+   and falls back to the verified holder + trade-detail pair, so a wrong guess
+   costs requests rather than correctness — but the fallback is one request per
+   holder, so it is worth confirming on borz which route actually answers.
+9. **`_das_holders` has never made a real request.** `/token` past holder 20
+   needs a Helius endpoint in `SOLANA_RPC`; without one it silently shows the
+   shorter list (with a log line saying so).
+10. **The batched `/hodlers/top` has never been sent with more than one token.**
+    The `tokens` parameter is an array by construction and the per-token
+    retry covers a cap, but which one FOMO actually accepts is unknown until
+    a live run (session 35).
+11. **Top Traders has never made a real request.** Every provider shape is
+    unit-tested from a recorded or documented body, but the Helius parsed
+    route (`/v0/addresses/{mint}/transactions`) and the descending
+    `alchemy_getAssetTransfers` scan have not been called live from this
+    project. The first `/token` + Top Traders on borz is what confirms them;
+    the card names the source it used in its footer, so a fallback is visible
+    rather than silent. Session 37 added a money path on top of the same
+    responses — Solana's quote legs come free with the page, the EVM one costs
+    a venue query — and none of it has been called live either. The card
+    reports how many rows it could price, so an unpriced sample is visible.
+12. **`/connected` has never made a real request either**, and its two
+    numbers most in need of a live calibration are `POOL`-style exclusion and
+    `CONNECTED_HIGH_DEGREE` (40). Run it on a handle with a known second
+    wallet before trusting the bands.
+13. **Cross-chain evidence is identity-based only.** `link_cross_chain` fires
+    when the *same cached identity* is a candidate on two chains. Bridge
+    tracing — following a deposit on one chain to a withdrawal on another —
+    is not implemented, and should not be until a route can prove the pairing
+    rather than infer it from timing.
+14. **`/connected` prices only SOL, native EVM coins and stablecoins.** Every
+    other asset is counted as an unpriced transfer, so a relationship carried
+    entirely in memecoins earns the repetition and longevity signals but never
+    the value one. Pricing historical transfers properly needs a historical
+    price source the project does not have.
+15. **The sponsor index reaches back under an hour** and shrinks as FOMO grows.
+    Raising `MAX_SIG_PAGES` buys reach linearly; anchoring
+    `getSignaturesForAddress` with a `before` signature taken from the block
+    at the swap's slot would remove the horizon entirely, for one extra call —
+    worth probing whether Helius accepts a `before` that does not involve the
+    address.
+16. **Quote prices are current, not historical.** SOL, WETH and WBNB legs are
+    converted at today's DEX Screener price rather than the price at trade
+    time, because the project has no historical price source. Over a sample
+    that reaches hours to days the error is small and symmetric across the
+    ranking, but a wallet whose trades span a large move in the quote asset
+    will read slightly off. Stablecoin legs are exact, and a historical price
+    feed is the one dependency that would remove this entirely.
+17. **Robinhood Chain trader rows cannot be priced.** Its Blockscout route
+    returns only the token's own transfers and no quote-asset list is
+    configured for the chain, so `/token` there ranks on what it can read and
+    says the sample priced nothing.
+18. **A very busy token still cannot be covered end to end.** 30 pages is
+    3,000 parsed transactions; a mint with 50,000 will always be a window, and
+    the card marks it `+`. Covering those properly needs a different route
+    than paging from the head — a Helius webhook or a stored index — and is
+    not worth building until a real token demands it.
+
+## Session 38 — the ranking was right, the sample was not
+
+Session 37's first live run, on `$PX`
+(`7RY9w8brhM4DgQwiwn4D9cVnk4L7RJuZESS3mEKmpump`), produced a board whose top
+row had made **$51.84**. Padre's board for the same token had the top wallet at
+**$9.28K** and the second at **$4.16K**. The ledger was not wrong; it was
+reading the wrong 218 transactions.
+
+### The diagnosis, from the card itself
+
+The card said `218 recent transactions · 21 Aug – 21 Aug 2026+`, and every row
+had an entry market cap between $145K and $150K against a $173K current cap —
+which is to say every ranked wallet was up the same 15-19%, because every
+ranked wallet had bought in the last few minutes. Padre's rows bought at $4.2K,
+$23.4K and $29K market caps and sold at $110K-$167K.
+
+**A token's best traders bought at its beginning.** Ranking the newest 500
+parsed transactions of a live memecoin does not rank a smaller slice of the
+same population; it ranks a *different* population — the tail. That makes the
+depth of the sample a correctness parameter, not a performance one, which is
+the thing session 36 and 37 both got wrong by treating 5 pages as a sensible
+default.
+
+Two facts fell out of the same 218:
+
+- 500 parsed transactions produced 218 with a mint transfer. Reverted
+  transactions (now skipped) and non-trade interactions are most of the rest,
+  so the useful yield of a Helius page is roughly half of it.
+- Nothing in the sample reached the bonding-curve phase, so no wallet in it had
+  sold anything bought earlier — the whole board was open positions.
+
+### What changed
+
+**Depth.** `TOKEN_TRADER_SOLANA_PAGES` 5 -> 30 (3,000 parsed transactions,
+enough for a young token's entire life), `TOKEN_TRADER_EVM_PAGES` 2 -> 5,
+`TOKEN_TRADER_RPC_SIGNATURES` 200 -> 400. Paging still stops the moment the
+history runs out, so a quiet token costs what it always did.
+
+**A wall clock, because paging is sequential.** `TOKEN_TRADER_BUDGET_SECONDS`
+(60s) bounds the wait independently of the page count. If it fires before the
+first page returns anything, the parsed route does *not* fall through to the
+slower raw-RPC fallback — spending a budget that is already gone would make a
+slow token slower and no more accurate.
+
+**"Full history" is now a claim the card makes, or does not.** Reaching the
+token's first transaction prints `3,184 transactions · full history`; a budget
+stopping short prints `218 recent transactions+`. A page that *failed* now
+counts as cut short too — it used to break out of the loop leaving
+`truncated=False`, which would have claimed complete coverage after a provider
+blip.
+
+**Gifts are a cost basis, not a gap.** Session 37 treated every unpriced
+acquisition alike and excluded the sale that consumed it. Padre's rows 4 and 7
+are wallets that bought *nothing* and sold $2.57K and $1.66K — dev allocations
+or transfers in — and excluding them was wrong in a way that is easy to state:
+a transaction in which **nothing of value moved at all** is a gift, and its
+cost basis is genuinely zero. Inventory is now three buckets:
+
+    paid      readable money leg           -> proceeds - weighted-average cost
+    free      nothing else moved at all    -> proceeds, cost basis zero
+    unknown   value moved, unreadable      -> realises nothing
+
+A sale consumes all three in proportion. Unrealised PnL counts only the paid
+bucket, so a wallet sitting on an unsold allocation is not credited with a
+profit it never traded for — that is what Top Holders is for. A free-only
+wallet shows a real PnL and no ROI, because no capital was ever at risk.
+
+Two guards make this safe rather than reckless. Gift detection is off entirely
+when there is no price table, since without one every swap looks like a
+transaction with no money in it. And a transaction that moved *any* asset this
+module cannot price sets `other_value`, so a memecoin-for-memecoin swap is
+`unknown` rather than free. The stated trade-off: sub-dust native movement
+(rent, 0.00203928 SOL) does not set that flag, so a genuine sub-$1 swap reads
+as a transfer — a $1 error that cannot reach a PnL board, in exchange for
+airdrops that create a token account still reading as gifts.
+
+### `token_traders_diag.py`
+
+New, and the thing to run before arguing with a number. Same client `/token`
+drives, three sections in the order they go wrong:
+
+    coverage   how many transactions, what window, and did paging reach the
+               token's first transaction (exit 0) or get cut short (exit 1)
+    pricing    how many ranked wallets carry a PnL at all
+    ledger     --wallet dumps one address trade by trade, with each trade's
+               value or `free`, against which Padre can be read directly
+
+`TokenIntelligenceClient.last_sample` holds the flows behind the most recent
+ranking so `--wallet` costs no second pass. Nothing in the bot reads it.
+
+### Verification
+
+454 conventional unit tests (441 from session 37, all passing except the six
+whose semantics this session deliberately changed and which were rewritten; 19
+new — 4 for gift detection and its two guards, 4 for the three-bucket ledger, 6
+for sample depth and the truncation flags, 1 for the diagnostic hook, 4 for the
+card's coverage wording), the standalone offline Solana suite, `pyflakes` clean
+against the pre-existing baseline, and `py_compile` on every module.
+
+Rebuilding Padre's `$PX` table as flows and running it through the new ledger
+reproduces it: DEV `+$9,290` at a $4.3K entry (Padre $9.28K), `o6cqFfUT`
+`+$4,163` at $23.7K (Padre $4.16K), `y2AoRfEP` `+$2,570` with no ROI (Padre
+$2.57K, bought 0). The late buyer that used to be rank 1 lands last at `-$9.90`.
+
+**Still not verified live.** The next `/token 7RY9…pump` on borz is the run
+that matters, and `python token_traders_diag.py 7RY9w8brhM4DgQwiwn4D9cVnk4L7RJuZESS3mEKmpump`
+is the way to read it: if `coverage` still says CUT SHORT, raise
+`TOKEN_TRADER_SOLANA_PAGES` and `TOKEN_TRADER_BUDGET_SECONDS` before comparing
+against Padre again.
+
+## Session 37 — Top Traders means best, not busiest
+
+`/token`'s Top Traders shipped in session 36 ranked on `bought + sold`. That is
+activity, and the card called it quality. Two wallets show why it was the wrong
+number: a whale who makes one $120,000 buy and never sells outranked everybody
+while being flat, and a wallet that turned $3,255 into $15,705 sat below anyone
+who had churned more tokens for a 5% gain. Volume is a property of the wallet's
+size, not of its judgement.
+
+### What replaced it
+
+`token_traders.py` now runs a **weighted-average cost-basis ledger** per
+address and ranks on the result. Per wallet, oldest trade first:
+
+    buy   -> priced_position += qty ; priced_cost += usd ; invested += usd
+    sell  -> realised += proceeds x (matched/qty) - cost x (matched/position)
+
+Realised PnL closes against the moving average cost, unrealised PnL is the
+remaining priced position at the card's current price, and total PnL is the
+two added. ROI is `total PnL / invested capital x 100`. The displayed entry is
+`total spent / total bought` -- the weighted average, not the mean of the trade
+prices, which on 100 @ $1 plus 900 @ $0.10 differ by a factor of three -- shown
+as the market cap it implies (`entry x market cap / current price`) because
+that is the unit a memecoin entry is discussed in.
+
+### Where the dollars come from, and where they honestly do not
+
+A swap's money leg sits in the same transaction as its token leg, so the
+question was never whether the price exists but whether the route already had
+it in hand:
+
+| route | the money leg | cost |
+|---|---|---|
+| Helius parsed | `tokenTransfers` for USDC/USDT + `nativeTransfers` for SOL, already on the page | nothing |
+| raw `getTransaction` | the other mints' `pre/postTokenBalances` + `pre/postBalances` | nothing |
+| Alchemy (EVM) | the *venue's* WETH/USDC transfers, joined by transaction hash | one bounded query per pool, two pools |
+
+The EVM asymmetry is the interesting one. A token page carries only that token,
+and the trader's own money usually reaches them through a router rather than
+the pool -- so their address shows no quote movement at all. The pool's does,
+and the pool is on the other side of every swap in the sample, so its USD
+movement in a transaction *is* the size of that swap. `attach_quote_values()`
+tries the trader's own leg first and falls back to the venue's, split across
+the traders in that transaction in proportion to how much of the token each
+moved (exact for the ordinary one-trader swap, a stated approximation for a
+batched one). The venue is queried as sender and as recipient, so both calls
+share one `seen` set -- counting one swap's money twice would double every
+figure derived from it.
+
+Four things are deliberately *not* invented:
+
+1. **An unpriced trade is unpriced.** No valuation at the current price, no
+   filling in from the token's own chart.
+2. **An unpriced acquisition never becomes free profit.** Inventory is kept in
+   two buckets, priced and unpriced; a sale consumes both in proportion and only
+   the priced part produces realised PnL. Without that, every airdrop farmer
+   tops the board with an infinite return.
+3. **Selling more than the window saw bought is excluded.** That inventory
+   predates the sample and its cost is unknowable; booking the proceeds as pure
+   profit would have been the single largest source of fake winners.
+4. **Historical quote prices are current ones.** SOL/WETH/WBNB are priced from
+   DEX Screener now, not at trade time. Over a sample that reaches hours to days
+   this is small; it is the one approximation in the money path and it is
+   written down here rather than hidden. Stablecoin legs have no such error.
+
+Every row that hit any of these says so: `◐` for an open position (PnL includes
+an unrealised part), `~` for a history that was partly unpriced or older than
+the sample.
+
+### Ranking and the card
+
+Default is **PnL descending** -- it is the question the card is asked, and ROI
+alone would put a $20 position that happened to 10x above a wallet that made
+five figures. `Sort:` cycles PnL -> ROI -> Volume and costs no request: the
+client returns `candidate_pool()`, the union of the top 50 under each ranking,
+and the bot re-ranks locally. ROI ranking applies a $50 floor under the
+denominator, below which a return is a rounding artefact. Volume survives as an
+explicit choice, never as the default. A wallet with no priced leg at all ranks
+below every wallet that has a number rather than being dropped or scored zero.
+
+Rows are two lines: identity (unchanged -- the same `_wallet_identity` the
+holders use, so a wallet named on one list is named on the other), then the
+three figures in one inline-code span, right-aligned and padded to widths
+computed across the whole list, which is the only way columns line up in a
+Discord embed. Green/red/white marks the sign. The `/token` header's price now
+uses `fmt_price` rather than `fmt_usd`, which was rendering every memecoin as
+`$0.00`.
+
+### Files
+
+`token_traders.py` (ledger, quote extraction, ranking), `token_intelligence.py`
+(quote prices, the EVM venue join, `price_usd` through to `top_traders`),
+`fomo_bot.py` (rows, columns, sort button, embed copy), `test_token_traders.py`,
+`test_fomo_response.py`, `README.md`.
+
+### Verification
+
+441 conventional unit tests (389 pre-existing, all passing; 52 new -- 10 for
+quote extraction across both Solana routes, 6 for the EVM venue join, 4 for
+quote-asset pricing, 12 for the ledger arithmetic, 7 for ranking, 6 at the
+client level and 7 for the card), the standalone offline Solana suite, `pyflakes` clean against the pre-existing
+baseline, and `py_compile` on every module.
+
+Not verified live: the sandbox still has no fomo.family, Helius or Alchemy
+egress (section 5). **The first `/token` on borz is what confirms the money
+path** -- the card names its source, counts what it could price, and says
+plainly when a sample priced nothing at all, so a route that fails to price is
+visible rather than silently producing zeros.
+
+## Session 36 — the other half of a token, and the other half of an identity
+
+Two features, one discipline: say what the data supports, and say what it does
+not.
+
+### `/token` — Top Traders beside Top Holders
+
+Top Holders answers what the chain answers cheaply: one ranked query per chain
+(Helius DAS, CMC, Blockscout) and the list is the answer. Top Traders asks who
+has been *moving* the token, and no provider in this stack has a route for
+that — `token_page_sniff.py` recorded the whole FOMO token page and its tabs
+are Holders, Thesis and Activity. So it is aggregated out of transfer history
+instead, from the same providers:
+
+    Solana  Helius parsed transactions for the mint (/v0/addresses/{mint}/…)
+    EVM     alchemy_getAssetTransfers, descending; Blockscout for Robinhood
+
+`token_traders.py` is the part with no network in it. Every provider shape is
+reduced to one unit — a `TokenFlow`: one address, one signed token delta, one
+transaction reference — so a transfer pair and a balance delta aggregate
+together without either pretending to be the other. That is what lets the
+raw-RPC fallback (`preTokenBalances`/`postTokenBalances`, batched ten to a
+request) share every downstream test with the parsed route.
+
+Three decisions are worth keeping:
+
+**Volume is bought + sold, not the net.** The net is the position, and Top
+Holders already shows it. A trader who bought and sold the same million tokens
+moved two million.
+
+**Descending from the head is right here and wrong in `fomo_evm.py`.** That
+module hunts one historical transaction and has to anchor on its block; this
+one wants recent activity and nothing else. The handoff's rule about never
+making a mint the index is about *reaching a specific old transaction*, which
+this never does.
+
+**The sample is stated, not implied.** Every page's description reports how
+many transactions were read and the dates they span, with a `+` when the budget
+cut it short, and the footer names which provider answered. A silent fallback
+to a smaller sample would otherwise look identical to a quiet token.
+
+The pool problem needed no label service. Liquidity sits on one side of nearly
+every swap, so an address appearing in ≥20% of the sampled transactions is the
+venue — `infrastructure_addresses()`. The test is skipped below 12 sampled
+transactions, where three participants would all look like pools.
+
+`TokenCardView` is `PaginatedEmbedView` plus a toggle. Holders are still
+rendered before the card is sent; traders are rendered on the first press and
+kept, so toggling afterwards is a message edit. Each list remembers its own
+page. A failed or empty load is remembered too, and shows a card rather than an
+error — the holders are still fine.
+
+### `/connected` — evidence, not ownership
+
+The honest framing was most of the design. Nothing observable on a chain says
+two wallets have the same owner, so the command reports how strong the evidence
+is and repeats on every page that the number is not a probability of ownership.
+
+`score_relationship()` awards eight signals — repetition, reciprocity,
+longevity, spread, value, funding, a cached identity, and cross-chain — and
+then does the thing that matters: **the band is capped by how many independent
+signals fired** (four for Very High, three for High, two for Possible). One
+very loud signal is a worse case than three quiet ones agreeing, and without
+that cap a hundred transfers on a single day would outrank nine months of
+regular reciprocal funding. A single transfer is never scored.
+
+Filtering is three passes, cheapest first, and the middle one is where the
+interesting asymmetry lives:
+
+1. Known addresses — exchanges, bridges, routers, programs, burn addresses,
+   FOMO's own gas sponsor. Extendable at runtime via `CONNECTED_LABELS_FILE`,
+   because a static list in a release is exactly the thing that goes stale.
+2. Account type. On Solana this is decisive: a real wallet is owned by the
+   system program and is not executable, which rules out pools, token
+   accounts, vaults and PDAs *for what they are*. **On EVM the same test would
+   be catastrophic — FOMO's own wallets are ERC-4337 contracts**, so contract
+   code there is a scoring penalty and a printed caution, waived when the
+   wallet cache already knows the address as a handle.
+3. Degree. One bounded page of the candidate's own history; ≥40 distinct
+   counterparties is a service whatever it is called. This is the pass that
+   catches what no list knows — an unlabelled deposit address, a new router, a
+   market maker — and it costs a request per candidate, so it runs last and
+   only on survivors.
+
+Cross-chain is deliberately narrow. `link_cross_chain()` fires only when the
+*same verified identity* is a candidate on two chains, which the wallet cache
+states rather than this module inferring. Bridge tracing is not implemented and
+is listed as an open item rather than approximated.
+
+USD is only claimed for SOL, native EVM coins and stablecoins. A memecoin
+transfer is counted and reported as unpriced. That costs the value signal on
+some real relationships and was still the right trade: an invented number would
+have propagated into the score.
+
+A whole run is cached in `connected_cache.json` through the same
+`ProfileCache` that Pump profiles use — keyed by the wallet set *and* the bar
+it ran at, because the expensive half is the paging and it does not get cheaper
+for the second asker.
+
+The card defaults to High and above; `strict:true` shows Very High only, and
+the weaker band sits behind a button rather than being dropped. A select menu
+opens an ephemeral evidence panel with explorer links for the sampled
+transactions, so the claim can be checked rather than believed.
+
+### Verification
+
+**389 conventional unit tests** (309 pre-existing, all still passing; 80 new —
+25 for trader parsing, ranking, pool detection and the client's paging, cache
+and fallbacks; 36 for `/connected`'s labels, relationship building, scoring
+bands, cross-chain linking, both parsers, the report round-trip and the
+analyzer end to end; 19 across the two new cards, the trader rows, the toggle
+and the evidence panel), the standalone offline Solana suite, `pyflakes` clean
+against the pre-existing baseline, and `py_compile` on every module.
+
+Two exclusion tests deserve a note: they were vacuous on the first pass,
+because the pool account and the service wallet had too little activity to
+score in the first place. They now carry the *same* strong pattern as the real
+candidate, and a third test asserts both would have been reported with the
+filters disabled — so the filters are demonstrably what excludes them.
+
+Not verified live: the sandbox still has no fomo.family, Helius or Alchemy
+egress (section 5). Open items 11-14 are the runs that close this session.
+
+## Session 35 — the cheapest route runs first, and the gate got teeth
+
+`fomo_resolve_diag.py scrill777` failed at `discovery` with everything in
+place: 30 usable Solana swaps, 10 Solana positions, four routes configured and
+a Helius RPC. Reading the log against the code turned up two structural
+problems rather than one broken handle.
+
+**The sponsor index has degraded to under an hour of reach.** The newest picked
+swap sat 8,510 slots behind the head — about 57 minutes — and 12,000 sponsored
+signatures still did not page back to it. That is above 3.5 signatures/second on
+the sponsor account. Session 27 predicted the cap would become a moving target;
+it has moved to roughly one hour, so three of the four picked swaps (all from
+early July) were unwinnable before they started.
+
+**The cheapest identity source in the project only ran as a side effect of
+somebody typing `/token`.** Sessions 30 and 32 established that FOMO publishes
+exact positions and that matching them against on-chain owners is a wallet for
+the price of one holder query. That never reached the single-handle resolver.
+
+### `resolve_from_holders()` — `/hodlers/top` for one trader
+
+One `/hodlers/top` request covering every Solana token the trader holds. The
+reply says which of those tokens publish a row naming them, and **only those
+cost an on-chain owner query** — a token that does not name the trader can
+never name their wallet, and finding that out costs nothing. `HODLER_TOKENS`
+bounds it at 8 positions.
+
+`holders_query_many()` and `parse_holder_groups()` are the new half of
+`fomo_hodlers.py`. `parse_token_holders` flattens every token's rows together,
+which is right for `/token` (one mint) and wrong here, where which amount
+belongs to which token is the whole point; it is now a thin wrapper over the
+grouped parser. The `tokens` parameter is documented as an array and has only
+ever been observed with one entry, so any token the batch does not answer for
+is asked about on its own — a server-side cap costs requests, not the route.
+
+The match itself is `confident_matches` from session 30: tolerant of the
+rounding FOMO applies to `humanAmount`, and unique in **both** directions — the
+amount must identify exactly one wallet AND that wallet must match exactly one
+trader. That is strictly better than the balance route's exact-integer set
+membership, which has no tolerance and no reverse check.
+
+Two tokens agreeing on one wallet is the evidence and needs no gate. A single
+token goes through corroboration.
+
+### `_corroborate()` — one gate, two rungs, and the difference between them
+
+`_resolve_from_balances` used to write a single-fingerprint match on
+`_has_fomo_sponsored_transaction`: does this wallet appear as a non-fee-payer
+signer on any FOMO-sponsored transaction in its newest 80 signatures (of which
+the newest 40 non-error ones are actually fetched)? A wallet that trades
+elsewhere, or that collects the airdrop spam every Solana wallet collects,
+pushes its FOMO trades out of that window and gets refused. It is also the
+wrong question: it asks whether the wallet has touched the platform, not
+whether it is *this trader*.
+
+`verify_wallet` has always asked the right one — it scans the candidate's own
+signature history for the swaps FOMO reports for this trader — and it was only
+ever used to count confirmations after `resolve()` had already found a
+transaction. It is now the first rung of a shared gate, used by the balance
+route, the new holder route and `/token`'s adoption path alike.
+
+The rung that runs depends on whether the caller has swap rows. `/fomo` and the
+diagnostic do. `/token` does not — it renders a card for a token, not for a
+trader, and getting swaps for each named holder would cost a FOMO request each
+— so adoption keeps the sponsor check, and now says so: `walletSource` records
+which rung passed (`verify2`, `2tokens`, `fomo-sponsor`) instead of labelling
+every balance match `fomo-sponsor` including the two-mint path that never ran
+the check at all.
+
+The distinction that took the most care is **refuted vs inconclusive**.
+`verify_wallet` returns `(confirmed, checked)`. `checked == 0` means it found
+no signatures near any swap time and never got to look, so the weaker rung
+still gets its turn. `checked > 0 and confirmed == 0` means it read the
+wallet's own history and this trader's trades are not in it — that is a
+refusal, and falling through to a weaker check after it would be throwing away
+the better answer. The diagnostic gained a `verification` stage that names
+exactly this outcome, ranked above every "found nothing" rule because a
+candidate that was found and then refused is the most informative thing a run
+can report.
+
+`swap_rows()` exists because of a bug this nearly shipped with: FOMO's swaps
+panel arrives as `{"swaps": [...]}`, and iterating that envelope yields its
+keys, which look like "no usable swaps" rather than like an error — silently
+dropping the gate to its weaker rung. The unwrapping now lives in one place and
+`_resolve` uses it too.
+
+### The order changed
+
+`_resolve_fomo_enrichment` now runs **holders → transactions → balances**. The
+holder route costs one FOMO request plus an on-chain query per naming token;
+`resolve()` costs a 12-page sponsor index and up to four mint scans before its
+first answer. And the enrichment budget is a wall clock that *cancels* what is
+still running (open item 1), so a handle the scan cannot reach used to spend
+the entire budget proving it and never reach the cheap route at all.
+
+Evidence quality does not drop, because the holder route's gate is
+`verify_wallet`: a hit is transaction-backed either way. `fomo_resolve_diag.py`
+runs the same three in the same order, so it still cannot drift from the bot.
+
+Regression coverage (27 new): the gate accepts a confirmed candidate and
+records which rung passed; a refuted candidate never reaches the weaker rung; an
+inconclusive verify still lets the sponsor check answer; a caller with no swaps
+keeps the old behaviour and the old label; one batched request covers every
+position and tokens that do not name the trader cost no on-chain call; two
+tokens agreeing skip the gate; a near-neighbour balance and a wallet two
+traders both match are refused rather than guessed; a batch cap and a batch
+failure both fall back to per-token calls; the enrichment order is
+holders → transactions → balances and both derived routes are handed the
+trader's swaps; and `swap_rows` unwraps either shape. Verification: **308**
+conventional unit tests (281 pre-existing, unchanged except one label
+assertion), the standalone offline Solana suite, `pyflakes` clean against the
+pre-existing baseline, and `py_compile` on every module.
+
+Not verified live: the sandbox still has no fomo.family or Helius egress
+(section 5). **`fomo_resolve_diag.py scrill777 --chain solana -v` is the run
+that matters** — it will say whether the batched `tokens` array is accepted,
+whether scrill777 is a published top holder of any of their 10 positions, and,
+if a candidate turns up, whether `verify_wallet` confirms or refuses it.
+
+### Not done — the rest of that analysis
+
+Four findings from the same reading are still open, and 3 and 4 are cheap:
+
+1. `BLOCK_SPAN` is ±10 slots (~4s) while `TIME_WINDOW` is 120s everywhere
+   else. If FOMO's `createdAt` is the order timestamp rather than the
+   confirmation timestamp, the block route cannot see the transaction. Measure
+   the real drift on a known-good handle before picking a width.
+2. `pick_swaps` has no notion of how far the routes can reach, so it spends
+   attempts on swaps that are past every index and past non-archival `getBlock`
+   retention.
+3. `_helius_token_balances` stops at 3 pages (3,000 token accounts), unsorted
+   and unreported — for a token with more holders the true owner is simply
+   absent, which is indistinguishable from "no match".
+4. `positions[:6]` sorts by USD value, which is backwards: a large position
+   lives in a crowded token, while a small odd one in a quiet token is the
+   better fingerprint.
+
+## Session 34 — the command surface, cut down and paged
+
+Fourteen slash commands became eight. Nothing about identity resolution
+changed; what changed is how much of it the user has to remember.
+
+    /fomo  /pump  /wallet  /token  /thesis  /track  /tracked  /fomotop
+
+Four commands were deleted outright and six collapsed into two:
+
+| gone | why |
+|---|---|
+| `/pumpwallet` | `/wallet` already answers for both platforms |
+| `/fomosearch` | unused next to `/fomo`, which resolves a handle directly |
+| `/fomotrack`, `/pumptrack` | → `/track <platform> <target>` |
+| `/fomotracked`, `/pumptracked`, `/tracksettings`, `/untrack` | → `/tracked` |
+| `/fomountrack`, `/pumpuntrack` | → `/tracked`'s Remove button |
+
+The tree is the contract: `setup_hook` performs one global sync, so a command
+absent from the tree is deleted from Discord on the next start. Nothing extra
+was needed to retire them, and `CommandSurfaceTests` asserts both halves — the
+eight that must exist and the ten that must not.
+
+`/track` is a dispatcher and nothing more. The two halves kept their own
+resolution, baseline snapshot and alert picker (`_track_fomo`, `_track_pump`),
+because they differ in every one of those: FOMO resolves a handle through
+`/v2/users/userHandle/{handle}` and baselines swaps and trades, Pump resolves a
+username *or* a wallet through the profile cache and baselines signatures and
+callouts, and the third alert type is theses on one and callouts on the other.
+Merging past the dispatch would have meant a function full of `if is_fomo`.
+
+`/tracked` is the opposite case. `/tracksettings` and `/untrack` opened the
+*same* list and differed only in the verb, so the list is shown once and the
+verb is a button: **Edit** opens the alert picker for one subscription,
+**Remove** drops every selected one. `TrackedManagerView`'s select callback
+only defers, and that is load-bearing — Discord keeps a select's visible choice
+until the message is edited, so acknowledging without editing is what lets the
+buttons read a selection the user can still see.
+
+### `/token` — the top 50, ten a page
+
+The `holders` choice between 5 and 10 is gone; the count is always 50, across
+five pages turned with Previous/Next. `PaginatedEmbedView` renders every page
+*before* the first is sent, so paging is a message edit: the holder identity
+work — the `/hodlers/top` match, the Pump prefetch, the cache reads — is paid
+once for the whole card, and page 3 can never disagree with page 1. The view
+has no requester check, unlike the selection views: paging changes nothing.
+
+Reaching past the twentieth holder needed a new source.
+`getTokenLargestAccounts` returns at most 20 **token accounts**, several of
+which collapse into one owner, so it cannot answer a top-50 question at all.
+`TokenIntelligenceClient._das_holders` pages Helius DAS `getTokenAccounts`
+instead — the same route and the same reason as `fomo_map_top.py` (session 32).
+It is used only when more than 20 are asked for, and a missing or unresponsive
+Helius endpoint falls back to the old path with a log line rather than
+returning an empty card. `lookup(limit=…)` is now clamped to 1-50 instead of
+being snapped to 5 or 10.
+
+### `/thesis` — what the biggest holders wrote
+
+New. Ranked by position value, five to a page, each entry carrying the handle,
+their X account, position, PnL, hold time and the thesis as a quote.
+
+Two routes carry a thesis and the cheap one is unproven, so `/thesis` tries
+both in order:
+
+1. `/feed/token/sortedThesis` — one request, already sorted, recorded off the
+   wire in session 30 but **never probed**. `parse_thesis_feed` reads it
+   defensively through four plausible envelopes and returns `[]` rather than a
+   half-parsed card when the shape is not recognised.
+2. `/hodlers/top` + `/trades/{tradeId}` — verified in sessions 30 and 9
+   respectively. The holder list names the trade behind each position and the
+   trade detail carries the comment that *is* the thesis. One request per
+   holder, which is exactly why it is second.
+
+Anything that is not a recognised thesis — an exception `_get_many` returned
+inline, a trade with no comment, a row with no handle — is skipped rather than
+raised. `rank_theses` then keeps one entry per handle, largest position first,
+and sorts an unpriced position last rather than first.
+
+`_thesis_quote` quotes line by line: `>>>` would quote every entry that follows
+it, which would swallow the rest of the page.
+
+Verification: **281** conventional unit tests (51 new — 9 thesis parsing, 6
+deep holders, 36 across the token pages, the paginator, the thesis card, the
+two thesis routes, the tracked manager and the command surface; 230
+pre-existing, unchanged), the standalone offline Solana suite, `pyflakes` clean
+against the pre-existing baseline, and `py_compile` on every module.
+
+Not verified live: the sandbox has no fomo.family or Helius egress (section 5),
+so `/feed/token/sortedThesis` has still never been called and `_das_holders`
+has never made a real request. **`/thesis` on a real token is the first thing
+to run on borz** — if the feed route answers, the log stays quiet; if it does
+not, the log says `thesis feed unavailable` or `had no usable rows` and names
+which fallback ran.
 
 ## Session 33 — `/pump` stops re-asking Pump the same question
 

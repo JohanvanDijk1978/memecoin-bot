@@ -43,23 +43,23 @@ def swap(mint: str, amount: float, created: str = "2026-08-18T13:05:59.531Z") ->
     }
 
 
-def transaction(mint: str, amount: float) -> dict:
+def transaction(mint: str, amount: float, owner: str = WALLET) -> dict:
     return {
         "transaction": {
             "message": {
                 "accountKeys": [
                     {"pubkey": FOMO_SPONSOR, "signer": True},
-                    {"pubkey": WALLET, "signer": True},
+                    {"pubkey": owner, "signer": True},
                 ]
             }
         },
         "meta": {
             "preTokenBalances": [
-                {"mint": mint, "owner": WALLET,
+                {"mint": mint, "owner": owner,
                  "uiTokenAmount": {"uiAmount": 0.0}}
             ],
             "postTokenBalances": [
-                {"mint": mint, "owner": WALLET,
+                {"mint": mint, "owner": owner,
                  "uiTokenAmount": {"uiAmount": amount}}
             ],
         },
@@ -190,7 +190,9 @@ class WalletDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 cached["evmWallet"], "0x0232b9afb9160fe479f25dade62fa60ef657bdc5"
             )
-            self.assertEqual(cached["walletSource"], "balance+helius+fomo-sponsor")
+            # Two independent tokens agreeing needs no third-party gate, and
+            # this path never ran one -- the old label said otherwise.
+            self.assertEqual(cached["walletSource"], "balance+helius+2mints")
 
     def test_pick_swaps_uses_distinct_mints(self) -> None:
         rows = [swap(MINT_A, 1), swap(MINT_A, 2), swap(MINT_B, 3)]
@@ -535,3 +537,426 @@ def _async(value):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------- the corroboration gate
+#
+# Every derived route -- exact balances, published holder positions, `/token`
+# adoption -- ends at the same question: is this candidate really this
+# trader's wallet? `_corroborate` answers it with `verify_wallet` when the
+# caller has the trader's swaps and with the older sponsor peek when it does
+# not, and the difference between "refuted" and "inconclusive" is what decides
+# whether the weaker check gets a turn.
+
+HOLDER_WALLET = "Hodler11111111111111111111111111111111111111"
+
+
+class HolderHttp:
+    """Helius DAS, getTokenSupply, and the two calls the gates make.
+
+    Counts everything, because most of what the holder route is *for* is not
+    paying for on-chain queries it does not need.
+    """
+
+    def __init__(
+        self,
+        owners: dict[str, dict[str, int]],
+        decimals: int = 6,
+        signatures: list[dict] | None = None,
+        transactions: dict[str, dict] | None = None,
+    ) -> None:
+        self.owners = owners
+        self.decimals = decimals
+        self.signatures = signatures if signatures is not None else []
+        self.transactions = transactions or {}
+        self.das_mints: list[str] = []
+        self.methods: list[str] = []
+
+    async def post(self, _url: str, json: dict) -> FakeResponse:
+        if isinstance(json, list):
+            results = []
+            for call in json:
+                signature = call["params"][0]
+                results.append({"id": call["id"],
+                                "result": self.transactions.get(signature)})
+            return FakeResponse(results)
+        method = json.get("method")
+        self.methods.append(method)
+        if method == "getTokenAccounts":
+            mint = json.get("params", {}).get("mint")
+            self.das_mints.append(mint)
+            return FakeResponse({"result": {"token_accounts": [
+                {"owner": owner, "mint": mint, "amount": str(amount)}
+                for owner, amount in self.owners.get(mint, {}).items()
+            ]}})
+        if method == "getTokenSupply":
+            return FakeResponse({"result": {"value": {"decimals": self.decimals}}})
+        if method == "getSignaturesForAddress":
+            return FakeResponse({"result": self.signatures})
+        if method == "getTransaction":
+            signature = json["params"][0]
+            return FakeResponse({"result": self.transactions.get(signature)})
+        return FakeResponse({"result": None})
+
+
+class FakeFomoHolders:
+    """`/hodlers/top`, batched and per token."""
+
+    def __init__(self, groups: dict[str, list[dict]], batch_limit: int | None = None,
+                 batch_error: Exception | None = None) -> None:
+        self.groups = groups
+        self.batch_limit = batch_limit
+        self.batch_error = batch_error
+        self.batched: list[list[str]] = []
+        self.singles: list[str] = []
+
+    def _entry(self, mint: str) -> dict:
+        return {"tokenAddress": mint, "networkId": SOLANA_NETWORK_ID,
+                "totalHolders": 900, "topHolders": self.groups.get(mint, [])}
+
+    async def token_holders_many(self, addresses: list, _network: int) -> list:
+        self.batched.append(list(addresses))
+        if self.batch_error:
+            raise self.batch_error
+        served = addresses if self.batch_limit is None else addresses[:self.batch_limit]
+        return [self._entry(mint) for mint in served]
+
+    async def token_holders(self, address: str, _network: int, **_kw: object) -> list:
+        self.singles.append(address)
+        return [self._entry(address)]
+
+
+def holder_row(handle: str, human_amount: float) -> dict:
+    return {
+        "user": {"id": f"id-{handle}", "userHandle": handle,
+                 "displayName": handle, "address": "synthetic"},
+        "humanAmount": human_amount,
+        "isDev": False,
+    }
+
+
+def sponsored_tx(wallet: str) -> dict:
+    return {"transaction": {"message": {"accountKeys": [
+        {"pubkey": FOMO_SPONSOR, "signer": True},
+        {"pubkey": wallet, "signer": True},
+    ]}}}
+
+
+def resolver_for(http: object, path: Path, **kwargs: object) -> WalletResolver:
+    return WalletResolver(
+        http, "https://mainnet.helius-rpc.com/?api-key=test",
+        cache_path=path, **kwargs,
+    )
+
+
+class CorroborationGateTests(unittest.IsolatedAsyncioTestCase):
+    def _balances(self) -> dict:
+        return {"balances": [balance_row(SOL_MINT_A, 123456789, 123.456789, 2.0)]}
+
+    async def test_a_candidate_the_traders_own_swaps_confirm_is_accepted(self) -> None:
+        when = iso_epoch("2026-08-18T13:05:59.531Z")
+        http = HolderHttp(
+            {SOL_MINT_A: {WALLET: 123456789}},
+            signatures=[{"signature": "sig-1", "blockTime": when, "err": None}],
+            transactions={"sig-1": transaction(SOL_MINT_A, 5.0)},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_balances(
+                SimpleNamespace(handle="scrill"), self._balances(),
+                swaps=[swap(SOL_MINT_A, 5.0)],
+            )
+            self.assertEqual(found, WALLET)
+            entry = json.loads(path.read_text(encoding="utf-8"))["scrill"]
+        # The cache records which gate let the wallet in.
+        self.assertEqual(entry["walletSource"], "balance+helius+verify1")
+        self.assertEqual(entry["confirmed"], 1)
+        self.assertNotIn("getTransaction", http.methods[:1])
+
+    async def test_a_refuted_candidate_never_reaches_the_weaker_gate(self) -> None:
+        # verify_wallet looked at this wallet's own history and this trader's
+        # swap is not in it. Falling through to "has it ever touched FOMO"
+        # after that would throw away the better answer.
+        when = iso_epoch("2026-08-18T13:05:59.531Z")
+        http = HolderHttp(
+            {SOL_MINT_A: {WALLET: 123456789}},
+            signatures=[{"signature": "sig-1", "blockTime": when, "err": None}],
+            transactions={"sig-1": transaction(SOL_MINT_A, 999.0)},  # wrong amount
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction",
+                side_effect=AssertionError("the weak gate must not run"),
+            ):
+                found = await resolver.resolve_from_balances(
+                    SimpleNamespace(handle="scrill"), self._balances(),
+                    swaps=[swap(SOL_MINT_A, 5.0)],
+                )
+        self.assertIsNone(found)
+        self.assertFalse(path.exists())
+
+    async def test_an_inconclusive_verify_still_lets_the_sponsor_gate_answer(self) -> None:
+        # No signature anywhere near the swap: verify never got to look, which
+        # is not the same as looking and finding nothing.
+        http = HolderHttp({SOL_MINT_A: {WALLET: 123456789}}, signatures=[])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction", return_value=True,
+            ) as gate:
+                found = await resolver.resolve_from_balances(
+                    SimpleNamespace(handle="scrill"), self._balances(),
+                    swaps=[swap(SOL_MINT_A, 5.0)],
+                )
+            self.assertEqual(found, WALLET)
+            entry = json.loads(path.read_text(encoding="utf-8"))["scrill"]
+        gate.assert_awaited_once()
+        self.assertEqual(entry["walletSource"], "balance+helius+fomo-sponsor")
+
+    async def test_a_caller_with_no_swaps_keeps_the_old_gate(self) -> None:
+        http = HolderHttp({SOL_MINT_A: {WALLET: 123456789}})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction", return_value=True,
+            ):
+                found = await resolver.resolve_from_balances(
+                    SimpleNamespace(handle="scrill"), self._balances(),
+                )
+            self.assertEqual(found, WALLET)
+            entry = json.loads(path.read_text(encoding="utf-8"))["scrill"]
+        self.assertEqual(entry["walletSource"], "balance+helius+fomo-sponsor")
+
+    async def test_adoption_records_the_gate_that_passed(self) -> None:
+        http = HolderHttp({})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction", return_value=True,
+            ):
+                written = await resolver.adopt_holder_matches(
+                    {WALLET: "quanterty"}, token=SOL_MINT_A
+                )
+            self.assertEqual(written, {WALLET: "quanterty"})
+            entry = json.loads(path.read_text(encoding="utf-8"))["quanterty"]
+        # `/token` has no swap rows for the handles it names, so the weaker
+        # gate is the honest label there.
+        self.assertEqual(entry["walletSource"], "hodlers+amount+fomo-sponsor")
+
+    def test_swap_rows_unwraps_either_shape(self) -> None:
+        row = {"createdAt": "2026-08-18T13:05:59.531Z"}
+        self.assertEqual(fomo_wallet.swap_rows({"swaps": [row]}), [row])
+        self.assertEqual(fomo_wallet.swap_rows([row]), [row])
+        self.assertEqual(fomo_wallet.swap_rows(None), [])
+        self.assertEqual(fomo_wallet.swap_rows({}), [])
+        # The envelope iterated by mistake yields its keys, which would look
+        # like usable rows to anything that does not type-check them.
+        self.assertEqual(fomo_wallet.swap_rows({"swaps": ["nonsense", row]}), [row])
+
+
+class HolderRouteTests(unittest.IsolatedAsyncioTestCase):
+    """`/hodlers/top`, asked about one trader's own positions.
+
+    The cheapest identity source in the project, and until now it only ran as
+    a side effect of somebody typing `/token`.
+    """
+
+    def _balances(self, *mints: str) -> dict:
+        # Descending USD value, so the order the route sees is deterministic.
+        return {"balances": [
+            balance_row(mint, 123456789 + index, 123.456789, 3.0 - index)
+            for index, mint in enumerate(mints)
+        ]}
+
+    async def test_one_batched_request_covers_every_position(self) -> None:
+        fomo = FakeFomoHolders({SOL_MINT_A: [], SOL_MINT_B: [], SOL_MINT_C: []})
+        http = HolderHttp({})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"),
+                self._balances(SOL_MINT_A, SOL_MINT_B, SOL_MINT_C),
+            )
+        self.assertIsNone(found)
+        self.assertEqual(fomo.batched, [[SOL_MINT_A, SOL_MINT_B, SOL_MINT_C]])
+        self.assertEqual(fomo.singles, [])
+        # A token that does not name the trader can never name their wallet,
+        # and finding that out costs no on-chain call at all.
+        self.assertEqual(http.das_mints, [])
+
+    async def test_only_tokens_naming_the_trader_cost_an_onchain_query(self) -> None:
+        fomo = FakeFomoHolders({
+            SOL_MINT_A: [holder_row("whale", 5000.0)],
+            SOL_MINT_B: [holder_row("scrill", 123.456789),
+                         holder_row("whale", 5000.0)],
+        })
+        http = HolderHttp({SOL_MINT_B: {HOLDER_WALLET: 123456789,
+                                        "OtherAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA": 5_000_000_000}})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction", return_value=True,
+            ):
+                found = await resolver.resolve_from_holders(
+                    fomo, SimpleNamespace(handle="scrill"),
+                    self._balances(SOL_MINT_A, SOL_MINT_B),
+                )
+            self.assertEqual(found, HOLDER_WALLET)
+            entry = json.loads(path.read_text(encoding="utf-8"))["scrill"]
+        self.assertEqual(http.das_mints, [SOL_MINT_B])
+        self.assertEqual(entry["walletSource"], "hodlers+amount+fomo-sponsor")
+        self.assertEqual(entry["hodlerToken"], SOL_MINT_B)
+
+    async def test_two_tokens_agreeing_need_no_third_party_gate(self) -> None:
+        fomo = FakeFomoHolders({
+            SOL_MINT_A: [holder_row("scrill", 123.456789)],
+            SOL_MINT_B: [holder_row("scrill", 123.456790)],
+        })
+        http = HolderHttp({
+            SOL_MINT_A: {HOLDER_WALLET: 123456789},
+            SOL_MINT_B: {HOLDER_WALLET: 123456790},
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction",
+                side_effect=AssertionError("two tokens is already the evidence"),
+            ):
+                found = await resolver.resolve_from_holders(
+                    fomo, SimpleNamespace(handle="scrill"),
+                    self._balances(SOL_MINT_A, SOL_MINT_B),
+                )
+            self.assertEqual(found, HOLDER_WALLET)
+            entry = json.loads(path.read_text(encoding="utf-8"))["scrill"]
+        self.assertEqual(entry["walletSource"], "hodlers+amount+2tokens")
+        self.assertEqual(entry["confirmed"], 2)
+
+    async def test_a_single_position_is_verified_against_the_traders_swaps(self) -> None:
+        when = iso_epoch("2026-08-18T13:05:59.531Z")
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("scrill", 123.456789)]})
+        http = HolderHttp(
+            {SOL_MINT_A: {HOLDER_WALLET: 123456789}},
+            signatures=[{"signature": "sig-1", "blockTime": when, "err": None}],
+            transactions={"sig-1": transaction(SOL_MINT_A, 5.0, HOLDER_WALLET)},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"),
+                self._balances(SOL_MINT_A),
+                # The envelope shape the bot actually holds, not a bare list.
+                swaps={"swaps": [swap(SOL_MINT_A, 5.0)]},
+            )
+            entry = json.loads(path.read_text(encoding="utf-8"))["scrill"]
+        self.assertEqual(found, HOLDER_WALLET)
+        # A holder hit is transaction-backed too, which is what makes running
+        # this route ahead of the expensive ones cost no evidence.
+        self.assertEqual(entry["walletSource"], "hodlers+amount+verify1")
+
+    async def test_a_near_neighbour_balance_is_refused_not_guessed(self) -> None:
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("scrill", 123.456789)]})
+        http = HolderHttp({SOL_MINT_A: {
+            HOLDER_WALLET: 123456789,
+            "Neighbour111111111111111111111111111111111": 123456790,
+        }})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"), self._balances(SOL_MINT_A),
+            )
+        self.assertIsNone(found)
+
+    async def test_a_wallet_another_trader_also_matches_is_refused(self) -> None:
+        # Uniqueness runs in both directions: the amount must identify one
+        # wallet AND that wallet must match one trader.
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("scrill", 123.456789),
+                                             holder_row("twin", 123.456789)]})
+        http = HolderHttp({SOL_MINT_A: {HOLDER_WALLET: 123456789}})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"), self._balances(SOL_MINT_A),
+            )
+        self.assertIsNone(found)
+
+    async def test_tokens_the_batch_skips_are_asked_for_individually(self) -> None:
+        # The `tokens` array is documented as a list but has only ever been
+        # seen with one entry. A server-side cap must cost requests, not the
+        # whole route.
+        fomo = FakeFomoHolders(
+            {SOL_MINT_A: [], SOL_MINT_B: [holder_row("scrill", 123.456790)]},
+            batch_limit=1,
+        )
+        http = HolderHttp({SOL_MINT_B: {HOLDER_WALLET: 123456790}})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction", return_value=True,
+            ):
+                found = await resolver.resolve_from_holders(
+                    fomo, SimpleNamespace(handle="scrill"),
+                    self._balances(SOL_MINT_A, SOL_MINT_B),
+                )
+        self.assertEqual(found, HOLDER_WALLET)
+        self.assertEqual(fomo.singles, [SOL_MINT_B])
+
+    async def test_a_failed_batch_falls_back_to_one_call_per_token(self) -> None:
+        fomo = FakeFomoHolders(
+            {SOL_MINT_A: [], SOL_MINT_B: []},
+            batch_error=RuntimeError("400 from /hodlers/top"),
+        )
+        http = HolderHttp({})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"),
+                self._balances(SOL_MINT_A, SOL_MINT_B),
+            )
+        self.assertIsNone(found)
+        self.assertEqual(fomo.singles, [SOL_MINT_A, SOL_MINT_B])
+
+    async def test_a_trader_with_no_positions_costs_nothing(self) -> None:
+        fomo = FakeFomoHolders({})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(HolderHttp({}), path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"), {"balances": []},
+            )
+        self.assertIsNone(found)
+        self.assertEqual(fomo.batched, [])
+
+    async def test_a_cached_wallet_short_circuits_the_route(self) -> None:
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("scrill", 123.456789)]})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            path.write_text(json.dumps({"scrill": {"wallet": WALLET}}),
+                            encoding="utf-8")
+            found = await resolver_for(HolderHttp({}), path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"), self._balances(SOL_MINT_A),
+            )
+        self.assertEqual(found, WALLET)
+        self.assertEqual(fomo.batched, [])
+
+    async def test_the_route_never_raises(self) -> None:
+        class Broken:
+            async def token_holders_many(self, *_a: object, **_k: object) -> list:
+                raise RuntimeError("503 upstream")
+
+            async def token_holders(self, *_a: object, **_k: object) -> list:
+                raise RuntimeError("503 upstream")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(HolderHttp({}), path).resolve_from_holders(
+                Broken(), SimpleNamespace(handle="scrill"),
+                self._balances(SOL_MINT_A),
+            )
+        self.assertIsNone(found)

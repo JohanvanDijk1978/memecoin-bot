@@ -1,21 +1,16 @@
 """
 fomo_bot.py — standalone Discord bot: FOMO trader research.
 
-    /fomo <handle>        choose a Compact or Wide fomo.family profile
-    /wallet <address>     find a FOMO trader by verified wallet
-    /fomotrack <handle>   choose and track trader activity
-    /fomotracked          list traders tracked in this channel
-    /fomountrack <handle> stop alerts in this channel
-    /untrack                interactively remove FOMO or Pump tracking
-    /tracksettings          change an existing subscription's alerts
-    /token <address>        token market cap, image and top holders
-    /fomosearch <term>    fuzzy handle search
-    /fomotop [24h] [n]    leaderboard
-    /pump <handle>         rich Pump.fun profile
-    /pumptrack <handle>   choose and track Pump activity
-    /pumptracked           list Pump profiles tracked in this channel
-    /pumpuntrack <handle>  stop Pump alerts in this channel
-    /pumpwallet <address>  find a Pump profile by wallet
+    /fomo <handle>          choose a Compact or Wide fomo.family profile
+    /pump <handle>          rich Pump.fun profile
+    /wallet <address>       find a FOMO or Pump profile by wallet
+    /token <address>        market cap, the top 50 holders and the
+                            best-performing traders by PnL/ROI
+    /thesis <address>       what this token's biggest holders wrote about it
+    /connected <target>     wallets with strong on-chain ties to a trader
+    /track <platform> <who> choose and track FOMO or Pump activity
+    /tracked                everything tracked here, with Edit and Remove
+    /fomotop [24h] [n]      leaderboard
 
 Run this on borz (residential IP). Cloudflare blocks the VPS — see FOMO_API.md §1.
 
@@ -36,8 +31,10 @@ import contextlib
 import logging
 import os
 
+from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import discord
@@ -54,12 +51,27 @@ from fomo_evm import (
     evm_trade_ids,
 )
 from fomo_evm_activity import fetch_evm_activity
+from connected_wallets import (
+    DEFAULT_EVM_CHAINS,
+    DEFAULT_MIN_SCORE,
+    SCORE_VERY_HIGH,
+    Association,
+    ConnectedReport,
+    ConnectedWalletAnalyzer,
+    address_url,
+    explorer_url,
+    fmt_day,
+)
 from fomo_hodlers import (
     FomoHolder,
+    HolderThesis,
     confident_matches,
     match_holders_to_wallets,
     network_id_for,
+    parse_thesis_feed,
     parse_token_holders,
+    rank_theses,
+    theses_from_trades,
 )
 from fomo_features import (
     TraderStats,
@@ -85,6 +97,7 @@ from fomo_tracking import (
     snapshot,
 )
 from fomo_wallet import (
+    SOLANA_ADDRESS_RE,
     CachedWalletMatch,
     WalletResolver,
     cached_wallet,
@@ -134,7 +147,9 @@ from token_intelligence import (
     TokenIntelligence,
     TokenIntelligenceClient,
     TokenIntelligenceError,
+    TokenTraders,
 )
+from token_traders import RANK_KEYS, TokenTrader, rank_traders
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -184,6 +199,19 @@ LOSS = 0xE5484D
 WIN = 0x30A46C
 THESIS = 0x9B59B6
 
+# `/token` always reads the top 50 and shows ten a page; `/thesis` shows five,
+# which is what fits with the thesis text itself under the embed's limits.
+TOKEN_HOLDER_LIMIT = 50
+TOKEN_HOLDER_PAGE = 10
+# Top Traders is the same shape as Top Holders on purpose: fifty rows, ten to
+# a page, turned by the same buttons. A trader row is two lines rather than
+# one -- identity, then the aligned entry/PnL/ROI columns -- so it gets its own
+# page size to change independently of the holders'.
+TOKEN_TRADER_LIMIT = 50
+TOKEN_TRADER_PAGE = 10
+THESIS_PAGE = 5
+THESIS_TEXT_LIMIT = 400
+
 FOMO_ACTIVITY_FILTERS = ("buys", "sells", "theses")
 PUMP_ACTIVITY_FILTERS = ("buys", "sells", "callouts")
 NATIVE_PRICE_REFERENCES = {
@@ -196,6 +224,175 @@ NATIVE_PRICE_REFERENCES = {
 def _entry_activity_filters(entry: dict[str, Any]) -> Any:
     """Read the current list format, falling back to legacy single choices."""
     return entry.get("activityFilters", entry.get("activityFilter", "all"))
+
+
+class PaginatedEmbedView(discord.ui.View):
+    """Previous / Next over a fixed list of already-rendered embeds.
+
+    Both `/token` and `/thesis` render every page before the first one is
+    sent. The expensive part -- holder identity, thesis text -- is paid once
+    for the whole card, so turning a page is a message edit and nothing else,
+    and a page can never disagree with the one before it.
+
+    Unlike the selection views, this one has no requester check: paging carries
+    no state and changes nothing, so anyone reading the channel may do it.
+
+    The timeout is an hour rather than the usual few minutes because a card
+    that stops paging reports only "interaction failed", and these views hold
+    nothing but their own embeds.
+    """
+
+    def __init__(self, embeds: list[discord.Embed], *, timeout: float = 3600) -> None:
+        super().__init__(timeout=timeout)
+        self.embeds = embeds
+        self.index = 0
+        self._sync()
+
+    def _sync(self) -> None:
+        self.previous_button.disabled = self.index <= 0
+        self.next_button.disabled = self.index >= len(self.embeds) - 1
+
+    async def show(self, interaction: discord.Interaction, index: int) -> None:
+        self.index = max(0, min(index, len(self.embeds) - 1))
+        self._sync()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.index], view=self
+        )
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await self.show(interaction, self.index - 1)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await self.show(interaction, self.index + 1)
+
+
+class TokenCardView(PaginatedEmbedView):
+    """`/token`'s pager, plus a second list behind the same buttons.
+
+    Top Holders is rendered before the card is sent, as it always was. Top
+    Traders is not: it aggregates transfer history rather than reading a
+    ranked list, so it is paid only if somebody asks for it, and then paid
+    once -- the rendered pages are kept on the view, so toggling back and
+    forth afterwards is a message edit like any other page turn.
+
+    Previous/Next act on whichever list is showing, and each list keeps its
+    own page, so returning to the holders finds them where they were left.
+    """
+
+    def __init__(
+        self,
+        holder_embeds: list[discord.Embed],
+        loader: Callable[[str], Awaitable[list[discord.Embed]]],
+        *,
+        timeout: float = 3600,
+    ) -> None:
+        self.section = "holders"
+        self.rank = "pnl"
+        self._pages: dict[str, list[discord.Embed]] = {"holders": holder_embeds}
+        self._indexes: dict[str, int] = {"holders": 0}
+        self._loader = loader
+        self._loading = asyncio.Lock()
+        super().__init__(holder_embeds, timeout=timeout)
+
+    @property
+    def _trader_key(self) -> str:
+        """Each ranking is its own set of rendered pages, kept once loaded."""
+        return f"traders:{self.rank}"
+
+    def _showing_traders(self) -> bool:
+        return self.section.startswith("traders")
+
+    def _sync(self) -> None:
+        super()._sync()
+        # `PaginatedEmbedView.__init__` calls this before the subclass has
+        # finished, so the toggles may not exist yet on the very first pass.
+        button = getattr(self, "section_button", None)
+        if button is not None:
+            button.label = (
+                "Top Holders" if self._showing_traders() else "Top Traders"
+            )
+        sort = getattr(self, "sort_button", None)
+        if sort is not None:
+            sort.label = f"Sort: {RANK_LABELS.get(self.rank, self.rank)}"
+            sort.disabled = not self._showing_traders()
+
+    async def _show_section(
+        self, interaction: discord.Interaction, section: str, *, edited: bool
+    ) -> None:
+        self._indexes[self.section] = self.index
+        self.section = section
+        self.embeds = self._pages[section]
+        self.index = min(self._indexes.get(section, 0), len(self.embeds) - 1)
+        self._sync()
+        try:
+            if edited:
+                await interaction.edit_original_response(
+                    embed=self.embeds[self.index], view=self
+                )
+            else:
+                await interaction.response.edit_message(
+                    embed=self.embeds[self.index], view=self
+                )
+        except discord.HTTPException as exc:
+            # An expired or already-answered interaction is the normal end of
+            # a card's life, not a failure worth an error card.
+            log.debug("could not switch the /token card to %s: %s", section, exc)
+
+    async def _open(self, interaction: discord.Interaction, target: str) -> None:
+        """Show a section, loading and remembering its pages the first time."""
+        if target in self._pages:
+            await self._show_section(interaction, target, edited=False)
+            return
+        # The first look costs provider requests, which can outlast Discord's
+        # three-second reply budget -- acknowledge, then edit.
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException as exc:
+            log.debug("could not defer the Top Traders click: %s", exc)
+            return
+        async with self._loading:
+            if target not in self._pages:
+                try:
+                    self._pages[target] = await self._loader(
+                        target.split(":", 1)[1] if ":" in target else "pnl"
+                    )
+                except Exception:
+                    log.exception("loading the top traders failed")
+                    self._pages[target] = []
+        if not self._pages[target]:
+            # Remembered as a miss so a second click costs nothing, and shown
+            # as a card rather than an error: the holders are still fine.
+            self._pages[target] = [_token_empty_traders_embed()]
+        await self._show_section(interaction, target, edited=True)
+
+    @discord.ui.button(label="Top Traders", style=discord.ButtonStyle.primary)
+    async def section_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await self._open(
+            interaction, "holders" if self._showing_traders() else self._trader_key
+        )
+
+    @discord.ui.button(label="Sort: PnL", style=discord.ButtonStyle.secondary)
+    async def sort_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """Cycle the ranking: PnL → ROI → Volume.
+
+        Re-ranking is local -- the client already returned the rows that any of
+        the three orderings needs -- so this is a render, not another sample.
+        """
+        if not self._showing_traders():
+            return
+        order = list(RANK_KEYS)
+        self.rank = order[(order.index(self.rank) + 1) % len(order)]
+        await self._open(interaction, self._trader_key)
 
 
 class ActivityMultiSelect(discord.ui.Select):
@@ -242,31 +439,37 @@ class ActivitySelectionView(discord.ui.View):
         await interaction.response.edit_message(content=message, view=None)
 
 
-class TrackedEntrySelect(discord.ui.Select):
+class TrackedManagerSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
-        if isinstance(view, TrackedEntrySelectionView):
-            await view.submit(interaction, [int(value) for value in self.values])
+        if isinstance(view, TrackedManagerView):
+            await view.choose(interaction, [int(value) for value in self.values])
 
 
-class TrackedEntrySelectionView(discord.ui.View):
-    """Select existing subscriptions without retyping exact handles."""
+class TrackedManagerView(discord.ui.View):
+    """`/tracked`'s selector plus the buttons that replaced two commands.
+
+    `/tracksettings` and `/untrack` each opened the same list of subscriptions
+    and differed only in what they did with the choice, so the list is shown
+    once and the verb is a button: **Edit** opens the alert picker for one
+    subscription, **Remove** deletes every selected one.
+
+    The select's callback deliberately only defers. Discord keeps a select's
+    visible choice until the message is edited, so acknowledging without
+    editing is what lets the buttons read a selection the user can still see.
+    """
 
     def __init__(
         self,
         requester_id: int,
         entries: list[tuple[str, dict[str, Any]]],
-        on_submit: Callable[
-            [discord.Interaction, list[tuple[str, dict[str, Any]]]], Awaitable[None]
-        ],
-        *,
-        multiple: bool,
-        placeholder: str,
+        channel_id: int,
     ) -> None:
-        super().__init__(timeout=180)
+        super().__init__(timeout=300)
         self.requester_id = requester_id
+        self.channel_id = channel_id
         self.entries = entries[:25]
-        self.on_submit = on_submit
+        self.selected: list[int] = []
         options = [
             discord.SelectOption(
                 label=f"{platform} · @{entry.get('handle', 'unknown')}"[:100],
@@ -276,12 +479,14 @@ class TrackedEntrySelectionView(discord.ui.View):
             )
             for index, (platform, entry) in enumerate(self.entries)
         ]
-        self.add_item(TrackedEntrySelect(
-            placeholder=placeholder,
+        self.selector = TrackedManagerSelect(
+            placeholder="Select tracked profiles, then Edit or Remove",
             min_values=1,
-            max_values=len(options) if multiple else 1,
+            max_values=len(options),
             options=options,
-        ))
+            row=0,
+        )
+        self.add_item(self.selector)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.requester_id:
@@ -292,10 +497,62 @@ class TrackedEntrySelectionView(discord.ui.View):
         )
         return False
 
-    async def submit(self, interaction: discord.Interaction, indexes: list[int]) -> None:
-        selected = [self.entries[index] for index in indexes if 0 <= index < len(self.entries)]
+    def chosen(self) -> list[tuple[str, dict[str, Any]]]:
+        return [self.entries[index] for index in self.selected
+                if 0 <= index < len(self.entries)]
+
+    async def choose(
+        self, interaction: discord.Interaction, indexes: list[int]
+    ) -> None:
+        self.selected = indexes
+        await interaction.response.defer()
+
+    @discord.ui.button(
+        label="Edit", style=discord.ButtonStyle.primary, emoji="✏️", row=1
+    )
+    async def edit_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        chosen = self.chosen()
+        if len(chosen) != 1:
+            await interaction.response.send_message(
+                "Select one profile to edit."
+                if not chosen else
+                "Edit changes one subscription at a time — select just one.",
+                ephemeral=True,
+            )
+            return
+        platform, entry = chosen[0]
+        handle = str(entry.get("handle") or "unknown")
         self.stop()
-        await self.on_submit(interaction, selected)
+        await interaction.response.edit_message(
+            content=f"Choose the alerts for {platform} **@{handle}** (select 1–3):",
+            embed=None,
+            view=_alert_settings_view(
+                self.requester_id, self.channel_id, platform, entry
+            ),
+        )
+
+    @discord.ui.button(
+        label="Remove", style=discord.ButtonStyle.danger, emoji="🗑️", row=1
+    )
+    async def remove_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        chosen = self.chosen()
+        if not chosen:
+            await interaction.response.send_message(
+                "Select at least one profile to remove.", ephemeral=True
+            )
+            return
+        removed = _remove_tracked_entries(self.channel_id, chosen)
+        self.stop()
+        await interaction.response.edit_message(
+            content=("Stopped tracking " + ", ".join(removed) + "."
+                     if removed else "No subscriptions were removed."),
+            embed=None,
+            view=None,
+        )
 
 
 class FomoLayoutSelect(discord.ui.Select):
@@ -946,6 +1203,7 @@ class FomoBot(discord.Client):
         self.pump_profiles: PumpProfileResolver | None = None
         self.pump_chain: PumpChainClient | None = None
         self.tokens: TokenIntelligenceClient | None = None
+        self.connected: ConnectedWalletAnalyzer | None = None
         self._http: Any = None
         self.tracking = TrackingStore(TRACK_FILE)
         self.pump_tracking = PumpTrackingStore(PUMP_TRACK_FILE)
@@ -993,6 +1251,9 @@ class FomoBot(discord.Client):
             )
             self.pump_chain = PumpChainClient(self._http, SOLANA_RPCS)
             self.tokens = TokenIntelligenceClient(self._http, SOLANA_RPCS)
+            self.connected = ConnectedWalletAnalyzer(
+                self._http, SOLANA_RPCS, identify=_connected_identity
+            )
             if RESOLVE_WALLETS:
                 self.wallets = WalletResolver(self._http, SOLANA_RPCS)
             if RESOLVE_EVM:
@@ -1290,13 +1551,32 @@ async def _resolve_fomo_enrichment(
 ) -> tuple[str | None, str | None, TraderStats]:
     """Complete optional wallet/activity panels after the base reply exists."""
     async def resolve_solana() -> str | None:
+        """Three routes, cheapest first.
+
+        The holder route runs before the transaction routes, which is a change
+        of order rather than a change of standard. It costs one FOMO request
+        plus an on-chain query for each token that actually publishes a row
+        naming this trader, where `resolve()` pays a 12-page sponsor index and
+        up to four mint scans before its first answer -- and the enrichment
+        budget is a wall clock (`FOMO_ENRICH_TIMEOUT`) that cancels whatever is
+        still running. A handle the expensive route cannot reach used to spend
+        the whole budget proving it. Evidence quality does not drop, because
+        the holder route's own gate is `verify_wallet` against this trader's
+        swaps: a hit is transaction-backed either way.
+        """
         if wallet is not None or not client.wallets or not client.fomo:
             return wallet
         try:
-            result = await client.wallets.resolve(client.fomo, user)
+            result = None
+            if stats.raw_balances is not None:
+                result = await client.wallets.resolve_from_holders(
+                    client.fomo, user, stats.raw_balances, swaps=stats.raw_swaps or ()
+                )
+            if result is None:
+                result = await client.wallets.resolve(client.fomo, user)
             if result is None and stats.raw_balances is not None:
                 result = await client.wallets.resolve_from_balances(
-                    user, stats.raw_balances
+                    user, stats.raw_balances, swaps=stats.raw_swaps or ()
                 )
             return result
         except Exception as exc:
@@ -1729,12 +2009,18 @@ async def _adopt_holder_wallets(
                  len(written), "Solana" if solana else "EVM", token)
 
 
-async def _holder_label(holder: TokenHolder, chain: str,
-                        fomo_match: FomoHolder | None = None) -> str:
+async def _wallet_identity(address: str, chain: str,
+                           fomo_match: FomoHolder | None = None) -> str:
+    """`@handle · wallet`, or the bare wallet when nothing names it.
+
+    Shared by Top Holders and Top Traders so the two lists cannot disagree
+    about who a wallet is; the row-specific figures are appended by the
+    callers.
+    """
     identities: list[str] = []
     pump_wallet: str | None = None
-    named = {match.handle.lower() for match in find_cached_wallets(holder.address)}
-    for match in find_cached_wallets(holder.address):
+    named = {match.handle.lower() for match in find_cached_wallets(address)}
+    for match in find_cached_wallets(address):
         identities.append(
             f"🔵 [@{match.handle}](https://fomo.family/profile/{match.handle})"
         )
@@ -1745,7 +2031,7 @@ async def _holder_label(holder: TokenHolder, chain: str,
             f"(https://fomo.family/profile/{fomo_match.handle}){dev}"
         )
 
-    pump_match = bot.pump_evm.cached(holder.address) if bot.pump_evm else None
+    pump_match = bot.pump_evm.cached(address) if bot.pump_evm else None
     if pump_match:
         pump_wallet = pump_match.solana
         identities.append(_pump_identity(pump_match.handle, pump_wallet))
@@ -1753,24 +2039,148 @@ async def _holder_label(holder: TokenHolder, chain: str,
         # `token_cmd` has already prefetched the whole holder list, so this is
         # normally a cache read. A wallet with no Pump profile is remembered as
         # such, so the next /token does not re-ask Pump for a known 404.
-        pump_profile = await bot.pump_profiles.resolve(holder.address)
+        pump_profile = await bot.pump_profiles.resolve(address)
         if pump_profile:
             pump_wallet = pump_profile.address
             identities.append(_pump_identity(pump_profile.username, pump_wallet))
 
-    explorer = _holder_explorer(chain, holder.address)
-    wallet = _short_wallet(holder.address)
+    explorer = _holder_explorer(chain, address)
+    wallet = _short_wallet(address)
     wallet_text = f"[{wallet}]({explorer})" if explorer else f"`{wallet}`"
     identity = " + ".join(dict.fromkeys(identities)) if identities else wallet_text
     if identities and (
-        not pump_wallet or pump_wallet.casefold() != holder.address.casefold()
+        not pump_wallet or pump_wallet.casefold() != address.casefold()
     ):
         identity += f" · {wallet_text}"
+    return identity
+
+
+async def _holder_label(holder: TokenHolder, chain: str,
+                        fomo_match: FomoHolder | None = None) -> str:
+    identity = await _wallet_identity(holder.address, chain, fomo_match)
     percentage = (
         f" · **{holder.percentage:.2f}%**"
         if holder.percentage is not None else ""
     )
     return f"{identity}{percentage} · {_fmt_holder_balance(holder.balance)}"
+
+
+def _fmt_signed_usd(value: Decimal | float | None) -> str:
+    """`+$12,450`. Whole dollars once a figure is big enough to need commas."""
+    if value is None:
+        return "—"
+    number = float(value)
+    sign = "-" if number < 0 else "+"
+    magnitude = abs(number)
+    if magnitude >= 1000:
+        return f"{sign}${magnitude:,.0f}"
+    if magnitude >= 1:
+        return f"{sign}${magnitude:,.2f}"
+    return f"{sign}${magnitude:.2f}"
+
+
+def _fmt_roi(value: Decimal | float | None) -> str:
+    """`+382.4%`, without four decimal places on a 12,000% run."""
+    if value is None:
+        return "—"
+    number = float(value)
+    sign = "-" if number < 0 else "+"
+    magnitude = abs(number)
+    if magnitude >= 1000:
+        return f"{sign}{magnitude:,.0f}%"
+    return f"{sign}{magnitude:.1f}%"
+
+
+def _fmt_compact_usd(value: Decimal | float | None) -> str:
+    """`$130K`. Market caps are read at a glance, not to the cent."""
+    if value is None:
+        return "—"
+    number = float(value)
+    for cutoff, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(number) >= cutoff:
+            text = f"{number / cutoff:.1f}".rstrip("0").rstrip(".")
+            return f"${text}{suffix}"
+    return f"${number:,.0f}"
+
+
+def _entry_column(trader: TokenTrader, supply: Decimal | None) -> str:
+    """Where they got in: market cap when supply is known, price otherwise.
+
+    Market cap is what a memecoin entry is actually discussed in ("I'm in at
+    130k"), and the token's own circulating supply converts one into the other
+    exactly: `market cap / current price` is the supply the card's own header
+    already implies.
+    """
+    entry = trader.avg_entry_price
+    if entry is None:
+        return "—"
+    if supply:
+        return _fmt_compact_usd(entry * supply)
+    return fmt_price(float(entry))
+
+
+def _trader_metrics(
+    trader: TokenTrader, supply: Decimal | None,
+) -> tuple[str, str, str]:
+    """The three columns that decide the ranking, as text."""
+    return (
+        _entry_column(trader, supply),
+        _fmt_signed_usd(trader.total_pnl_usd),
+        _fmt_roi(trader.roi_pct),
+    )
+
+
+def _trader_flags(trader: TokenTrader) -> str:
+    """Say when a number is less than the whole story, rather than rounding it.
+
+    `◐` -- the position is still open, so PnL includes an unrealised part that
+    moves with the price. `~` -- this wallet's cost basis is incomplete: part
+    of the position arrived for free (so there is a PnL but no honest ROI),
+    could not be priced, or was bought before the sample starts.
+    """
+    flags = ""
+    if trader.open_tokens > 0 and not trader.realized_only:
+        flags += "◐"
+    if trader.partial:
+        flags += "~"
+    return f" {flags}" if flags else ""
+
+
+async def _trader_identity(trader: TokenTrader, chain: str,
+                           fomo_match: FomoHolder | None = None) -> str:
+    """The 'who' half of a Top Traders row."""
+    identity = await _wallet_identity(trader.address, chain, fomo_match)
+    count = f"{trader.transactions} tx" if trader.transactions != 1 else "1 tx"
+    return f"{identity} · {count}"
+
+
+def _trader_rows(
+    traders: Sequence[TokenTrader], identities: Sequence[str],
+    supply: Decimal | None,
+) -> list[str]:
+    """Two lines per trader: who they are, then entry / PnL / ROI aligned.
+
+    The figures go inside one inline-code span so Discord renders them in a
+    monospace font, which is the only way columns line up in an embed. Padding
+    is computed across the whole list rather than per page, so a column does
+    not shift when the card is turned.
+    """
+    metrics = [_trader_metrics(trader, supply) for trader in traders]
+    widths = [max((len(cell[index]) for cell in metrics), default=1)
+              for index in range(3)]
+    rows: list[str] = []
+    for position, (trader, identity) in enumerate(zip(traders, identities), 1):
+        entry, pnl, roi = metrics[position - 1]
+        total = trader.total_pnl_usd
+        marker = "⚪" if total is None else ("🟢" if total >= 0 else "🔴")
+        columns = (
+            f"{entry:>{widths[0]}}  {pnl:>{widths[1]}}  {roi:>{widths[2]}}"
+        )
+        rows.append(
+            f"`{position}.` {identity}\n{marker} `{columns}`"
+            f"{_trader_flags(trader)}"
+        )
+    return rows
 
 
 def _token_trade_url(token: TokenIntelligence) -> str | None:
@@ -1783,20 +2193,217 @@ def _token_trade_url(token: TokenIntelligence) -> str | None:
     return padre_trade_url(network, token.address) if network else token.dex_url
 
 
-@bot.tree.command(name="token", description="Show token market cap and top holders")
-@app_commands.describe(
-    address="Solana or EVM token contract address",
-    holders="Show the top 5 or top 10 holder wallets",
+def _token_page_embed(
+    token: TokenIntelligence, numbered: list[str], page: int, pages: int
+) -> discord.Embed:
+    """One page of `/token`: the same header, a different slice of holders."""
+    market_cap = fmt_usd(token.market_cap) if token.market_cap is not None else "—"
+    description = f"**Market cap:** {market_cap}"
+    if token.price_usd is not None:
+        description += f"\n**Price:** {fmt_price(token.price_usd)}"
+    if token.fdv is not None and token.market_cap is None:
+        description += f"\n**FDV:** {fmt_usd(token.fdv)}"
+
+    embed = discord.Embed(
+        title=f"🪙 ${token.symbol} · {token.chain}",
+        url=_token_trade_url(token),
+        description=description,
+        colour=BRAND,
+    )
+    embed.add_field(name="Contract address", value=f"`{token.address}`", inline=False)
+
+    start = (page - 1) * TOKEN_HOLDER_PAGE
+    rows = numbered[start:start + TOKEN_HOLDER_PAGE]
+    holder_chunks = _discord_line_chunks(rows)
+    if not holder_chunks:
+        holder_chunks = ["Holder data is currently unavailable."]
+        rank = ""
+    else:
+        rank = f" · {start + 1}-{start + len(rows)}"
+    for index, chunk in enumerate(holder_chunks, 1):
+        suffix = f" · {index}/{len(holder_chunks)}" if len(holder_chunks) > 1 else ""
+        embed.add_field(
+            name=f"Top holders{rank} of {len(numbered)}{suffix}",
+            value=chunk,
+            inline=False,
+        )
+    if token.image_url:
+        embed.set_thumbnail(url=token.image_url)
+    embed.set_footer(
+        text=f"Page {page} of {pages} · 🔵 FOMO · 🟢 Pump.fun • "
+             "identities do not need to be tracked"
+    )
+    return embed
+
+
+def _token_empty_traders_embed() -> discord.Embed:
+    """Shown when no provider could answer for traders. The holders still can."""
+    return discord.Embed(
+        title="🪙 Top traders",
+        description=(
+            "Trader data is currently unavailable for this token.\n"
+            "Top Holders is unaffected — use the button to go back."
+        ),
+        colour=BRAND,
+    )
+
+
+def _sample_window(meta: TokenTraders) -> str:
+    """Say what the ranking covers rather than implying it covers everything.
+
+    The distinction that matters is whether paging reached the token's first
+    transaction. If it did, the ledger is the whole story and the card says so;
+    if the budget cut it short, the winners may have entered before the sample
+    starts, and a `+` is the warning that it is a window rather than a history.
+    """
+    if not meta.transactions:
+        return "no sampled transactions"
+    kind = "recent transaction" if meta.truncated else "transaction"
+    span = f"{meta.transactions:,} {kind}"
+    span += "s" if meta.transactions != 1 else ""
+    if meta.truncated:
+        span += "+"
+    else:
+        span += " · full history"
+    if meta.earliest and meta.latest:
+        first = datetime.fromtimestamp(meta.earliest, tz=timezone.utc)
+        last = datetime.fromtimestamp(meta.latest, tz=timezone.utc)
+        span += f" · {first:%d %b} – {last:%d %b %Y}"
+    return span
+
+
+RANK_LABELS = {"pnl": "PnL", "roi": "ROI", "volume": "Volume"}
+RANK_DESCRIPTIONS = {
+    "pnl": "PnL — realised + unrealised, in USD",
+    "roi": "ROI — PnL over invested capital",
+    "volume": "tokens traded (activity, not performance)",
+}
+
+
+def _token_supply(token: TokenIntelligence) -> Decimal | None:
+    """Circulating supply, implied by the market cap the card already shows."""
+    cap = token.market_cap if token.market_cap is not None else token.fdv
+    if not cap or not token.price_usd or token.price_usd <= 0:
+        return None
+    try:
+        return Decimal(str(cap)) / Decimal(str(token.price_usd))
+    except (InvalidOperation, ZeroDivisionError):
+        return None
+
+
+def _token_traders_embed(
+    token: TokenIntelligence, meta: TokenTraders, numbered: list[str],
+    page: int, pages: int, rank: str = "pnl",
+) -> discord.Embed:
+    """One page of Top Traders: the `/token` header, a slice of the ranking."""
+    market_cap = fmt_usd(token.market_cap) if token.market_cap is not None else "—"
+    description = f"**Market cap:** {market_cap}"
+    if token.price_usd is not None:
+        description += f"\n**Price:** {fmt_price(token.price_usd)}"
+    description += f"\n**Ranked by:** {RANK_DESCRIPTIONS.get(rank, rank)}"
+    description += f"\n**Sampled:** {_sample_window(meta)}"
+    if meta.traders and not meta.priced:
+        description += (
+            "\n⚠️ No trade in this sample carried a priceable counter-asset, "
+            "so PnL and ROI are unavailable — the rows below are ordered by "
+            "tokens traded."
+        )
+
+    embed = discord.Embed(
+        title=f"🪙 ${token.symbol} · {token.chain}",
+        url=_token_trade_url(token),
+        description=description,
+        colour=BRAND,
+    )
+    embed.add_field(name="Contract address", value=f"`{token.address}`", inline=False)
+
+    start = (page - 1) * TOKEN_TRADER_PAGE
+    rows = numbered[start:start + TOKEN_TRADER_PAGE]
+    chunks = _discord_line_chunks(rows)
+    if not chunks:
+        chunks = ["No trader activity was found in the sampled window."]
+        span = ""
+    else:
+        span = f" · {start + 1}-{start + len(rows)}"
+    for index, chunk in enumerate(chunks, 1):
+        suffix = f" · {index}/{len(chunks)}" if len(chunks) > 1 else ""
+        embed.add_field(
+            name=f"Best traders{span} of {len(numbered)}"
+                 f" · entry · PnL · ROI{suffix}",
+            value=chunk,
+            inline=False,
+        )
+    if token.image_url:
+        embed.set_thumbnail(url=token.image_url)
+    embed.set_footer(
+        text=f"Page {page} of {pages} · by {RANK_LABELS.get(rank, rank)} · "
+             f"◐ open position · ~ cost basis incomplete (free tokens, "
+             f"unpriced, or bought before the sample) · {meta.source}"
+    )
+    return embed
+
+
+async def _token_trader_embeds(
+    token: TokenIntelligence, fomo_matches: dict[str, FomoHolder],
+    rank: str = "pnl",
+) -> list[discord.Embed]:
+    """Render every Top Traders page, or [] when nothing could be read.
+
+    The client hands back the union of the top rows under every ranking, so
+    switching the sort re-orders in place and costs no provider request at all.
+
+    Identity goes through the same `_wallet_identity` the holders use, so a
+    wallet named on one list is named on the other. The Pump prefetch is
+    repeated for the trader set because these are mostly different wallets --
+    it is one bounded batch and the resolver remembers both hits and misses.
+    """
+    if not bot.tokens:
+        return []
+    meta = await bot.tokens.top_traders(
+        token.address, token.chain,
+        limit=TOKEN_TRADER_LIMIT, price_usd=token.price_usd,
+    )
+    if not meta.traders:
+        return []
+    traders = rank_traders(meta.traders, key=rank, limit=TOKEN_TRADER_LIMIT)
+
+    if token.chain == "Solana" and bot.pump_profiles:
+        pending = [
+            trader.address for trader in traders
+            if not (bot.pump_evm and bot.pump_evm.cached(trader.address))
+        ]
+        try:
+            await bot.pump_profiles.prefetch(pending)
+        except Exception as exc:
+            log.debug("pump trader prefetch failed for %s: %s", token.address, exc)
+
+    identities = await asyncio.gather(*(
+        _trader_identity(trader, token.chain, fomo_matches.get(trader.address))
+        for trader in traders
+    ))
+    numbered = _trader_rows(traders, identities, _token_supply(token))
+    pages = max(1, -(-len(numbered) // TOKEN_TRADER_PAGE))
+    return [_token_traders_embed(token, meta, numbered, page, pages, rank)
+            for page in range(1, pages + 1)]
+
+
+@bot.tree.command(
+    name="token",
+    description="Show token market cap, top holders and top traders",
 )
-@app_commands.choices(holders=[
-    app_commands.Choice(name="Top 5", value=5),
-    app_commands.Choice(name="Top 10", value=10),
-])
-async def token_cmd(
-    interaction: discord.Interaction,
-    address: str,
-    holders: app_commands.Choice[int] | None = None,
-) -> None:
+@app_commands.describe(address="Solana or EVM token contract address")
+async def token_cmd(interaction: discord.Interaction, address: str) -> None:
+    """Market data plus the top 50 holders, ten to a page.
+
+    The holder count used to be a choice between 5 and 10. It is now always
+    50: every page is rendered up front, so paging costs a message edit rather
+    than another round of identity lookups.
+
+    Top Traders sits behind a button on the same card. It is the same shape --
+    fifty rows, ten a page, the same identity labelling -- but it is rendered
+    on demand, because it aggregates transfer history rather than reading a
+    ranked list and nobody should pay for it who did not ask.
+    """
     await interaction.response.defer()
     if not bot.tokens:
         await interaction.followup.send(
@@ -1806,7 +2413,7 @@ async def token_cmd(
         return
 
     clean = address.strip().strip("`").strip()
-    count = holders.value if holders else 5
+    count = TOKEN_HOLDER_LIMIT
     pump_coin: PumpCoin | None = None
     if bot.pump and not EVM_RE.fullmatch(clean):
         try:
@@ -1840,36 +2447,557 @@ async def token_cmd(
           for holder in token.holders)
     )
     numbered = [f"`{index}.` {line}" for index, line in enumerate(holder_lines, 1)]
-    market_cap = fmt_usd(token.market_cap) if token.market_cap is not None else "—"
-    description = f"**Market cap:** {market_cap}"
-    if token.price_usd is not None:
-        description += f"\n**Price:** {fmt_usd(token.price_usd)}"
-    if token.fdv is not None and token.market_cap is None:
-        description += f"\n**FDV:** {fmt_usd(token.fdv)}"
+    pages = max(1, -(-len(numbered) // TOKEN_HOLDER_PAGE))
+    embeds = [_token_page_embed(token, numbered, page, pages)
+              for page in range(1, pages + 1)]
 
-    embed = discord.Embed(
-        title=f"🪙 ${token.symbol} · {token.chain}",
-        url=_token_trade_url(token),
-        description=description,
-        colour=BRAND,
+    async def load_traders(rank: str = "pnl") -> list[discord.Embed]:
+        return await _token_trader_embeds(token, fomo_matches, rank)
+
+    # The card always carries the view now: even a single holder page has a
+    # Top Traders button, and paging is disabled the same way it always was.
+    await interaction.followup.send(
+        embed=embeds[0], view=TokenCardView(embeds, load_traders)
     )
-    embed.add_field(name="Contract address", value=f"`{token.address}`", inline=False)
-    holder_chunks = _discord_line_chunks(numbered)
-    if not holder_chunks:
-        holder_chunks = ["Holder data is currently unavailable."]
-    for index, chunk in enumerate(holder_chunks, 1):
-        suffix = f" · {index}/{len(holder_chunks)}" if len(holder_chunks) > 1 else ""
-        embed.add_field(
-            name=f"Top holders · {len(token.holders)}{suffix}",
-            value=chunk,
-            inline=False,
-        )
+
+
+async def _token_theses(token: TokenIntelligence) -> list[HolderThesis]:
+    """This token's holder theses, cheapest route first.
+
+    `/feed/token/sortedThesis` answers the whole question in one request but
+    has never been probed live, so an error, an empty body or a shape this
+    build does not recognise all fall through to the verified pair of routes:
+    `/hodlers/top` names the trade behind each position and `/trades/{id}`
+    carries the comment that *is* the thesis. The fallback is one request per
+    holder, which is why it is second rather than first.
+    """
+    network_id = network_id_for(token.chain)
+    if not bot.fomo or not network_id:
+        return []
+
+    try:
+        feed = rank_theses(parse_thesis_feed(
+            await bot.fomo.token_theses(token.address, network_id)
+        ))
+        if feed:
+            return feed
+        log.info("thesis feed had no usable rows for %s; using the holder route",
+                 token.address)
+    except (FomoError, asyncio.TimeoutError) as exc:
+        log.info("thesis feed unavailable for %s: %s", token.address, exc)
+
+    try:
+        payload = await bot.fomo.token_holders(token.address, network_id)
+    except (FomoError, asyncio.TimeoutError) as exc:
+        log.info("holder lookup for theses failed on %s: %s", token.address, exc)
+        return []
+    holders, _total = parse_token_holders(payload)
+    ranked = sorted(
+        holders,
+        key=lambda holder: holder.value_usd if holder.value_usd is not None else -1.0,
+        reverse=True,
+    )[:TOKEN_HOLDER_LIMIT]
+    trade_ids = [holder.trade_id for holder in ranked if holder.trade_id]
+    if not trade_ids:
+        return []
+    details = await bot.fomo.trade_details(trade_ids)
+    return rank_theses(theses_from_trades(ranked, details))
+
+
+def _x_profile_url(twitter: str) -> str:
+    """FOMO stores `twitter` as a handle on some rows and a full URL on others."""
+    value = str(twitter).strip()
+    if value.startswith(("http://", "https://")):
+        return value
+    return f"https://x.com/{value.lstrip('@')}"
+
+
+def _thesis_quote(text: str) -> str:
+    """Render a thesis as a Discord quote without swallowing the next entry.
+
+    `>>>` quotes everything that follows it, so a multi-line thesis is quoted
+    line by line instead.
+    """
+    clipped = text if len(text) <= THESIS_TEXT_LIMIT else text[:THESIS_TEXT_LIMIT - 1] + "…"
+    lines = [line.strip() for line in clipped.splitlines()]
+    return "\n".join(f"> {line}" if line else ">" for line in lines)
+
+
+def _thesis_entry(index: int, thesis: HolderThesis) -> str:
+    handle = thesis.handle.lstrip("@")
+    parts = [f"[**{index}. {handle}**](https://fomo.family/profile/{handle})"]
+    if thesis.is_dev:
+        parts.append("🛠️")
+    if thesis.twitter:
+        parts.append(f"[[X]]({_x_profile_url(thesis.twitter)})")
+    # Position and PnL read as one figure -- "$39.1K (🟢 +$34.5K)" -- because
+    # the PnL is a property of that position, not a separate fact about it.
+    position = fmt_usd(thesis.value_usd) if thesis.value_usd is not None else ""
+    if thesis.pnl_usd is not None:
+        marker = "🟢" if thesis.pnl_usd >= 0 else "🔴"
+        sign = "+" if thesis.pnl_usd >= 0 else ""
+        position = (position + " " if position else "") + \
+            f"({marker} {sign}{fmt_usd(thesis.pnl_usd)})"
+    meta = [position] if position else []
+    if thesis.hold_seconds:
+        meta.append(fmt_duration(thesis.hold_seconds))
+    header = " ".join(parts)
+    if meta:
+        header += " · " + " · ".join(meta)
+    return f"{header}\n{_thesis_quote(thesis.text)}"
+
+
+def _thesis_page_embed(
+    token: TokenIntelligence, theses: list[HolderThesis], page: int, pages: int
+) -> discord.Embed:
+    start = (page - 1) * THESIS_PAGE
+    rows = theses[start:start + THESIS_PAGE]
+    header = (
+        f"**Token:** [{token.name}]({_token_trade_url(token) or ''}) "
+        f"(`{_short_wallet(token.address)}`)\n"
+        f"**{len(theses)} holder{'s' if len(theses) != 1 else ''} with a thesis**"
+    )
+    entries = [_thesis_entry(start + offset, thesis)
+               for offset, thesis in enumerate(rows, 1)]
+    description = header + "\n\n" + "\n\n".join(entries)
+    embed = discord.Embed(
+        title=f"📝 Holder theses for ${token.symbol}",
+        description=description[:4096],
+        colour=THESIS,
+    )
     if token.image_url:
         embed.set_thumbnail(url=token.image_url)
-    embed.set_footer(
-        text="🔵 FOMO · 🟢 Pump.fun • identities do not need to be tracked"
+    embed.set_footer(text=f"Page {page} of {pages} · fomo.family holders by position")
+    return embed
+
+
+@bot.tree.command(
+    name="thesis", description="What this token's biggest holders wrote about it"
+)
+@app_commands.describe(address="Solana or EVM token contract address")
+async def thesis_cmd(interaction: discord.Interaction, address: str) -> None:
+    await interaction.response.defer()
+    if not bot.tokens or not bot.fomo:
+        await interaction.followup.send(
+            "Thesis lookup is unavailable because the HTTP client did not start.",
+            ephemeral=True,
+        )
+        return
+
+    clean = address.strip().strip("`").strip()
+    pump_coin: PumpCoin | None = None
+    if bot.pump and not EVM_RE.fullmatch(clean):
+        try:
+            pump_coin = await bot.pump.coin(clean)
+        except (PumpError, asyncio.TimeoutError):
+            pass
+    try:
+        # Only the token's name, symbol, chain and image are wanted here, so
+        # this asks for the smallest holder list the lookup will return.
+        token = await bot.tokens.lookup(clean, limit=1, pump_coin=pump_coin)
+    except TokenIntelligenceError as exc:
+        await interaction.followup.send(
+            f"Token lookup failed: `{str(exc)[:180]}`", ephemeral=True
+        )
+        return
+
+    theses = await _token_theses(token)
+    if not theses:
+        await interaction.followup.send(
+            f"No FOMO holder has written a thesis on **${token.symbol}** yet."
+        )
+        return
+
+    pages = max(1, -(-len(theses) // THESIS_PAGE))
+    embeds = [_thesis_page_embed(token, theses, page, pages)
+              for page in range(1, pages + 1)]
+    extra = {"view": PaginatedEmbedView(embeds)} if pages > 1 else {}
+    await interaction.followup.send(embed=embeds[0], **extra)
+
+
+CONNECTED_PAGE = 3
+# A percentage on this card is the strength of the evidence, never a claim
+# about ownership. It is spelled out on every page for exactly that reason.
+CONNECTED_DISCLAIMER = (
+    "Scores measure how strong the on-chain evidence is — not proof that one "
+    "person owns both wallets."
+)
+
+
+def _connected_identity(address: str) -> str | None:
+    """The handle the wallet cache already knows for an address, if any.
+
+    `ConnectedWalletAnalyzer` takes this as a callable so the module stays
+    independent of FOMO's cache; here it is the same reverse lookup `/wallet`
+    and `/token` use, plus Pump's own mapping.
+    """
+    matches = find_cached_wallets(address)
+    if matches:
+        return matches[0].handle
+    pump_match = bot.pump_evm.cached(address) if bot.pump_evm else None
+    if pump_match:
+        return pump_match.handle
+    profile = bot.pump_profiles.cached(address) if bot.pump_profiles else None
+    return profile.username if profile else None
+
+
+def _connected_targets(
+    wallet: str | None, evm_wallet: str | None
+) -> list[tuple[str, str]]:
+    """Which (address, chain) pairs a run should cover.
+
+    An EVM wallet is checked on the chains the cache has already seen it
+    deployed on, because that is the cheapest true answer available; with no
+    record it falls back to FOMO's own chains rather than every configured one.
+    """
+    pairs: list[tuple[str, str]] = []
+    if wallet:
+        pairs.append((wallet, "solana"))
+    if evm_wallet:
+        chains = []
+        for match in find_cached_wallets(evm_wallet):
+            chains.extend(match.chains)
+        chains = [chain for chain in dict.fromkeys(chains) if chain] or list(
+            DEFAULT_EVM_CHAINS
+        )
+        pairs.extend((evm_wallet, chain) for chain in chains)
+    return pairs
+
+
+async def _connected_wallets_for(
+    interaction: discord.Interaction, target: str
+) -> tuple[list[tuple[str, str]], str] | None:
+    """Resolve `/connected`'s argument into wallets, or explain why it could not.
+
+    A raw address is taken at face value -- it is already the thing being
+    analysed. A handle goes through exactly the path `/fomo` uses: the cache
+    first, then the same bounded enrichment, so `/connected` can never resolve
+    a wallet `/fomo` would disagree with.
+    """
+    clean = target.strip().strip("`").lstrip("@").strip()
+    # An address is analysed as itself. A 32-character base58 string is not a
+    # handle anybody has, so the two cases never collide.
+    if EVM_RE.fullmatch(clean):
+        label = _connected_identity(clean)
+        return _connected_targets(None, clean), f"@{label}" if label else clean
+    if SOLANA_ADDRESS_RE.fullmatch(clean):
+        label = _connected_identity(clean)
+        return _connected_targets(clean, None), f"@{label}" if label else clean
+
+    if bot.fomo:
+        try:
+            user = await bot.fomo.resolve(clean)
+        except (FomoError, asyncio.TimeoutError) as exc:
+            await _reply_error(interaction, exc, clean)
+            return None
+    else:
+        await interaction.followup.send(
+            "FOMO is unavailable, so a handle cannot be resolved. Pass a wallet "
+            "address instead.", ephemeral=True,
+        )
+        return None
+
+    handle = user.handle.lower()
+    wallet = cached_wallet(handle) if bot.wallets else None
+    evm_wallet = cached_evm_wallet(handle) if bot.evm_wallets else None
+    if not wallet and not evm_wallet and (bot.wallets or bot.evm_wallets):
+        # Same resolution `/fomo` runs, under the same wall clock. A handle
+        # nobody has looked up yet is the common case here.
+        try:
+            stats = await fetch_trader_stats(bot.fomo, user.id)
+            wallet, evm_wallet, _stats = await asyncio.wait_for(
+                _resolve_fomo_enrichment(bot, user, stats, wallet, evm_wallet),
+                timeout=FOMO_ENRICH_TIMEOUT,
+            )
+        except Exception as exc:
+            log.info("connected: wallet resolution for @%s did not finish: %s",
+                     user.handle, exc)
+            wallet = wallet or (cached_wallet(handle) if bot.wallets else None)
+            evm_wallet = evm_wallet or (
+                cached_evm_wallet(handle) if bot.evm_wallets else None
+            )
+
+    pairs = _connected_targets(wallet, evm_wallet)
+    if not pairs:
+        await interaction.followup.send(
+            f"No wallet is known for **@{user.handle}** yet, so there is nothing "
+            "to analyse. Run `/fomo` on the handle first — it resolves and "
+            "caches the wallet, and `/connected` reads the same cache.",
+            ephemeral=True,
+        )
+        return None
+    return pairs, f"@{user.handle}"
+
+
+def _connected_entry(index: int, item: Association) -> tuple[str, str]:
+    """One association as a Discord field: who, how strong, and why."""
+    record = item.relationship
+    link = address_url(record.chain, record.address)
+    address = _short_wallet(record.address)
+    address_text = f"[`{address}`]({link})" if link else f"`{address}`"
+    name = f"{index}. @{record.identity}" if record.identity else f"{index}. {address}"
+
+    lines = [
+        f"**{item.band}** · **{item.score}/100** · {record.chain.title()}",
+        f"Wallet: {address_text}",
+        f"Direct transfers: **{record.transfers}** "
+        f"({record.sent_count} out / {record.received_count} in)",
+    ]
+    if record.total_usd:
+        lines.append(
+            f"Total transferred: **{fmt_usd(record.total_usd)}** "
+            f"(sent {fmt_usd(record.sent_usd)} / received "
+            f"{fmt_usd(record.received_usd)})"
+        )
+    if record.unpriced:
+        lines.append(f"Unpriced transfers: {record.unpriced}")
+    lines.append(
+        f"First: {fmt_day(record.first_seen)} · "
+        f"Latest: {fmt_day(record.last_seen)} · "
+        f"{record.active_days} separate dates"
     )
-    await interaction.followup.send(embed=embed)
+    if item.reasons:
+        lines.append("Evidence: " + "; ".join(item.reasons[:4]) + ".")
+    return name, _fit_field(lines)
+
+
+def _connected_embeds(
+    report: ConnectedReport, label: str, *, weaker: bool = False
+) -> list[discord.Embed]:
+    """Every page of one `/connected` run, rendered before the first is sent."""
+    items = list(report.weaker if weaker else report.associations)
+    title = "🔗 Possible associations" if weaker else "🔗 Connected wallets"
+    scope = ", ".join(
+        f"{chain.title()} `{_short_wallet(address)}`"
+        for address, chain in report.wallets
+    ) or "—"
+    header = f"**{label}** · analysed {scope}"
+    if report.transactions:
+        header += f"\n{report.transactions:,} transactions sampled"
+
+    if not items:
+        empty = discord.Embed(
+            title=title,
+            description=(
+                f"{header}\n\n"
+                + ("No further candidates cleared the evidence bar."
+                   if weaker else
+                   "**No wallet met the evidence bar.** That is the intended "
+                   "answer when the chain does not show a strong, repeated, "
+                   "multi-signal relationship — exchanges, bridges, routers, "
+                   "contracts and high-degree service wallets are excluded by "
+                   "design.")
+            ),
+            colour=BRAND,
+        )
+        for warning in report.warnings[:3]:
+            empty.add_field(name="Note", value=warning[:1024], inline=False)
+        empty.set_footer(text=CONNECTED_DISCLAIMER)
+        return [empty]
+
+    pages = max(1, -(-len(items) // CONNECTED_PAGE))
+    embeds: list[discord.Embed] = []
+    for page in range(1, pages + 1):
+        embed = discord.Embed(
+            title=title,
+            description=header,
+            colour=WIN if not weaker else BRAND,
+        )
+        start = (page - 1) * CONNECTED_PAGE
+        for offset, item in enumerate(items[start:start + CONNECTED_PAGE], start + 1):
+            name, value = _connected_entry(offset, item)
+            embed.add_field(name=name[:256], value=value, inline=False)
+        for warning in report.warnings[:2]:
+            embed.add_field(name="Note", value=warning[:1024], inline=False)
+        embed.set_footer(
+            text=f"Page {page} of {pages} · {CONNECTED_DISCLAIMER}"
+        )
+        embeds.append(embed)
+    return embeds
+
+
+def _connected_evidence_embed(item: Association) -> discord.Embed:
+    """The transactions behind one association, so the claim can be checked."""
+    record = item.relationship
+    embed = discord.Embed(
+        title=f"🔍 Evidence · {_short_wallet(record.address)}",
+        description=(
+            f"**{item.band}** · {item.score}/100 · {record.chain.title()}\n"
+            f"Between `{_short_wallet(record.known_wallet)}` and "
+            f"`{_short_wallet(record.address)}`"
+        ),
+        colour=BRAND,
+    )
+    links = []
+    for reference in record.references[:10]:
+        url = explorer_url(record.chain, reference)
+        short = f"{reference[:10]}…{reference[-6:]}" if len(reference) > 20 else reference
+        links.append(f"• [{short}]({url})" if url else f"• `{short}`")
+    embed.add_field(
+        name=f"Sampled transactions ({len(record.references)} kept)",
+        value=_fit_field(links) if links else "No transaction reference was kept.",
+        inline=False,
+    )
+    if item.reasons:
+        embed.add_field(
+            name="Why this scored",
+            value=_fit_field([f"• {reason}" for reason in item.reasons]),
+            inline=False,
+        )
+    embed.set_footer(text=CONNECTED_DISCLAIMER)
+    return embed
+
+
+class ConnectedEvidenceSelect(discord.ui.Select):
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if isinstance(view, ConnectedView):
+            await view.show_evidence(interaction, self.values[0])
+
+
+class ConnectedView(PaginatedEmbedView):
+    """`/connected`'s pager, its weaker-evidence half, and the evidence drawer.
+
+    Both result sets are rendered up front -- the analysis is already paid for
+    by the time the card exists -- so every button here is a message edit.
+    Evidence is sent ephemerally rather than replacing the card, because it is
+    a drill-down on one row, not another page.
+    """
+
+    def __init__(
+        self, report: ConnectedReport, label: str, *, timeout: float = 3600
+    ) -> None:
+        self.report = report
+        self.section = "strong"
+        self._pages = {
+            "strong": _connected_embeds(report, label),
+            "weaker": _connected_embeds(report, label, weaker=True),
+        }
+        self._indexes = {"strong": 0, "weaker": 0}
+        super().__init__(self._pages["strong"], timeout=timeout)
+        self._install_select()
+
+    def _sync(self) -> None:
+        super()._sync()
+        button = getattr(self, "section_button", None)
+        if button is not None:
+            button.label = (
+                "Strongest only" if self.section == "weaker"
+                else f"Possible ({len(self.report.weaker)})"
+            )
+            button.disabled = not self.report.weaker
+
+    def _items(self) -> list[Association]:
+        return list(
+            self.report.weaker if self.section == "weaker"
+            else self.report.associations
+        )
+
+    def _install_select(self) -> None:
+        """Rebuild the evidence picker for whichever list is showing."""
+        for child in list(self.children):
+            if isinstance(child, ConnectedEvidenceSelect):
+                self.remove_item(child)
+        items = self._items()[:25]
+        if not items:
+            return
+        options = [
+            discord.SelectOption(
+                label=(f"@{item.relationship.identity}"
+                       if item.relationship.identity
+                       else _short_wallet(item.relationship.address))[:100],
+                value=f"{item.chain}:{item.address}"[:100],
+                description=f"{item.band} · {item.score}/100 · "
+                            f"{item.relationship.transfers} transfers"[:100],
+            )
+            for item in items
+        ]
+        self.add_item(ConnectedEvidenceSelect(
+            placeholder="Inspect the transactions behind a wallet",
+            options=options, min_values=1, max_values=1, row=1,
+        ))
+
+    async def show_evidence(
+        self, interaction: discord.Interaction, value: str
+    ) -> None:
+        match = next(
+            (item for item in self._items()
+             if f"{item.chain}:{item.address}"[:100] == value), None
+        )
+        if match is None:
+            await interaction.response.send_message(
+                "That wallet is no longer on this card.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            embed=_connected_evidence_embed(match), ephemeral=True
+        )
+
+    @discord.ui.button(label="Possible", style=discord.ButtonStyle.secondary)
+    async def section_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        self._indexes[self.section] = self.index
+        self.section = "strong" if self.section == "weaker" else "weaker"
+        self.embeds = self._pages[self.section]
+        self.index = min(self._indexes[self.section], len(self.embeds) - 1)
+        self._sync()
+        self._install_select()
+        try:
+            await interaction.response.edit_message(
+                embed=self.embeds[self.index], view=self
+            )
+        except discord.HTTPException as exc:
+            log.debug("could not switch the /connected card: %s", exc)
+
+
+@bot.tree.command(
+    name="connected",
+    description="Find wallets with strong on-chain ties to a FOMO trader",
+)
+@app_commands.describe(
+    target="FOMO username, or a Solana / EVM wallet address",
+    strict="Very High evidence only (default: High and above)",
+)
+async def connected_cmd(
+    interaction: discord.Interaction, target: str, strict: bool = False,
+) -> None:
+    """Wallets that the chain says are unusually close to a known one.
+
+    The command never claims shared ownership. It reports how much evidence
+    there is, having first thrown away everything that looks like exchange,
+    bridge, router, contract or service infrastructure -- so an empty answer is
+    a real answer, and the common one.
+    """
+    await interaction.response.defer()
+    if not bot.connected:
+        await interaction.followup.send(
+            "Wallet connection analysis is unavailable because the HTTP client "
+            "did not start.", ephemeral=True,
+        )
+        return
+
+    resolved = await _connected_wallets_for(interaction, target)
+    if resolved is None:
+        return
+    pairs, label = resolved
+
+    min_score = SCORE_VERY_HIGH if strict else DEFAULT_MIN_SCORE
+    try:
+        report = await bot.connected.analyse(pairs, min_score=min_score)
+    except Exception as exc:
+        log.exception("connected analysis failed for %s", label)
+        await interaction.followup.send(
+            f"Connection analysis failed: `{str(exc)[:180]}`", ephemeral=True
+        )
+        return
+
+    log.info(
+        "connected: %s -> %d strong, %d possible, from %d sampled transactions",
+        label, len(report.associations), len(report.weaker), report.transactions,
+    )
+    view = ConnectedView(report, label)
+    await interaction.followup.send(embed=view.embeds[0], view=view)
 
 
 def _tracked_entries(channel_id: int) -> list[tuple[str, dict[str, Any]]]:
@@ -1883,114 +3011,130 @@ def _tracked_entries(channel_id: int) -> list[tuple[str, dict[str, Any]]]:
     )
 
 
-@bot.tree.command(name="untrack", description="Select tracked profiles to remove")
-async def untrack_cmd(interaction: discord.Interaction) -> None:
-    entries = _tracked_entries(interaction.channel_id)
-    if not entries:
-        await interaction.response.send_message(
-            "Nothing is being tracked in this channel.", ephemeral=True
+def _tracked_line(index: int, platform: str, entry: dict[str, Any]) -> str:
+    """One row of `/tracked`, in each platform's own link shape."""
+    handle = str(entry.get("handle") or "unknown")
+    filters = activity_filter_label(_entry_activity_filters(entry))
+    if platform == "FOMO":
+        return (
+            f"`{index:>2}.` 🔵 [@{handle}](https://fomo.family/profile/{handle})"
+            f" · {filters}"
         )
-        return
-
-    async def remove_selected(
-        menu_interaction: discord.Interaction,
-        selected: list[tuple[str, dict[str, Any]]],
-    ) -> None:
-        removed: list[str] = []
-        for platform, entry in selected:
-            user_id = str(entry.get("userId") or "")
-            store = bot.tracking if platform == "FOMO" else bot.pump_tracking
-            if user_id and store.remove(interaction.channel_id, user_id):
-                removed.append(f"{platform} **@{entry.get('handle', 'unknown')}**")
-        message = "Stopped tracking " + ", ".join(removed) + "." if removed else "No subscriptions were removed."
-        await menu_interaction.response.edit_message(content=message, view=None)
-
-    visible = entries[:25]
-    suffix = " Only the first 25 are shown." if len(entries) > 25 else ""
-    view = TrackedEntrySelectionView(
-        interaction.user.id,
-        visible,
-        remove_selected,
-        multiple=True,
-        placeholder="Select one or more profiles to untrack",
-    )
-    await interaction.response.send_message(
-        f"Choose who to stop tracking in this channel.{suffix}",
-        view=view,
-        ephemeral=True,
+    address = str(entry.get("userId") or "")
+    return (
+        f"`{index:>2}.` 🟢 {_pump_username_link(handle, address)} · "
+        f"{_pump_wallet_link(address)} · {filters}"
     )
 
 
-@bot.tree.command(name="tracksettings", description="Change alerts for a tracked profile")
-async def track_settings_cmd(interaction: discord.Interaction) -> None:
-    entries = _tracked_entries(interaction.channel_id)
-    if not entries:
-        await interaction.response.send_message(
-            "Nothing is being tracked in this channel.", ephemeral=True
-        )
-        return
+def _tracked_embeds(entries: list[tuple[str, dict[str, Any]]]) -> list[discord.Embed]:
+    """The combined list `/fomotracked` and `/pumptracked` used to show apart."""
+    lines = [_tracked_line(index, platform, entry)
+             for index, (platform, entry) in enumerate(entries, 1)]
+    chunks: list[list[str]] = [[]]
+    for line in lines:
+        if chunks[-1] and len("\n".join(chunks[-1] + [line])) > 3800:
+            chunks.append([])
+        chunks[-1].append(line)
 
-    async def choose_entry(
-        menu_interaction: discord.Interaction,
-        selected: list[tuple[str, dict[str, Any]]],
-    ) -> None:
-        platform, entry = selected[0]
-        is_fomo = platform == "FOMO"
-        store = bot.tracking if is_fomo else bot.pump_tracking
-        allowed = FOMO_ACTIVITY_FILTERS if is_fomo else PUMP_ACTIVITY_FILTERS
-        labels = (
-            (("buys", "Buys", "🟢"), ("sells", "Sells", "🔴"), ("theses", "Theses", "📝"))
-            if is_fomo else
-            (("buys", "Buys", "🟢"), ("sells", "Sells", "🔴"), ("callouts", "Callouts", "📣"))
+    threshold = (f" • minimum Pump trade {fmt_usd(PUMP_MIN_TRADE_USD)}"
+                 if PUMP_MIN_TRADE_USD > 0 else "")
+    embeds = []
+    for index, chunk in enumerate(chunks, 1):
+        suffix = f" · {index}/{len(chunks)}" if len(chunks) > 1 else ""
+        embed = discord.Embed(
+            title=f"🔔 Tracked in this channel · {len(entries)}{suffix}",
+            description="\n".join(chunk) or "Nothing is being tracked.",
+            colour=BRAND,
         )
-        defaults = normalize_activity_filters(_entry_activity_filters(entry), allowed)
+        embed.set_footer(
+            text=f"🔵 FOMO · 🟢 Pump.fun • large swaps ≥ "
+                 f"{fmt_usd(LARGE_SWAP_USD)}{threshold}"
+        )
+        embeds.append(embed)
+    return embeds
+
+
+def _remove_tracked_entries(
+    channel_id: int, selected: list[tuple[str, dict[str, Any]]]
+) -> list[str]:
+    """Drop each selected subscription, returning what was actually removed."""
+    removed: list[str] = []
+    for platform, entry in selected:
         user_id = str(entry.get("userId") or "")
-        handle = str(entry.get("handle") or "unknown")
+        store = bot.tracking if platform == "FOMO" else bot.pump_tracking
+        if user_id and store.remove(channel_id, user_id):
+            removed.append(f"{platform} **@{entry.get('handle', 'unknown')}**")
+    return removed
 
-        async def save_settings(
-            _activity_interaction: discord.Interaction, selected_filters: list[str]
-        ) -> str:
-            updated = store.set_activity_filters(
-                interaction.channel_id, user_id, selected_filters
-            )
-            if not updated:
-                return f"The {platform} subscription for **@{handle}** no longer exists."
-            return (
-                f"Updated {platform} alerts for **@{handle}** · "
-                f"**{activity_filter_label(selected_filters)}**."
-            )
 
-        activity_view = ActivitySelectionView(
-            interaction.user.id,
-            _activity_options(labels, defaults),
-            save_settings,
-        )
-        await menu_interaction.response.edit_message(
-            content=f"Choose the alerts for {platform} **@{handle}** (select 1–3):",
-            view=activity_view,
-        )
+def _alert_settings_view(
+    requester_id: int, channel_id: int, platform: str, entry: dict[str, Any]
+) -> ActivitySelectionView:
+    """The alert picker behind `/tracked`'s Edit button.
 
-    visible = entries[:25]
-    suffix = " Only the first 25 are shown." if len(entries) > 25 else ""
-    view = TrackedEntrySelectionView(
-        interaction.user.id,
-        visible,
-        choose_entry,
-        multiple=False,
-        placeholder="Select a tracked profile",
+    Each platform offers a different third alert type -- theses on FOMO,
+    callouts on Pump -- so the option list and the store both follow from the
+    entry's platform rather than from which command opened the picker.
+    """
+    is_fomo = platform == "FOMO"
+    store = bot.tracking if is_fomo else bot.pump_tracking
+    allowed = FOMO_ACTIVITY_FILTERS if is_fomo else PUMP_ACTIVITY_FILTERS
+    labels = (
+        (("buys", "Buys", "🟢"), ("sells", "Sells", "🔴"), ("theses", "Theses", "📝"))
+        if is_fomo else
+        (("buys", "Buys", "🟢"), ("sells", "Sells", "🔴"), ("callouts", "Callouts", "📣"))
     )
-    await interaction.response.send_message(
-        f"Choose whose alert settings to change.{suffix}",
-        view=view,
-        ephemeral=True,
+    defaults = normalize_activity_filters(_entry_activity_filters(entry), allowed)
+    user_id = str(entry.get("userId") or "")
+    handle = str(entry.get("handle") or "unknown")
+
+    async def save_settings(
+        _activity_interaction: discord.Interaction, selected_filters: list[str]
+    ) -> str:
+        updated = store.set_activity_filters(channel_id, user_id, selected_filters)
+        if not updated:
+            return f"The {platform} subscription for **@{handle}** no longer exists."
+        return (
+            f"Updated {platform} alerts for **@{handle}** · "
+            f"**{activity_filter_label(selected_filters)}**."
+        )
+
+    return ActivitySelectionView(
+        requester_id, _activity_options(labels, defaults), save_settings
     )
 
 
-@bot.tree.command(name="fomotrack", description="Alert this channel about a FOMO trader")
-@app_commands.describe(handle="FOMO username to track")
-async def fomo_track_cmd(interaction: discord.Interaction, handle: str) -> None:
-    await interaction.response.defer()
-    assert bot.fomo
+@bot.tree.command(
+    name="tracked", description="Everything tracked in this channel"
+)
+async def tracked_cmd(interaction: discord.Interaction) -> None:
+    entries = _tracked_entries(interaction.channel_id)
+    if not entries:
+        await interaction.response.send_message(
+            "Nothing is being tracked in this channel yet. "
+            "Use `/track` to add a FOMO trader or a Pump profile."
+        )
+        return
+
+    embeds = _tracked_embeds(entries)
+    view = TrackedManagerView(interaction.user.id, entries, interaction.channel_id)
+    if len(entries) > 25:
+        view.selector.placeholder = (
+            "Select from the first 25 tracked profiles"
+        )
+    await interaction.response.send_message(embed=embeds[0], view=view)
+    for embed in embeds[1:]:
+        await interaction.followup.send(embed=embed)
+
+
+async def _track_fomo(interaction: discord.Interaction, handle: str) -> None:
+    """The FOMO half of `/track`. The interaction is already deferred."""
+    if not bot.fomo:
+        await interaction.followup.send(
+            "FOMO support is unavailable.", ephemeral=True
+        )
+        return
     try:
         user = await bot.fomo.resolve(handle)
         swaps_data, trades_data = await asyncio.gather(
@@ -2043,61 +3187,6 @@ async def fomo_track_cmd(interaction: discord.Interaction, handle: str) -> None:
     )
 
 
-@bot.tree.command(name="fomotracked", description="Show traders tracked in this channel")
-async def fomo_tracked_cmd(interaction: discord.Interaction) -> None:
-    entries = bot.tracking.for_channel(interaction.channel_id)
-    if not entries:
-        await interaction.response.send_message(
-            "No FOMO traders are being tracked in this channel yet."
-        )
-        return
-
-    lines = [
-        f"`{index:>2}.` [@{entry['handle']}]"
-        f"(https://fomo.family/profile/{entry['handle']}) · "
-        f"{activity_filter_label(_entry_activity_filters(entry))}"
-        for index, entry in enumerate(entries, 1)
-    ]
-    chunks: list[list[str]] = [[]]
-    for line in lines:
-        if chunks[-1] and len("\n".join(chunks[-1] + [line])) > 3800:
-            chunks.append([])
-        chunks[-1].append(line)
-
-    embeds = []
-    for index, chunk in enumerate(chunks, 1):
-        suffix = f" · {index}/{len(chunks)}" if len(chunks) > 1 else ""
-        embed = discord.Embed(
-            title=f"🔔 Tracked FOMO traders · {len(entries)}{suffix}",
-            description="\n".join(chunk),
-            colour=BRAND,
-        )
-        embed.set_footer(
-            text=f"This channel • large swaps ≥ {fmt_usd(LARGE_SWAP_USD)}"
-        )
-        embeds.append(embed)
-
-    await interaction.response.send_message(embed=embeds[0])
-    for embed in embeds[1:]:
-        await interaction.followup.send(embed=embed)
-
-
-@bot.tree.command(name="fomountrack", description="Stop FOMO trader alerts in this channel")
-@app_commands.describe(handle="FOMO username to stop tracking")
-async def fomo_untrack_cmd(interaction: discord.Interaction, handle: str) -> None:
-    await interaction.response.defer(ephemeral=True)
-    assert bot.fomo
-    try:
-        user = await bot.fomo.resolve(handle)
-    except (FomoError, asyncio.TimeoutError) as exc:
-        await _reply_error(interaction, exc, handle)
-        return
-    removed = bot.tracking.remove(interaction.channel_id, user.id)
-    message = (f"Stopped tracking **@{user.handle}** in this channel."
-               if removed else f"**@{user.handle}** was not tracked in this channel.")
-    await interaction.followup.send(message, ephemeral=True)
-
-
 @bot.tree.command(name="pump", description="Look up a Pump.fun profile")
 @app_commands.describe(handle="Pump username or Solana wallet")
 async def pump_cmd(interaction: discord.Interaction, handle: str) -> None:
@@ -2139,48 +3228,8 @@ async def pump_cmd(interaction: discord.Interaction, handle: str) -> None:
     await interaction.followup.send(embed=embed)
 
 
-@bot.tree.command(name="pumpwallet", description="Find a Pump.fun profile by wallet")
-@app_commands.describe(address="Solana or cached EVM wallet address")
-async def pump_wallet_cmd(interaction: discord.Interaction, address: str) -> None:
-    await interaction.response.defer()
-    if not bot.pump:
-        await interaction.followup.send("Pump support is unavailable.", ephemeral=True)
-        return
-    query = address.strip().strip("`").strip()
-    cached_evm = bot.pump_evm.cached(query) if bot.pump_evm else None
-    user = await _resolve_pump_user(
-        interaction, cached_evm.solana if cached_evm else query
-    )
-    if user is None:
-        return
-    embed = discord.Embed(
-        title="🟩 Pump wallet match",
-        description=_pump_username_link(user.username, user.address),
-        colour=WIN,
-    )
-    if cached_evm:
-        embed.add_field(name="EVM wallet", value=f"`{cached_evm.evm}`", inline=False)
-        embed.add_field(
-            name="Solana wallet",
-            value=_pump_wallet_link(user.address),
-            inline=False,
-        )
-    else:
-        embed.add_field(
-            name="Solana wallet",
-            value=_pump_wallet_link(user.address),
-            inline=False,
-        )
-    if user.profile_image:
-        embed.set_thumbnail(url=user.profile_image)
-    embed.set_footer(text="Pump profile mapping")
-    await interaction.followup.send(embed=embed)
-
-
-@bot.tree.command(name="pumptrack", description="Alert this channel about a Pump.fun profile")
-@app_commands.describe(handle="Pump username or Solana wallet to track")
-async def pump_track_cmd(interaction: discord.Interaction, handle: str) -> None:
-    await interaction.response.defer()
+async def _track_pump(interaction: discord.Interaction, handle: str) -> None:
+    """The Pump half of `/track`. The interaction is already deferred."""
     if not bot.pump:
         await interaction.followup.send("Pump support is unavailable.", ephemeral=True)
         return
@@ -2249,82 +3298,34 @@ async def pump_track_cmd(interaction: discord.Interaction, handle: str) -> None:
     )
 
 
-@bot.tree.command(name="pumptracked", description="Show Pump profiles tracked in this channel")
-async def pump_tracked_cmd(interaction: discord.Interaction) -> None:
-    entries = bot.pump_tracking.for_channel(interaction.channel_id)
-    if not entries:
-        await interaction.response.send_message(
-            "No Pump.fun profiles are being tracked in this channel yet."
-        )
-        return
-    lines = [
-        f"`{index:>2}.` "
-        f"{_pump_username_link(str(entry['handle']), str(entry['userId']))} · "
-        f"{_pump_wallet_link(str(entry['userId']))} · "
-        f"{activity_filter_label(_entry_activity_filters(entry))}"
-        for index, entry in enumerate(entries, 1)
-    ]
-    chunks: list[list[str]] = [[]]
-    for line in lines:
-        if chunks[-1] and len("\n".join(chunks[-1] + [line])) > 3800:
-            chunks.append([])
-        chunks[-1].append(line)
-    embeds = []
-    for index, chunk in enumerate(chunks, 1):
-        suffix = f" · {index}/{len(chunks)}" if len(chunks) > 1 else ""
-        embed = discord.Embed(
-            title=f"🔔 Tracked Pump profiles · {len(entries)}{suffix}",
-            description="\n".join(chunk),
-            colour=WIN,
-        )
-        threshold = (f" • minimum trade {fmt_usd(PUMP_MIN_TRADE_USD)}"
-                     if PUMP_MIN_TRADE_USD > 0 else "")
-        embed.set_footer(text=f"This channel{threshold}")
-        embeds.append(embed)
-    await interaction.response.send_message(embed=embeds[0])
-    for embed in embeds[1:]:
-        await interaction.followup.send(embed=embed)
+@bot.tree.command(
+    name="track", description="Alert this channel about a FOMO or Pump profile"
+)
+@app_commands.describe(
+    platform="Which platform the profile lives on",
+    target="FOMO username, or a Pump username or Solana wallet",
+)
+@app_commands.choices(platform=[
+    app_commands.Choice(name="FOMO", value="fomo"),
+    app_commands.Choice(name="Pump.fun", value="pump"),
+])
+async def track_cmd(
+    interaction: discord.Interaction,
+    platform: app_commands.Choice[str],
+    target: str,
+) -> None:
+    """One entry point for both trackers.
 
-
-@bot.tree.command(name="pumpuntrack", description="Stop Pump alerts in this channel")
-@app_commands.describe(handle="Pump username or Solana wallet to stop tracking")
-async def pump_untrack_cmd(interaction: discord.Interaction, handle: str) -> None:
-    await interaction.response.defer(ephemeral=True)
-    if not bot.pump:
-        await interaction.followup.send("Pump support is unavailable.", ephemeral=True)
-        return
-    user = await _resolve_pump_user(interaction, handle)
-    if user is None:
-        return
-    removed = bot.pump_tracking.remove(interaction.channel_id, user.address)
-    linked_user = _pump_username_link(user.username, user.address)
-    message = (f"Stopped tracking {linked_user} in this channel."
-               if removed else f"{linked_user} was not tracked in this channel.")
-    await interaction.followup.send(message, ephemeral=True)
-
-
-@bot.tree.command(name="fomosearch", description="Fuzzy-search FOMO traders")
-@app_commands.describe(term="Part of a handle or display name")
-async def fomo_search_cmd(interaction: discord.Interaction, term: str) -> None:
+    `/fomotrack` and `/pumptrack` differed only in which profile they resolved
+    and which third alert type they offered, so the platform is an argument
+    rather than a command name. Each half still owns its own resolution,
+    baseline snapshot and alert picker.
+    """
     await interaction.response.defer()
-    assert bot.fomo
-    try:
-        hits = await bot.fomo.search(term, limit=8)
-    except (FomoError, asyncio.TimeoutError) as exc:
-        await _reply_error(interaction, exc, term)
-        return
-    if not hits:
-        await interaction.followup.send(f"Nothing matching **{term}**.", ephemeral=True)
-        return
-    lines = [
-        f"`{i:>2}.` [{u.display_name}]({u.profile_url}) — @{u.handle} · "
-        f"{fmt_count(u.followers)} followers · {fmt_usd(u.total_volume)} vol"
-        for i, u in enumerate(hits, 1)
-    ]
-    embed = discord.Embed(
-        title=f"FOMO search · {term}", description="\n".join(lines), colour=BRAND
-    )
-    await interaction.followup.send(embed=embed)
+    if platform.value == "pump":
+        await _track_pump(interaction, target)
+    else:
+        await _track_fomo(interaction, target)
 
 
 @bot.tree.command(name="fomotop", description="FOMO leaderboard")

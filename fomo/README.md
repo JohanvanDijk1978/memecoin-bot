@@ -116,20 +116,22 @@ python fomo_bot.py
 | Command | What it does |
 |---|---|
 | `/fomo <handle>` | Choose a Compact identity card or the complete Wide profile. |
-| `/wallet <address>` | Reverse-search a Solana or EVM wallet across FOMO and Pump identities. |
-| `/token <address> [top 5\|10]` | Show token market cap, image and top holders with FOMO/Pump identities. |
-| `/untrack` | Select one or more current FOMO/Pump subscriptions to remove. |
-| `/tracksettings` | Select a subscription and change its alert types without re-adding it. |
-| `/fomotrack <handle>` | Select any combination of buys, sells and theses to track. |
-| `/fomotracked` | Publicly list every tracked trader and their alert filter. |
-| `/fomountrack <handle>` | Stop that trader's alerts in the current channel. |
-| `/fomosearch <term>` | Top 8 fuzzy matches. |
-| `/fomotop [24h\|all-time] [n]` | Leaderboard. |
 | `/pump <handle\|wallet>` | Look up a Pump profile, portfolio and latest callouts. |
-| `/pumpwallet <address>` | Return the Pump handle for a Solana wallet or a discovered EVM wallet. |
-| `/pumptrack <handle\|wallet>` | Select any combination of buys, sells and callouts to track. |
-| `/pumptracked` | Publicly list Pump profiles and their alert filters. |
-| `/pumpuntrack <handle\|wallet>` | Stop that Pump profile's alerts in the current channel. |
+| `/wallet <address>` | Reverse-search a Solana or EVM wallet across FOMO and Pump identities. |
+| `/token <address>` | Market cap, image, the top 50 holders **and** the 50 best-performing traders by PnL/ROI with FOMO/Pump identities, ten a page. |
+| `/thesis <address>` | What this token's biggest FOMO holders wrote about it, five a page. |
+| `/connected <target> [strict]` | Wallets with strong on-chain evidence of belonging to the same cluster as a FOMO trader's. |
+| `/track <platform> <target>` | Track a FOMO trader or a Pump profile; pick the alert types from a menu. |
+| `/tracked` | List everything tracked in this channel, with **Edit** and **Remove** buttons. |
+| `/fomotop [24h\|all-time] [n]` | Leaderboard. |
+
+`/track` replaced `/fomotrack` and `/pumptrack`: the platform is a choice on the
+one command rather than a second command name. `/tracked` replaced four —
+`/fomotracked`, `/pumptracked`, `/tracksettings` and `/untrack` — because all of
+them opened the same list of subscriptions and differed only in the verb.
+Select one or more rows, then **Edit** to change one subscription's alert types
+or **Remove** to drop every selected one. `/pumpwallet` is gone; `/wallet`
+already answers for both platforms, and `/fomosearch` is gone with it.
 
 Tracking alerts are sent as individual activity cards: green for buys, red for
 sells and purple for theses. Trade values are shown in the chain's native
@@ -139,9 +141,8 @@ price. Each card includes the token, chain, contract and timestamp; supported
 tokens link directly to their Solana, Base, BSC or Ethereum page on Padre. The
 configured large-swap threshold still controls
 follow-up swap alerts, while a new position and a qualifying opening swap are
-coalesced into one card. Successful `/fomotrack` confirmations and
-`/fomotracked` lists are public so everyone in the channel can see what is being
-monitored.
+coalesced into one card. Successful `/track` confirmations and `/tracked` lists
+are public so everyone in the channel can see what is being monitored.
 
 Pump tracking uses the public Pump profile APIs for identities, portfolio data,
 coin metadata and callouts. Exact trade direction and amounts come from the
@@ -162,22 +163,135 @@ Set `PUMP_MIN_TRADE_USD=0` to alert on every detected trade or raise it to apply
 a minimum value. `/pump` resolves callout mints through Pump's coin endpoint, so
 old or sold callouts still show their real ticker instead of `$TOKEN`.
 
-After `/fomotrack` or `/pumptrack` resolves the profile, Discord shows a
-multi-select menu. Choose any one, two or all three activity types. Each
-subscription stores its own combination, and `/fomotracked` or `/pumptracked`
-shows that choice. `/tracksettings` changes only this stored filter and keeps
-the existing baseline, so activity hidden by an old filter is never replayed
-later. `/untrack` lists both services in one private selection menu and can
-remove several subscriptions at once.
+After `/track` resolves the profile, Discord shows a multi-select menu. Choose
+any one, two or all three activity types — buys, sells and theses on FOMO; buys,
+sells and callouts on Pump. Each subscription stores its own combination, and
+`/tracked` shows that choice. The **Edit** button changes only this stored
+filter and keeps the existing baseline, so activity hidden by an old filter is
+never replayed later. **Remove** can drop several subscriptions at once.
 
 `/token` auto-detects Solana, Ethereum, BSC, Base or Robinhood Chain from the
 token's most liquid DexScreener pair. It shows market cap, image, contract and
-five or ten top holder owners. SPL token accounts are converted to their actual
+the top 50 holder owners across five pages of ten, turned with Previous/Next.
+Every page is rendered before the first is sent, so paging costs a message edit
+rather than another round of identity lookups. Reaching past the twentieth
+holder needs a Helius endpoint in `SOLANA_RPC`: `getTokenLargestAccounts` stops
+at 20 token accounts, so Solana holders come from Helius DAS `getTokenAccounts`
+and fall back to the shorter list when no Helius endpoint answers.
+SPL token accounts are converted to their actual
 Solana owner wallets. Ethereum/BSC/Base use the public holder index and
 Robinhood uses Blockscout. Every holder is checked against verified FOMO
 wallets and Pump's independent identity cache; Solana Pump profiles are also
 resolved live, so the profile does not need to be tracked. Unknown holders are
 shown as linked wallet addresses rather than guessed identities.
+
+### Top Traders — best performers, not busiest wallets
+
+The same card carries a **Top Traders** button next to Previous/Next. It is the
+same shape as the holders — fifty rows, ten a page, the same FOMO and Pump
+identity labelling — and it answers the other question worth asking about a
+token: **who is actually winning on it.**
+
+Holders are a single ranked query; performance has to be reconstructed out of
+transfer history, so the list is rendered only when the button is pressed, and
+then kept on the card. Toggling back and forth afterwards costs nothing.
+
+| chain | source |
+|---|---|
+| Solana | Helius parsed transaction history for the mint (owner accounts, no token-account resolution). Without a Helius `api-key` in `SOLANA_RPC` it falls back to a much smaller batched `getTransaction` sample and logs that it did. |
+| Ethereum / BSC / Base / Robinhood | `alchemy_getAssetTransfers` for the token, newest first; Robinhood also has Blockscout as a fallback. |
+
+Each row is one wallet's ledger for this token:
+
+```text
+`1.` 🔵 @rowdy · 4bC1…9xQz · 12 tx
+🟢 ` $130K  +$12,450  +382.5%`
+        entry     PnL      ROI
+```
+
+- **Entry** — the *weighted average* acquisition price (total spent / total
+  bought), shown as the market cap it implies when the token's supply is known,
+  and as a price when it is not.
+- **PnL** — realised PnL on everything sold, against that weighted-average cost
+  basis, plus unrealised PnL on what is still held at the current price. `◐`
+  marks a position that is still open, so part of the figure moves with price.
+- **ROI** — PnL over the capital actually invested (`PnL / cost basis × 100`).
+
+**Ranked by PnL by default.** The `Sort:` button cycles PnL → ROI → Volume
+without another provider request — the client returns the rows any of the three
+rankings needs. Volume (bought + sold) is still there, but only when it is
+asked for: it measures activity, and a whale who makes one enormous buy and
+never sells is not a top trader.
+
+**Where the dollars come from.** A swap's counter-leg is in the same
+transaction as its token leg. On Solana both routes already return the whole
+transaction, so USDC/USDT and SOL legs price the trade for free (native
+transfers below 0.005 SOL are rent and fees, not a price). On EVM the token
+page carries only the token, so the venue's own WETH/USDC movement is read back
+in one bounded extra query per pool and joined by transaction hash.
+
+**How much history the sample reaches is the whole ballgame.** A token's best
+traders bought at its beginning — they entered at a $23K market cap and sold at
+$133K — so a sample that only reaches the last few hundred transactions does
+not merely see less, it systematically excludes the winners and ranks the tail:
+recent buyers, all at nearly the same entry, all up the same few percent.
+Paging therefore continues until the token's *first* transaction, bounded by
+`TOKEN_TRADER_SOLANA_PAGES` (30 × 100 parsed transactions),
+`TOKEN_TRADER_EVM_PAGES` (5 × 1000 transfers) and `TOKEN_TRADER_BUDGET_SECONDS`
+(60s of wall clock, since paging is sequential). It stops early the moment
+history runs out, so a quiet token costs a fraction of the ceiling.
+
+The card reports which of the two it got: **`full history`** when paging reached
+the token's first transaction, or a transaction count with a **`+`** when a
+budget cut it short — in which case the board is a window rather than a verdict.
+Results are cached for five minutes per token.
+
+**Three kinds of cost basis, kept apart.** Inventory is tracked in three
+buckets, because "this cost nothing" and "we cannot read what this cost" are
+different facts:
+
+| bucket | what it is | on sale |
+|---|---|---|
+| paid | acquired in a transaction with a readable money leg | realises proceeds − weighted-average cost |
+| free | acquired in a transaction where nothing of value moved at all — an airdrop, a dev allocation, a transfer in | realises the full proceeds; cost basis is genuinely zero |
+| unknown | acquired in a transaction that *did* move value this bot could not read | realises nothing — crediting the whole sale would invent a profit |
+
+A sale consumes all three in proportion. Unrealised PnL counts only the paid
+bucket, so a wallet sitting on a free allocation is not credited with a profit
+it never traded for. A wallet that sells more than the sample saw it buy is
+selling inventory from before the window, and that excess is excluded too. Any
+of these marks the row `~`, and a free-only wallet shows a real PnL with no ROI
+— there was no capital at risk to divide by.
+
+Liquidity pools, routers and programs are excluded — an address appearing in
+more than 20% of the sampled transactions is the venue, not a participant — as
+are burn and null addresses.
+
+### Checking a token's ranking
+
+`token_traders_diag.py` drives the same client `/token` does and answers the
+three questions in the order they go wrong — coverage, pricing, then one
+wallet's ledger:
+
+```powershell
+python token_traders_diag.py 7RY9w8brhM4DgQwiwn4D9cVnk4L7RJuZESS3mEKmpump
+python token_traders_diag.py <mint> --wallet <address>      # trade by trade
+python token_traders_diag.py <mint> --pages 60 --budget 180 # go deeper
+python token_traders_diag.py <mint> --rank roi --csv hunt_out/traders.csv
+```
+
+It exits 0 when the sample reached the start of the token's history and 1 when
+it was cut short, so a disagreement with a full-history tool can be diagnosed
+as *coverage* or *accounting* rather than guessed at.
+
+`/thesis` answers the other half of that page: what the biggest FOMO holders
+actually wrote about the token. Entries are ranked by position value and carry
+the holder's handle, their X account, position, PnL and hold time above the
+thesis itself, five to a page. It prefers `/feed/token/sortedThesis`, which
+answers in one request; when that route is unavailable or returns a shape this
+build does not recognise, it falls back to `/hodlers/top` plus one
+`/trades/{tradeId}` per holder, which is verified but pays a request each.
+
 When a Pump username is paired with a wallet, both the `@username` and the
 shortened wallet are clickable. Both links target
 `https://pump.fun/profile/{FULL_SOLANA_WALLET}`; Pump profile URLs are never
@@ -210,19 +324,131 @@ through the configured chain RPCs before it is cached in `pump_evm_cache.json`.
 This avoids unsafe username/X-handle guessing and does not require Pump login
 credentials.
 
+## `/connected` — wallets in the same cluster
+
+`/connected <handle|address>` looks for other wallets with unusually strong
+on-chain evidence of belonging to the same cluster as a trader's known one. It
+takes a FOMO username or a raw Solana/EVM address; a username is resolved
+through exactly the path `/fomo` uses, so the two can never disagree about
+which wallet a handle owns.
+
+**It never claims shared ownership.** Nothing observable on a chain says that.
+It reports how strong the *evidence* is, as a score out of 100 in three bands —
+**Very High**, **High**, **Possible** — and every page repeats that the number
+measures evidence, not ownership. `strict:true` surfaces Very High only; the
+default is High and above, with the weaker band behind a button.
+
+### The signals
+
+| signal | what earns it |
+|---|---|
+| repetition | 3, 5, 10 or 20+ direct transfers between the two wallets |
+| reciprocity | value moved both ways, at least twice each way |
+| longevity | the relationship spans 7, 30 or 90+ days |
+| spread | transfers on 3, 8 or 20+ separate dates |
+| value | $1k, $10k or $100k+ moved in total |
+| funding | the known wallet funded it first, and especially if funds came back |
+| identity | the wallet cache already knows the candidate as a FOMO or Pump handle |
+| cross-chain | the *same* verified identity turns up as a candidate on two chains |
+
+A band is additionally capped by how many **independent** signals fired — four
+for Very High, three for High, two for Possible — so one very loud signal (a
+hundred transfers in a single day) never reads as strongly as three quiet ones
+agreeing. A single transfer is never scored at all.
+
+### What is excluded
+
+Precision over recall: it is better to return nothing than to return a router.
+Three defences, cheapest first.
+
+1. **Known addresses** — exchanges, bridges, routers, programs, burn addresses
+   and FOMO's own gas sponsor are dropped before they can occupy a slot.
+   `CONNECTED_LABELS_FILE` points at a JSON `{"address": "label"}` map that is
+   merged over the built-in list, so an operator can add one without a release.
+2. **Account type** — on Solana a real wallet is owned by the system program and
+   is not executable, which rules out pools, token accounts, vaults and PDAs
+   outright. EVM cannot use that test, because FOMO's own wallets are ERC-4337
+   contracts: there, contract code without a known identity is a scoring
+   penalty and a printed caution instead.
+3. **Degree** — one bounded page of the candidate's own history. An address
+   dealing with `CONNECTED_HIGH_DEGREE` (40) or more distinct counterparties is
+   a service, whatever it is called. This costs a request per candidate, so it
+   runs last and only on the few that survived everything else.
+
+An empty answer is the expected one for most traders, and the card says so
+rather than reporting something weak.
+
+### Cost and caching
+
+Solana history comes from Helius parsed transactions (`CONNECTED_SOLANA_PAGES`,
+5 pages of 100 by default); EVM from `alchemy_getAssetTransfers` in both
+directions per chain (`CONNECTED_EVM_PAGES`). An EVM wallet is checked on the
+chains the wallet cache has already seen it deployed on, falling back to
+`CONNECTED_EVM_CHAINS` (base, bsc). Only SOL, native EVM coins and stablecoins
+carry a USD figure — everything else is counted as an unpriced transfer rather
+than given an invented value. A whole run is cached in `connected_cache.json`
+for `CONNECTED_CACHE_TTL` (6 hours), keyed by the wallet set and the bar it ran
+at.
+
+Each result carries the transactions behind it: the select menu under the card
+opens an ephemeral evidence panel with explorer links for the sampled
+transactions and the reasons the score was awarded.
+
 ## Where wallet identities come from
 
-Three sources, cheapest first:
+Four sources, cheapest first — and `/fomo` now tries them in that order rather
+than reaching for the scan first:
 
 1. `wallet_cache.json` — a handle is resolved once, ever.
-2. **FOMO's own holder list.** `/token` calls `/hodlers/top` (spelled *hodlers*)
-   and matches each published position against the token's on-chain owners. An
-   unambiguous, well-separated match is written to the cache once corroborated
-   — a Solana wallet must have co-signed a FOMO-sponsored transaction, an EVM
-   wallet must have contract code on the chain whose token it holds — so
-   `/fomo` and `/wallet` know the trader afterwards without any scan.
-   `FOMO_ADOPT_HOLDER_WALLETS=0` keeps the naming but stops the writing.
+2. **FOMO's own holder list, asked about this trader's own positions.**
+   `resolve_from_holders()` sends one `/hodlers/top` request (spelled
+   *hodlers*) covering every Solana token the trader holds. The reply says
+   which of those tokens publish a row naming them — and only those cost an
+   on-chain owner query, because a token that does not name the trader can
+   never name their wallet. Two tokens agreeing on one wallet is the evidence;
+   a single token is corroborated before it is written.
 3. On-chain discovery — the sponsor index, the mint scan, then the block route.
+   The strongest evidence there is, and by far the most expensive: a 12-page
+   sponsor index and up to four mint scans before its first answer.
+4. **Exact balance fingerprints.** FOMO's balances panel reports raw integer
+   amounts; one that identifies exactly one on-chain owner is a candidate.
+
+The same holder match also runs from the other direction: `/token` matches
+every published position on a token against its on-chain owners and adopts what
+it can, so `/fomo` and `/wallet` know those traders afterwards without any
+scan. `FOMO_ADOPT_HOLDER_WALLETS=0` keeps the naming but stops the writing.
+
+### The corroboration gate
+
+Sources 2 and 4 derive a wallet from an amount rather than from a transaction,
+and a cached wallet is permanent, so neither writes one without corroboration.
+`_corroborate()` is the single gate, and it has two rungs:
+
+- **`verify_wallet`** scans the *candidate's own* signature history for the
+  swaps FOMO reports for this trader. That ties the wallet to those trades, not
+  merely to the platform, and it is the direction that scales — a trader's
+  account runs to hundreds of signatures where a viral mint runs to tens of
+  thousands. It needs the trader's swap rows, which `/fomo` and the diagnostic
+  both have.
+- **The sponsor check** only asks whether the wallet ever co-signed a
+  FOMO-sponsored transaction, and it looks at the newest 40 alone. It is the
+  fallback for callers with no swaps — `/token`'s adoption path renders a card
+  for a token, not for a trader, and would otherwise pay a FOMO request per
+  holder.
+
+What separates them is refuted from inconclusive. If `verify_wallet` finds no
+signatures near any swap time it never got to look, so the weaker check still
+gets its turn; if it looked at the wallet's history and this trader's swaps are
+not in it, that is a refusal and the weaker check does not get to overturn it.
+The cache records which rung passed, in `walletSource` — `verify2`, `2tokens`,
+`fomo-sponsor`.
+
+Because the holder route's own gate is `verify_wallet`, a hit there is
+transaction-backed too. That is what makes running it ahead of the scan cost no
+evidence, only fewer requests — and it matters because the enrichment budget
+(`FOMO_ENRICH_TIMEOUT`) is a wall clock that *cancels* whatever is still
+running, so a handle the scan cannot reach used to spend the whole budget
+proving it and never reach the cheap route at all.
 
 Pump.fun is the opposite shape and needs none of that. **A Pump profile IS a
 Solana wallet**: `GET /users/{wallet}` and `GET /users/{username}` return the
@@ -323,11 +549,14 @@ Common verdicts:
 
 | stage | means |
 |---|---|
-| `config` | no Solana RPC, `FOMO_WALLET_DEEP=0`, no Helius for the balance fallback, or no Alchemy endpoint for an evidence chain |
+| `config` | no Solana RPC, `FOMO_WALLET_DEEP=0`, no Helius for the holder or balance routes, or no Alchemy endpoint for an evidence chain |
 | `rpc` | every configured Solana RPC failed; discovery is paused for 15s |
 | `panels` | FOMO returned no swaps at all — transport or Cloudflare, not the wallet logic |
 | `evidence` | the profile window holds no usable rows for that chain (an EVM-only or Solana-only trader) |
+| `hodlers` | FOMO published no holder row naming this trader, or the published position did not identify exactly one wallet |
 | `discovery` | evidence existed but no transaction matched — check `FOMO_SPONSORS` (Solana) or `evm_diag.py --expect` (EVM) |
+| `balances` | exact balance fingerprints matched zero or more than one on-chain owner |
+| `verification` | a candidate was found and then refused: this trader's own swaps are not in that wallet's history |
 | `ranking` | two EVM addresses scored identically; resolve by hand with `evm_resolve.py --wallet` |
 | `deployment` | the EVM candidate has no contract code on a chain it traded on |
 
@@ -390,7 +619,10 @@ new one is written to `.fomo_session.json` — so:
 | `pump_evm.py` | Exact-balance Pump EVM discovery and reverse cache |
 | `pump_profiles.py` | Wallet ↔ Pump profile resolution, cached and deduplicated |
 | `wallet_profile_cache.py` | The keyed, expiring, negative-caching JSON store both flows share |
-| `token_intelligence.py` | Cross-chain metadata, top-holder owners and percentages |
+| `token_intelligence.py` | Cross-chain metadata, top-holder owners, percentages and the trader-history routes |
+| `token_traders.py` | Provider-shape parsing, the cost-basis ledger and the PnL/ROI ranking behind `/token`'s Top Traders |
+| `token_traders_diag.py` | Why a token's trader ranking looks wrong: coverage, pricing and one wallet's ledger |
+| `connected_wallets.py` | `/connected`: counterparty history, infrastructure filtering and the confidence model |
 | `fomo_wallet.py` / `wallet_resolve.py` | Real Solana wallet resolver + CLI |
 | `fomo_evm.py` / `evm_resolve.py` | Verified EVM smart-wallet resolver + CLI |
 | `fomo_hodlers.py` | FOMO's `/hodlers/top` holder list, matched to on-chain wallets |

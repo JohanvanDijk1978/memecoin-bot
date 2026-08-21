@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from fomo_bot import _discord_line_chunks
-from token_intelligence import TokenIntelligenceClient
+from token_intelligence import (
+    LARGEST_ACCOUNTS_CAP,
+    MAX_HOLDERS,
+    TokenIntelligenceClient,
+)
 
 
 class FakeResponse:
@@ -77,6 +81,39 @@ class FakeEvmHttp:
         ]}})
 
 
+HELIUS_RPC = "https://mainnet.helius-rpc.com/?api-key=test"
+
+
+class FakeDasHttp(FakeSolanaHttp):
+    """Helius DAS, which pages past the 20-account cap `/token` used to hit."""
+
+    def __init__(self, owners: int = 42, fail: bool = False) -> None:
+        self.owners = owners
+        self.fail = fail
+        self.das_calls = 0
+        self.largest_calls = 0
+
+    async def post(self, _url: str, **kwargs: object) -> FakeResponse:
+        request = kwargs.get("json")
+        method = request.get("method") if isinstance(request, dict) else None
+        if method == "getTokenAccounts":
+            self.das_calls += 1
+            if self.fail:
+                return FakeResponse({"error": {"message": "DAS unavailable"}})
+            accounts = [
+                {"owner": f"owner{index:02d}", "amount": str((self.owners - index) * 10)}
+                for index in range(self.owners)
+            ]
+            return FakeResponse({"result": {"token_accounts": accounts}})
+        if method == "getTokenSupply":
+            return FakeResponse({"result": {"value": {
+                "uiAmountString": "1000", "decimals": 1,
+            }}})
+        if method == "getTokenLargestAccounts":
+            self.largest_calls += 1
+        return await super().post(_url, **kwargs)
+
+
 class TokenIntelligenceTests(unittest.IsolatedAsyncioTestCase):
     def test_holder_lines_are_split_at_discord_field_limit(self) -> None:
         lines = [f"`{index}.` " + ("x" * 190) for index in range(1, 11)]
@@ -105,6 +142,60 @@ class TokenIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token.fdv, 2_000_000)
         self.assertEqual(len(token.holders), 2)
         self.assertEqual(token.holders[0].percentage, 9)
+
+
+class DeepHolderTests(unittest.IsolatedAsyncioTestCase):
+    """`/token` asks for 50 holders; `getTokenLargestAccounts` cannot answer."""
+
+    async def test_a_top_50_request_pages_helius_das(self) -> None:
+        http = FakeDasHttp(owners=42)
+        client = TokenIntelligenceClient(http, [HELIUS_RPC])
+        token = await client.lookup("mint", limit=MAX_HOLDERS)
+        self.assertEqual(len(token.holders), 42)
+        self.assertGreater(len(token.holders), LARGEST_ACCOUNTS_CAP)
+        self.assertEqual(http.largest_calls, 0)
+        self.assertEqual(token.holders[0].address, "owner00")
+        # amount 420 raw / 10**1 decimals = 42 tokens of a 1000 supply
+        self.assertEqual(float(token.holders[0].balance), 42)
+        self.assertAlmostEqual(token.holders[0].percentage or 0, 4.2)
+
+    async def test_holders_come_back_largest_first(self) -> None:
+        client = TokenIntelligenceClient(FakeDasHttp(owners=30), [HELIUS_RPC])
+        token = await client.lookup("mint", limit=MAX_HOLDERS)
+        balances = [holder.balance for holder in token.holders]
+        self.assertEqual(balances, sorted(balances, reverse=True))
+
+    async def test_a_small_request_never_pays_for_das(self) -> None:
+        http = FakeDasHttp()
+        client = TokenIntelligenceClient(http, [HELIUS_RPC])
+        await client.lookup("mint", limit=10)
+        self.assertEqual(http.das_calls, 0)
+        self.assertEqual(http.largest_calls, 1)
+
+    async def test_das_failure_falls_back_rather_than_emptying_the_card(self) -> None:
+        # No Helius, or a Helius that will not answer, still has to produce the
+        # holders the old path could reach -- a shorter card, not a blank one.
+        http = FakeDasHttp(fail=True)
+        client = TokenIntelligenceClient(http, [HELIUS_RPC])
+        token = await client.lookup("mint", limit=MAX_HOLDERS)
+        self.assertEqual(http.largest_calls, 1)
+        self.assertEqual([holder.address for holder in token.holders],
+                         ["walletA", "walletB"])
+
+    async def test_no_helius_endpoint_skips_das_entirely(self) -> None:
+        http = FakeDasHttp()
+        client = TokenIntelligenceClient(http, ["https://api.mainnet-beta.solana.com"])
+        token = await client.lookup("mint", limit=MAX_HOLDERS)
+        self.assertEqual(http.das_calls, 0)
+        self.assertEqual(len(token.holders), 2)
+
+    async def test_the_holder_limit_is_clamped_not_snapped_to_5_or_10(self) -> None:
+        client = TokenIntelligenceClient(FakeDasHttp(owners=60), [HELIUS_RPC])
+        self.assertEqual(len(
+            (await client.lookup("mint", limit=MAX_HOLDERS + 25)).holders
+        ), MAX_HOLDERS)
+        self.assertEqual(len((await client.lookup("mint", limit=25)).holders), 25)
+        self.assertEqual(len((await client.lookup("mint", limit=1)).holders), 1)
 
 
 if __name__ == "__main__":

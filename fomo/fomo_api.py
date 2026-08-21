@@ -26,7 +26,7 @@ from urllib.parse import quote, urlencode
 import aiohttp
 
 from fomo_chains import SUPPORTED_CHAINS_HEADER
-from fomo_hodlers import holders_query
+from fomo_hodlers import holders_query, holders_query_many, thesis_feed_query
 
 log = logging.getLogger("fomo")
 
@@ -497,6 +497,39 @@ class FomoClient:
         """
         return await self._get(
             holders_query(address, network_id),
+            lane="background" if background else "foreground",
+        )
+
+    async def token_holders_many(
+        self, addresses: list[str], network_id: int, *, background: bool = True
+    ) -> Any:
+        """One `/hodlers/top` call covering several tokens.
+
+        Wallet resolution asks about a trader's whole position list at once,
+        and the answer says which of those tokens publish a holder row naming
+        them -- which is what decides where an on-chain query is worth paying
+        for. Defaults to the background lane because no card is waiting on it.
+        """
+        unique = [address for address in dict.fromkeys(addresses) if address]
+        if not unique:
+            return []
+        return await self._get(
+            holders_query_many((address, network_id) for address in unique),
+            lane="background" if background else "foreground",
+        )
+
+    async def token_theses(
+        self, address: str, network_id: int, *, limit: int = 50,
+        background: bool = False,
+    ) -> Any:
+        """The token page's Thesis tab, already ranked by holder equity.
+
+        Recorded off the wire by `token_page_sniff.py` but never probed, so
+        `/thesis` treats a failure or an unrecognised shape as "try the
+        verified holder route instead" rather than as an error.
+        """
+        return await self._get(
+            thesis_feed_query(address, network_id, limit),
             lane="background" if background else "foreground",
         )
 

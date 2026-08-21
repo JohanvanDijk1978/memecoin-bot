@@ -128,7 +128,7 @@ Other routes the same page used, none documented before:
 | route | returns |
 |---|---|
 | `/feed/token?tokenAddress=&networkId=&excludeThesis=true&threshold=` | token activity feed with `displayName`, `marketCap`, `price` |
-| `/feed/token/thesis` / `/feed/token/sortedThesis` | theses on the token, with `equity` and `authorTrade` |
+| `/feed/token/thesis` / `/feed/token/sortedThesis` | theses on the token, with `equity` and `authorTrade` — **`/thesis` calls `sortedThesis` first, but the shape is still a guess** (session 34); it falls back to `/hodlers/top` + `/trades/{tradeId}` |
 | `/feed/tradingActivity?limit=&threshold=` | global recent trades |
 | `/trades?userId=&orderBy=closedAt&tokenAddress=` | **`tokenAddress` filters the trades list** |
 | `/v2/users?userIds=<id>&userIds=<id>` | batch user lookup — repeated `userIds` params |

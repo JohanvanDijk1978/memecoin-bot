@@ -9,10 +9,12 @@ fomo_resolve_diag.py -- why did /fomo not show a Solana and/or EVM wallet?
 
 One handle in, one verdict per chain out, plus the stage that lost the wallet:
 
-    cache -> profile -> panels -> evidence -> discovery -> verification
+    cache -> profile -> panels -> evidence -> hodlers -> discovery
+          -> balances -> verification
 
 It drives the SAME functions `/fomo` uses -- `WalletResolver.resolve()`,
-`WalletResolver.resolve_from_balances()`, `EvmWalletResolver.resolve()` and
+`WalletResolver.resolve_from_holders()`, `.resolve_from_balances()`,
+`EvmWalletResolver.resolve()` and
 `evm_trade_evidence()` -- so it cannot drift from the bot, and it captures the
 `fomo.wallet` / `fomo.evm` log records that already carry the precise reason.
 Those reasons are invisible in production because the bot only writes them at
@@ -217,6 +219,13 @@ SOLANA_RULES: tuple[tuple[str, str, str], ...] = (
      "every configured Solana RPC failed. Check SOLANA_RPC / "
      "SOLANA_RPC_FALLBACKS (Helius or QuickNode; the public endpoint "
      "throttles and prunes)."),
+    # A candidate that was found and then refused is the most informative
+    # outcome there is, so it outranks every "found nothing" rule below it.
+    ("explains none of", "verification",
+     "a candidate wallet was found but this trader's own swaps are not in "
+     "its transaction history, so it was refused. That is the gate working: "
+     "an amount match alone would have cached the wrong wallet. Rerun with "
+     "-v to see which swaps were checked."),
     ("FOMO returned no swaps", "evidence",
      "FOMO's swap window holds no Solana rows for this handle -- an EVM-only "
      "trader, or the swaps panel came back empty."),
@@ -232,9 +241,23 @@ SOLANA_RULES: tuple[tuple[str, str, str], ...] = (
     ("no usable Solana balances", "balances",
      "the balance fallback had no Solana positions to fingerprint -- the "
      "trader has sold out, or holds only EVM tokens."),
-    ("no verified owner", "balances",
+    ("balance fingerprint(s)", "balances",
      "exact balance fingerprints matched zero or more than one on-chain "
-     "owner, so no wallet could be claimed safely."),
+     "owner, so no wallet could be claimed safely. The unambiguous-owner "
+     "count on that line separates 'nothing matched' from 'a candidate was "
+     "refused'."),
+    ("published position(s)", "hodlers",
+     "FOMO named this trader as a top holder, but the position did not "
+     "identify exactly one on-chain wallet -- a near-neighbour balance, or "
+     "the owner is past the holder query's page limit."),
+    ("not in the published top holders", "hodlers",
+     "FOMO publishes a top-holder list for this trader's tokens but does not "
+     "name them in any of it, so the cheap route had nothing to match. That "
+     "is normal for a small position in a crowded token."),
+    ("FOMO published no holder list", "hodlers",
+     "/hodlers/top answered for none of this trader's positions. Check that "
+     "the batched `tokens` array is still accepted -- the log says whether "
+     "the per-token retry ran."),
     ("no Helius RPC configured", "config",
      "the balance fallback needs Helius DAS getTokenAccounts. Put a Helius "
      "URL in SOLANA_RPC or SOLANA_RPC_FALLBACKS."),
@@ -365,10 +388,11 @@ async def diagnose_solana(
     )
     report.facts["deep"] = bool(args.deep)
     report.lines.append(
-        f"  {_note(bool(args.deep))} routes     "
+        f"  {_note(bool(args.deep))} routes     hodlers, then "
         + ("sponsor, mint, then blocks on the "
            f"{min(DEEP_ATTEMPTS, 4)} newest swap(s)" if args.deep
            else "sponsor, mint only (FOMO_WALLET_DEEP=0 / --no-deep)")
+        + ", then balances"
     )
     report.facts["rpc_urls"] = [rpc_display_name(url) for url in SOLANA_RPCS]
     public_only = all("api.mainnet-beta.solana.com" in url for url in SOLANA_RPCS)
@@ -413,17 +437,28 @@ async def diagnose_solana(
     report.facts["helius"] = helius
     report.lines.append(
         f"  {_note(bool(positions) and helius)} balances   "
-        f"{len(positions)} Solana position(s) for the fallback"
-        + ("" if helius else "; no Helius RPC -> fallback disabled")
+        f"{len(positions)} Solana position(s) for the holder and balance routes"
+        + ("" if helius else "; no Helius RPC -> both disabled")
     )
 
     resolver = WalletResolver(http, SOLANA_RPCS, deep=bool(args.deep),
                               verify_targets=args.verify)
-    report.wallet = await resolver.resolve(fomo, user, use_cache=not args.fresh)
-    route = "transactions"
+    # Same order as `_resolve_fomo_enrichment`, so this cannot drift from the
+    # bot: the cheap published-position route first, the transaction routes
+    # next, the exact-balance fingerprint last.
+    swaps = stats.raw_swaps or ()
+    route = "hodlers"
+    if stats.raw_balances is not None:
+        report.wallet = await resolver.resolve_from_holders(
+            fomo, user, stats.raw_balances, swaps=swaps,
+            use_cache=not args.fresh,
+        )
+    if not report.wallet:
+        report.wallet = await resolver.resolve(fomo, user, use_cache=not args.fresh)
+        route = "transactions"
     if not report.wallet and stats.raw_balances is not None:
         report.wallet = await resolver.resolve_from_balances(
-            user, stats.raw_balances, use_cache=not args.fresh
+            user, stats.raw_balances, swaps=swaps, use_cache=not args.fresh
         )
         route = "balances"
     if report.wallet:
