@@ -1,0 +1,185 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  FOMO SIGNUP WALLET-CAPTURE EXPERIMENT                      ║
+║                          QUICK START CHECKLIST                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+EXPERIMENT GOAL:
+  Determine: When does a FOMO account's real wallet become observable?
+  → At signup? At activation? Only after first trade?
+
+GUARDRAILS (Read Before Starting):
+  ✓ Use a THROWAWAY test account (not your main account)
+  ✓ Use wallets YOU CONTROL for funding
+  ✓ Only OBSERVE app traffic (no special techniques)
+  ✓ Record to SCRATCH FOLDER (not repo, not wallet cache)
+  ✓ Stop BEFORE Phase C if Phases A/B answer the question
+  ⚠ Phase C makes an actual trade — needs go-ahead before running
+
+═════════════════════════════════════════════════════════════════════════════
+
+STEP-BY-STEP:
+
+[PART 0] ENVIRONMENT SETUP
+  ├─ [ ] Create: C:\Users\mzshu\Downloads\memebot\fomo/hunt_out/signup_YYYYMMDD/
+  ├─ [ ] Write: C:\Users\mzshu\Downloads\memebot\fomo/wallet_notes.txt
+  │   └─ Add: Your Solana/EVM funding wallet addresses
+  ├─ [ ] Clear Chrome session (or use fresh profile)
+  └─ [ ] Prepare recorder (DevTools Network tab OR Playwright script)
+
+[PART 1] PHASE A — SIGNUP/ONBOARDING
+  ├─ [ ] Turn on response recorder
+  ├─ [ ] Go to https://fomo.family
+  ├─ [ ] Complete signup flow (email/Twitter/Privy)
+  ├─ [ ] Land on profile page
+  ├─ [ ] Wait 9 seconds (let UI load)
+  ├─ [ ] DO NOT TRADE YET
+  ├─ [ ] Stop recorder
+  └─ [ ] Snapshot profile state: fetch('/v2/users/userHandle/YOUR_HANDLE')
+       └─ Save to: hunt_out/signup_YYYYMMDD/PHASE_A_profile.json
+
+  ▶ RECORD YOUR FINDINGS:
+    ├─ Is user.address (SOL synthetic) present? YES / NO
+    ├─ Is user.evmAddress present? YES / NO
+    ├─ Is user.activated = false? YES / NO
+    └─ Fill: hunt_out/PHASE_A_FINDINGS.md
+
+[PART 2] PHASE B — ACTIVATED TRANSITION
+  ├─ [ ] Look for "Activate Wallet" button in UI
+  ├─ [ ] Turn on recorder
+  ├─ [ ] Click activation button (or wait for auto-activation)
+  ├─ [ ] Wait 9 seconds
+  ├─ [ ] Stop recorder
+  └─ [ ] Re-fetch profile and compare to Phase A
+       └─ Save to: hunt_out/PHASE_B_profile.json
+
+  ▶ RECORD YOUR FINDINGS:
+    ├─ Did user.activated change to true? YES / NO
+    ├─ Did any address field appear or change? YES / NO
+    ├─ Did any pre-trade address show up? YES / NO
+    └─ Fill: hunt_out/PHASE_B_FINDINGS.md
+
+  ⚠ DECISION POINT:
+    IF real wallet found in Phase A or B:
+      → STOP. You have your answer.
+      → Skip Phase C, go to Part 4 (Analysis).
+
+    IF no wallet found:
+      → Continue to Phase C.
+
+[PART 3] PHASE C — FIRST TRADE (Only if needed)
+  ⚠ REQUIRES APPROVAL BEFORE PROCEEDING
+  ├─ [ ] Fund account (minimum amount, any token)
+  ├─ [ ] Turn on recorder
+  ├─ [ ] Make one tiny trade (e.g., 0.01 SOL)
+  ├─ [ ] Get transaction signature
+  ├─ [ ] Stop recorder
+  └─ [ ] On-chain lookup:
+       └─ Solscan: https://solscan.io/tx/SIGNATURE
+           Find: First signer (non-sponsor) = your REAL wallet
+           Save to: wallet_notes.txt
+
+[PART 4] ANALYSIS & FINDINGS
+  ├─ [ ] Grep Phase A responses for real wallet address
+  ├─ [ ] Grep Phase B responses for real wallet address
+  ├─ [ ] Record: First appearance location
+  ├─ [ ] Grep for funding wallet address (if it leaks)
+  ├─ [ ] Fill: FINDINGS_REPORT.md with conclusion
+  └─ [ ] Answer: Which condition holds?
+       ├─ Condition 1: Platform publishes wallet (YES/NO)
+       ├─ Condition 2: Wallet derivable from public data (YES/NO)
+       └─ Condition 3: Wallet only post-trade (YES/NO)
+
+[PART 5] DOCUMENTATION
+  ├─ [ ] Verify hunt_out/ is in .gitignore
+  ├─ [ ] Append findings to fomo/HANDOFF.md (Session 39 section)
+  ├─ [ ] Review all findings one more time
+  └─ [ ] ✅ EXPERIMENT COMPLETE
+
+═════════════════════════════════════════════════════════════════════════════
+
+FILES YOU'LL CREATE:
+
+C:\Users\mzshu\Downloads\memebot\fomo/
+├── wallet_notes.txt ..................... Your wallet addresses & findings
+├── hunt_out/
+│   └── signup_20260821/
+│       ├── phase_a_responses.jsonl ...... Raw XHR captures (signup)
+│       ├── phase_a_profile.json ......... Profile state at signup
+│       ├── PHASE_A_FINDINGS.md .......... Your Phase A analysis
+│       ├── phase_b_responses.jsonl ...... Raw XHR captures (activated)
+│       ├── phase_b_profile.json ......... Profile state after activation
+│       ├── PHASE_B_FINDINGS.md .......... Your Phase B analysis
+│       ├── phase_c_responses.jsonl ...... Raw XHR captures (trade)
+│       └── [Optional] phase_c_tx.json ... On-chain tx details
+│
+└── FINDINGS_REPORT.md ................... Final conclusions
+
+═════════════════════════════════════════════════════════════════════════════
+
+KEY QUESTIONS TO ANSWER:
+
+1. At what point does the real wallet appear?
+   ○ In signup response
+   ○ In activated response
+   ○ Only in on-chain transaction
+   ○ Nowhere observable
+
+2. Which endpoint reveals it?
+   □ /v2/users/userHandle/{handle}
+   □ /v2/users/{id}
+   □ /v2/users/current
+   □ /transfers
+   □ /referrals
+   □ Other: _______________
+
+3. What's the earliest artifact containing it?
+   ○ Response timestamp
+   ○ On-chain transaction timestamp
+   → Duration before first trade: _____ seconds/minutes
+
+═════════════════════════════════════════════════════════════════════════════
+
+TROUBLESHOOTING:
+
+Can't find recorder?
+  → Use Chrome DevTools Network tab (right-click → Save all as HAR)
+  → Or use: python response_recorder.py (Playwright script provided)
+
+No "Activate" button found?
+  → It might auto-activate or not exist
+  → Document: "Activation step not found in UI"
+  → Proceed to Phase B analysis with what you have
+
+Stuck on Phase C decision?
+  → If Phases A/B found nothing, Phase C will.
+  → If Phases A/B found the wallet, skip Phase C.
+  → When in doubt: STOP and ask before making the trade.
+
+═════════════════════════════════════════════════════════════════════════════
+
+EXPECTED OUTCOMES:
+
+Outcome A: Real wallet in Phase A response
+  → Platform publishes wallet at signup
+  → Endpoint: [specify which]
+  → Recommendation: Use this endpoint directly
+
+Outcome B: Real wallet in Phase B response
+  → Wallet discoverable at activation (before trade)
+  → Endpoint: [specify which]
+  → Recommendation: Probe activation endpoints
+
+Outcome C: Real wallet only in Phase C (on-chain)
+  → Confirms current finding: earliest = first sponsored trade
+  → Recommendation: Investigate sponsor account structure
+  → Or try counterfactual derivation (if signer key found)
+
+═════════════════════════════════════════════════════════════════════════════
+
+YOU ARE READY TO BEGIN.
+
+Start with: PART 0 (Environment Setup)
+Read: Full guide at C:\Users\mzshu\Downloads\memebot\fomo/SETUP_COMPLETE_GUIDE.md
+Questions: Refer back to fomo/SIGNUP_CAPTURE_EXPERIMENT.md (guardrails)
+
+Go! →

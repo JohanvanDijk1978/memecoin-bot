@@ -1,1 +1,1 @@
-{"success":true,"message":"Successfully fetched token warnings","responseObject":{"disableBuying":false,"disableSelling":false,"warnings":[]},"statusCode":200}
+{"success":true,"message":"Token is on allowlist","responseObject":{"disableBuying":false,"disableSelling":false,"warnings":[]},"statusCode":200}

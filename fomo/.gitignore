@@ -13,3 +13,7 @@ pump_profile_cache.json
 pump_profile_cache.json.tmp
 connected_cache.json
 connected_cache.json.tmp
+hunt_out/
+.chrome-profile-exp/
+wallet_notes.txt
+FINDINGS_REPORT.md
