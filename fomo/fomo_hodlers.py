@@ -24,6 +24,7 @@ independently reports Quanterty holding 16,682,532.40 of the same mint.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pickle import dumps
 from typing import Any, Iterable
 
 # FOMO network ids, by the chain names `TokenIntelligence` reports.
@@ -96,9 +97,9 @@ def holders_query_many(tokens: Iterable[tuple[str, int]]) -> str:
     payload = dumps(
         [{"address": address, "networkId": network_id}
          for address, network_id in tokens],
-        separators=(",", ":"),
-    )
-    return f"/hodlers/top?{urlencode({'tokens': payload})}"
+         separators=(",", ":"),
+         )
+    return f"/hodlers/top?{urlencode({'tokens': payload, 'limit': 1000})}"
 
 
 def holders_query(address: str, network_id: int) -> str:

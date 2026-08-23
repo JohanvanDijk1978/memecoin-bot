@@ -1257,7 +1257,22 @@
   "confirmed": 1,
   "walletSource": "hodlers+amount+fomo-sponsor",
   "resolvedAt": 1787237704,
-  "hodlerToken": "EpXtn6xGoZ4Y45vRjiDUHSCGbBoJD5FaEqZbF98YswH1"
+  "hodlerToken": "EpXtn6xGoZ4Y45vRjiDUHSCGbBoJD5FaEqZbF98YswH1",
+  "evmWallet": "0xa87f08881a80bcfe486e87c422f4990f70fedd07",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787505372,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x3efbfff95576e1d23cf6ead0acd2e73f4d6a7777"
+  ]
  },
  "badabeepp": {
   "wallet": "AFmiexHwMBFjKY7N9spbYjeKCr2nmj6k7zmAaamcjkVy",
@@ -5959,7 +5974,12 @@
   "evmConfirmed": 1,
   "evmEvidenceTokens": [
    "0xb20000000000000000000029440a9564b59129b1"
-  ]
+  ],
+  "wallet": "G7Zz4zLQrhrYh7jiQ375e5jE5Jb9LA7H6DzLZ4irNURz",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787501911,
+  "hodlerToken": "EC1PdREWpiwfWnmRb5VzGihzYakYpGz6ErwTdbXQpump"
  },
  "icoroots": {
   "evmWallet": "0xc497554c3ec06f5c071cf09668b14746c88f8405",
@@ -9932,7 +9952,12 @@
   "evmConfirmed": 1,
   "evmEvidenceTokens": [
    "0x1706f1e06c69f3a8cf33cce179d5d78a5c6f4444"
-  ]
+  ],
+  "wallet": "5YgDGNoXRqkVbQ2PbCF6fL7t1Uaiqzz68FEqk14d2MpM",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787501914,
+  "hodlerToken": "EC1PdREWpiwfWnmRb5VzGihzYakYpGz6ErwTdbXQpump"
  },
  "nobrainflip": {
   "evmWallet": "0x0aa87728a6677730771de65bfedb16e93e86a525",
@@ -16361,7 +16386,12 @@
   "evmConfirmed": 1,
   "evmEvidenceTokens": [
    "0x2d44858289945879e2292a82a8a21ab67e611e18"
-  ]
+  ],
+  "wallet": "DMTgKsvm44d76mrY7sWUEvr9Tx7fsVc3XiadiwZBUAig",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787501910,
+  "hodlerToken": "EC1PdREWpiwfWnmRb5VzGihzYakYpGz6ErwTdbXQpump"
  },
  "kingoflagos": {
   "evmWallet": "0x55888c525fba36584bda677828598a3a41e77886",
@@ -22248,7 +22278,22 @@
   "confirmed": 1,
   "walletSource": "hodlers+amount+fomo-sponsor",
   "resolvedAt": 1787269008,
-  "hodlerToken": "7Lbe787dJ4bxpPiEWLb9R9VnQsMiET6Gbacxedm3pump"
+  "hodlerToken": "7Lbe787dJ4bxpPiEWLb9R9VnQsMiET6Gbacxedm3pump",
+  "evmWallet": "0x9811cdf0513e8e2457089397b08808a249d81e72",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506828,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
  },
  "magicmo": {
   "wallet": "9s3suP29GYgCUUT78DDF78nV4jN5BjcPihtP5f4Zcide",
@@ -26276,5 +26321,308 @@
   "walletSource": "hodlers+amount+fomo-sponsor",
   "resolvedAt": 1787500449,
   "hodlerToken": "C3bajJW843KN9Uu441JkXN7zVMs4VM2HvdAGyGiBpump"
+ },
+ "0xtocky": {
+  "wallet": "BoGbmz4bK7CryYHFGrR3rYL54GDm5BZHNeGkVMHc35tT",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787501909,
+  "hodlerToken": "EC1PdREWpiwfWnmRb5VzGihzYakYpGz6ErwTdbXQpump"
+ },
+ "fren0x": {
+  "wallet": "CR8C7EkkYrxCSfAWV43pq82iMFyc7J794pyGN66qAjgb",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787501913,
+  "hodlerToken": "EC1PdREWpiwfWnmRb5VzGihzYakYpGz6ErwTdbXQpump"
+ },
+ "ganjathang": {
+  "wallet": "EJUECHgqFJjVGtETk7NHmn2H2WhehGTGodZwki1VNX5",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787501914,
+  "hodlerToken": "EC1PdREWpiwfWnmRb5VzGihzYakYpGz6ErwTdbXQpump"
+ },
+ "lionyrx": {
+  "wallet": "Szofv6YnZqjKt1GNChTYAcWDLuk185d5Z4x7Fkma7oX",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787501914,
+  "hodlerToken": "EC1PdREWpiwfWnmRb5VzGihzYakYpGz6ErwTdbXQpump"
+ },
+ "ringtingding": {
+  "wallet": "nbrFNzN6i7j1uQxxf6MZv78TDuiymDaaUJWxzMa3Kd3",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787503348,
+  "hodlerToken": "E3i7sTY5QYEBh3itepnomZQt7Eh5kzmHFk1vkm2pump"
+ },
+ "themilesbron": {
+  "evmWallet": "0xd49b83e5f92d45206d86fceec0fc3b61460d6848",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787505371,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x3efbfff95576e1d23cf6ead0acd2e73f4d6a7777"
+  ]
+ },
+ "soquick": {
+  "evmWallet": "0xfe034a58d60b7670f5fdcd1fe292c6fc9268f51d",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787505371,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x3efbfff95576e1d23cf6ead0acd2e73f4d6a7777"
+  ]
+ },
+ "extreme05": {
+  "evmWallet": "0x0e258b2d4c1ae892b625e5535a51f3d1892d439c",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787505371,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x3efbfff95576e1d23cf6ead0acd2e73f4d6a7777"
+  ]
+ },
+ "yourpop8": {
+  "evmWallet": "0x839a72ea594e2391c991e32d9707dba5b3e12430",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787505371,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x3efbfff95576e1d23cf6ead0acd2e73f4d6a7777"
+  ]
+ },
+ "apes3ason": {
+  "evmWallet": "0x3076c25278be0c6cb7c3e799350ab0ea7acf4564",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787505372,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x3efbfff95576e1d23cf6ead0acd2e73f4d6a7777"
+  ]
+ },
+ "moonchi": {
+  "evmWallet": "0xa2266b19afa6f2ddb76f0e567ceaf19d8dc42438",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787505372,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x3efbfff95576e1d23cf6ead0acd2e73f4d6a7777"
+  ]
+ },
+ "izzyloses": {
+  "evmWallet": "0x071f08dc8ca1359fad698f52f31655b9b3d29856",
+  "evmStatus": "verified",
+  "evmChains": [
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787505372,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x3efbfff95576e1d23cf6ead0acd2e73f4d6a7777"
+  ]
+ },
+ "davetoo": {
+  "wallet": "Hc1gpDHTMkb3k7yiBP23wKrgWFgAEeF8pHuxmoDdWVrq",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787506191,
+  "hodlerToken": "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump"
+ },
+ "chermes": {
+  "wallet": "A1Gjj523Ea9DHNPqEGDVhScdErHe214LFM21AttRDmvT",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787506192,
+  "hodlerToken": "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump"
+ },
+ "cmill": {
+  "wallet": "9S3MVbxMCpFXQU2T78M2Z1Z4cFJz48hDhXQz3hkSqoav",
+  "confirmed": 1,
+  "walletSource": "hodlers+amount+fomo-sponsor",
+  "resolvedAt": 1787506193,
+  "hodlerToken": "Ai66LHZG9MCzg1WKdawwqduVAXpNDUuV8M3uyq5ppump"
+ },
+ "sonder_crypto": {
+  "evmWallet": "0x82b270406d88d4615374af31acd7be031a8a9212",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506828,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
+ },
+ "modi": {
+  "evmWallet": "0xe7f8eaf303300e8b8abe8c6e3883a8b2fb13efb7",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506828,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
+ },
+ "0xuberm": {
+  "evmWallet": "0xcf6cdf01acb524d8e53d1d13b1a89fcadbd7034c",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506828,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
+ },
+ "buythegreen": {
+  "evmWallet": "0xc5105ffdad4755d8fc33e92f2e0d42ef977e416e",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506828,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
+ },
+ "wwayfboss": {
+  "evmWallet": "0x1ccc73e7b8fa5db02040aec0049d42cee4661cc5",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506828,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
+ },
+ "kongkapital": {
+  "evmWallet": "0xc2b506e9e589f0bfce2b6250e281c9a2afbb5ba9",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "bsc",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506828,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
+ },
+ "m_eth": {
+  "evmWallet": "0xfbda18e176eb627db90604ce796e35e35fdb06cc",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506828,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
+ },
+ "maxpain": {
+  "evmWallet": "0x11a160e5f97d1a08a79446929dbefda912bb4f6f",
+  "evmStatus": "verified",
+  "evmChains": [
+   "base",
+   "ethereum",
+   "robinhood"
+  ],
+  "evmSource": "hodlers+amount+rpc",
+  "evmVerifiedAt": null,
+  "evmResolvedAt": 1787506829,
+  "evmConfirmed": 1,
+  "evmEvidenceTokens": [
+   "0x43eea882b845a8493152ebc55cf30ae9281b02d5"
+  ]
  }
 }
