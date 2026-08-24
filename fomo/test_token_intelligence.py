@@ -81,6 +81,69 @@ class FakeEvmHttp:
         ]}})
 
 
+HYPER_TOKEN = "0xb75d5ee14708e7efbea939311090061d72265608"
+
+
+class FakeHyperEvmHttp:
+    """DEX Screener says `hyperevm`; hl.eco answers the holder list.
+
+    Balances come back raw, so the decimals on the payload are what make the
+    numbers right -- this fake uses 18, like a real pump.fun launch.
+    """
+
+    def __init__(self) -> None:
+        self.holder_urls: list[str] = []
+
+    async def get(self, url: str, **_kwargs: object) -> FakeResponse:
+        if "/holders" in url:
+            self.holder_urls.append(url)
+            return FakeResponse({
+                "address": HYPER_TOKEN,
+                "decimals": 18,
+                "symbol": "EGG",
+                "totalSupply": "1000000000000000000000000000",
+                "holderCount": 2523,
+                "holders": [
+                    {
+                        "holder": "0x4444444444444444444444444444444444444444",
+                        "balance": "24568705968933937780679279",
+                        "pct": 2.4568705968,
+                    },
+                    {
+                        "holder": "0x5555555555555555555555555555555555555555",
+                        "balance": "10000000000000000000000000",
+                        "pct": None,
+                    },
+                    {"holder": "not-an-address", "balance": "1"},
+                ],
+                "page": {"page": 1, "limit": 50, "reachable": 500, "hasMore": True},
+            })
+        return FakeResponse({"pairs": [{
+            "chainId": "hyperevm",
+            "dexId": "hyperswap",
+            "baseToken": {"address": HYPER_TOKEN, "name": "egg", "symbol": "EGG"},
+            "quoteToken": {"address": "0xquote", "symbol": "WHYPE"},
+            "fdv": 5_779_461,
+            "liquidity": {"usd": 275_133},
+        }]})
+
+
+class FakeHyperEvmMissing(FakeHyperEvmHttp):
+    """An address the index has never seen: 200, but nothing to rank."""
+
+    async def get(self, url: str, **kwargs: object) -> FakeResponse:
+        if "/holders" in url:
+            return FakeResponse({
+                "address": HYPER_TOKEN,
+                "decimals": None,
+                "symbol": "",
+                "totalSupply": None,
+                "holderCount": None,
+                "holders": [],
+            })
+        return await super().get(url, **kwargs)
+
+
 HELIUS_RPC = "https://mainnet.helius-rpc.com/?api-key=test"
 
 
@@ -142,6 +205,39 @@ class TokenIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token.fdv, 2_000_000)
         self.assertEqual(len(token.holders), 2)
         self.assertEqual(token.holders[0].percentage, 9)
+
+
+class HyperliquidHolderTests(unittest.IsolatedAsyncioTestCase):
+    """`/token` used to report zero holders for every Hyperliquid token."""
+
+    async def test_hyperevm_pairs_are_labelled_hyperliquid(self) -> None:
+        client = TokenIntelligenceClient(FakeHyperEvmHttp(), [])
+        token = await client.lookup(HYPER_TOKEN, limit=MAX_HOLDERS)
+        self.assertEqual(token.chain, "Hyperliquid")
+        self.assertEqual(token.symbol, "EGG")
+
+    async def test_holders_are_scaled_by_the_payload_decimals(self) -> None:
+        http = FakeHyperEvmHttp()
+        client = TokenIntelligenceClient(http, [])
+        token = await client.lookup(HYPER_TOKEN, limit=MAX_HOLDERS)
+        # Three rows in, one of them junk: the junk row is dropped rather than
+        # rendered as an unlinkable holder.
+        self.assertEqual(len(token.holders), 2)
+        self.assertEqual(
+            token.holders[0].address,
+            "0x4444444444444444444444444444444444444444",
+        )
+        self.assertAlmostEqual(float(token.holders[0].balance), 24_568_705.968933938)
+        self.assertAlmostEqual(token.holders[0].percentage or 0, 2.4568705968)
+        # `pct: null` still gets a percentage -- from the supply on the payload.
+        self.assertAlmostEqual(token.holders[1].percentage or 0, 1.0)
+        self.assertTrue(http.holder_urls[0].endswith(f"/holders?limit={MAX_HOLDERS}"))
+
+    async def test_an_unindexed_token_shortens_the_card_rather_than_failing(self) -> None:
+        client = TokenIntelligenceClient(FakeHyperEvmMissing(), [])
+        token = await client.lookup(HYPER_TOKEN, limit=MAX_HOLDERS)
+        self.assertEqual(token.chain, "Hyperliquid")
+        self.assertEqual(token.holders, ())
 
 
 class DeepHolderTests(unittest.IsolatedAsyncioTestCase):

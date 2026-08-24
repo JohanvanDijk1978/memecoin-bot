@@ -4,10 +4,10 @@ fomo_bot.py — standalone Discord bot: FOMO trader research.
     /fomo <handle>          choose a Compact or Wide fomo.family profile
     /pump <handle>          rich Pump.fun profile
     /wallet <address>       find a FOMO or Pump profile by wallet
-    /token <address>        market cap, the top 50 holders and the
-                            best-performing traders by PnL/ROI
+    /token <address>        market cap and the top 50 holders, refreshable
     /thesis <address>       what this token's biggest holders wrote about it
-    /connected <target>     wallets with strong on-chain ties to a trader
+    /connected <target>     the funding wallet and the wallets a trader
+                            actually moves money to and from
     /track <platform> <who> choose and track FOMO or Pump activity
     /tracked                everything tracked here, with Edit and Remove
     /fomotop [24h] [n]      leaderboard
@@ -30,11 +30,11 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Awaitable, Callable, Sequence
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import discord
@@ -53,11 +53,13 @@ from fomo_evm import (
 from fomo_evm_activity import fetch_evm_activity
 from connected_wallets import (
     DEFAULT_EVM_CHAINS,
-    DEFAULT_MIN_SCORE,
-    SCORE_VERY_HIGH,
-    Association,
+    MIN_EVM_USD,
+    MIN_SOL,
+    MIN_STABLE,
     ConnectedReport,
     ConnectedWalletAnalyzer,
+    Connection,
+    Funding,
     address_url,
     explorer_url,
     fmt_day,
@@ -147,9 +149,7 @@ from token_intelligence import (
     TokenIntelligence,
     TokenIntelligenceClient,
     TokenIntelligenceError,
-    TokenTraders,
 )
-from token_traders import RANK_KEYS, TokenTrader, rank_traders
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -160,6 +160,129 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("fomobot")
+
+
+LOOP_LAG_WARN = float(os.getenv("FOMO_LOOP_LAG_WARN", "1.0"))
+
+SINGLE_INSTANCE_PORT = int(os.getenv("FOMO_LOCK_PORT", "47821"))
+_instance_lock: Any = None
+
+
+def claim_single_instance() -> bool:
+    """Refuse to start beside another copy of this bot.
+
+    Two processes on one bot token both hold a gateway session, Discord hands
+    an interaction to one of them, and whichever did not get it fails its
+    acknowledgement with 10062 -- no stalled loop, no slow network, just a
+    stale process nobody noticed surviving a restart. A bound socket is the
+    cheapest way to know: the OS drops it the moment the owner dies, so unlike
+    a pid file it cannot go stale.
+    """
+    global _instance_lock
+    if os.getenv("FOMO_SINGLE_INSTANCE", "1").strip() in ("0", "false", "no"):
+        return True
+    import socket
+
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+        sock.listen(1)
+    except OSError:
+        sock.close()
+        return False
+    _instance_lock = sock
+    return True
+
+
+async def _loop_watchdog(interval: float = 0.25) -> None:
+    """Name whatever is holding the event loop.
+
+    A 10062 says only that the loop was busy for three seconds; it never says
+    doing what. This sleeps in a tight cycle and measures how late it wakes --
+    the overshoot *is* the block -- then prints the tasks that were runnable at
+    the time, which is the shortlist of what caused it.
+
+    Set FOMO_LOOP_DEBUG=1 to also turn on asyncio's own slow-callback warning,
+    which names the exact coroutine. It costs real overhead, so it is opt-in.
+    """
+    if os.getenv("FOMO_LOOP_DEBUG", "").strip() in ("1", "true", "yes"):
+        loop = asyncio.get_running_loop()
+        loop.slow_callback_duration = LOOP_LAG_WARN
+        loop.set_debug(True)
+        logging.getLogger("asyncio").setLevel(logging.WARNING)
+        log.info("loop debug on: callbacks over %.2fs will be named", LOOP_LAG_WARN)
+
+    while True:
+        before = time.monotonic()
+        await asyncio.sleep(interval)
+        lag = time.monotonic() - before - interval
+        if lag < LOOP_LAG_WARN:
+            continue
+        busy = []
+        for task in asyncio.all_tasks():
+            if task.done():
+                continue
+            coro = task.get_coro()
+            name = getattr(coro, "__qualname__", None) or task.get_name()
+            frame = getattr(coro, "cr_frame", None)
+            where = ""
+            if frame is not None:
+                where = f" at {os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno}"
+            busy.append(f"{name}{where}")
+        log.warning(
+            "event loop stalled %.2fs (Discord allows 3s to acknowledge a "
+            "command). %d task(s) alive: %s",
+            lag, len(busy), "; ".join(sorted(set(busy))[:12]) or "none",
+        )
+
+
+async def _safe_defer(interaction: discord.Interaction, **kwargs: Any) -> bool:
+    """Acknowledge the command, or say precisely why the chance was missed.
+
+    Discord expires an interaction token three seconds after *it* issues the
+    token -- not three seconds after we see it. So a 10062 has two entirely
+    different causes and the traceback distinguishes neither:
+
+    * the event reached us late, and the clock had already run down before
+      this handler was even scheduled -- a gateway or network problem;
+    * the event arrived in good time and our acknowledgement was what took
+      too long -- a REST problem, usually the same network.
+
+    The interaction's snowflake carries its creation time, so both are
+    measurable. `_loop_watchdog` covers the third possibility, a stalled loop,
+    and reports separately. Raising here would only turn one lost click into a
+    two-deep `CommandInvokeError`, so report and let the caller give up.
+    """
+    name = getattr(interaction.command, "name", "?")
+    born = interaction.created_at
+    age = (discord.utils.utcnow() - born).total_seconds()
+    try:
+        await interaction.response.defer(**kwargs)
+        if age > 1.5:
+            log.warning(
+                "/%s was already %.2fs old when it reached us (gateway "
+                "latency %.0fms) -- close to Discord's three-second limit.",
+                name, age, bot.latency * 1000,
+            )
+        return True
+    except discord.NotFound:
+        elapsed = (discord.utils.utcnow() - born).total_seconds()
+        if age > 2.5:
+            blame = ("the event reached us with the clock already run down, so "
+                     "the delay is upstream of the bot -- gateway connection, "
+                     "network, or a second bot process holding the session")
+        else:
+            blame = ("the event arrived in time and the acknowledgement itself "
+                     "was too slow -- the REST call to Discord, not our code")
+        log.warning(
+            "/%s from %s expired (10062): %.2fs old on arrival, %.2fs when "
+            "refused, gateway latency %.0fms. Reading: %s.",
+            name, interaction.user, age, elapsed, bot.latency * 1000, blame,
+        )
+        return False
+    except discord.HTTPException as exc:
+        log.warning("could not acknowledge /%s: %s", name, exc)
+        return False
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 REFRESH_TOKEN = os.getenv("FOMO_PRIVY_REFRESH_TOKEN", "")
@@ -203,12 +326,10 @@ THESIS = 0x9B59B6
 # which is what fits with the thesis text itself under the embed's limits.
 TOKEN_HOLDER_LIMIT = 50
 TOKEN_HOLDER_PAGE = 10
-# Top Traders is the same shape as Top Holders on purpose: fifty rows, ten to
-# a page, turned by the same buttons. A trader row is two lines rather than
-# one -- identity, then the aligned entry/PnL/ROI columns -- so it gets its own
-# page size to change independently of the holders'.
-TOKEN_TRADER_LIMIT = 50
-TOKEN_TRADER_PAGE = 10
+# A `/token` card may be refreshed in place. The floor is there because the
+# rebuild costs a holder query plus identity lookups, and a button anybody in
+# the channel can press should not be able to spend those in a loop.
+TOKEN_REFRESH_COOLDOWN = 15.0
 THESIS_PAGE = 5
 THESIS_TEXT_LIMIT = 400
 
@@ -273,126 +394,87 @@ class PaginatedEmbedView(discord.ui.View):
 
 
 class TokenCardView(PaginatedEmbedView):
-    """`/token`'s pager, plus a second list behind the same buttons.
+    """`/token`'s pager, plus a Refresh that rebuilds the card in place.
 
-    Top Holders is rendered before the card is sent, as it always was. Top
-    Traders is not: it aggregates transfer history rather than reading a
-    ranked list, so it is paid only if somebody asks for it, and then paid
-    once -- the rendered pages are kept on the view, so toggling back and
-    forth afterwards is a message edit like any other page turn.
+    Every holder page is rendered before the card is sent, so turning one is a
+    message edit and two pages can never disagree. Refresh re-runs exactly the
+    work `/token` did -- the holder query and the identity labelling -- and
+    swaps the whole set of pages for the new one, keeping the reader on the
+    page they were looking at.
 
-    Previous/Next act on whichever list is showing, and each list keeps its
-    own page, so returning to the holders finds them where they were left.
+    The rebuild costs provider requests, so it is serialised behind a lock and
+    floored by a cooldown: anybody in the channel may press it, but not twice
+    in the same breath.
     """
 
     def __init__(
         self,
         holder_embeds: list[discord.Embed],
-        loader: Callable[[str], Awaitable[list[discord.Embed]]],
+        refresh: Callable[[], Awaitable[list[discord.Embed]]],
         *,
         timeout: float = 3600,
     ) -> None:
-        self.section = "holders"
-        self.rank = "pnl"
-        self._pages: dict[str, list[discord.Embed]] = {"holders": holder_embeds}
-        self._indexes: dict[str, int] = {"holders": 0}
-        self._loader = loader
-        self._loading = asyncio.Lock()
+        self._refresh = refresh
+        self._refreshing = asyncio.Lock()
+        self._last_refresh = 0.0
         super().__init__(holder_embeds, timeout=timeout)
 
-    @property
-    def _trader_key(self) -> str:
-        """Each ranking is its own set of rendered pages, kept once loaded."""
-        return f"traders:{self.rank}"
-
-    def _showing_traders(self) -> bool:
-        return self.section.startswith("traders")
-
-    def _sync(self) -> None:
-        super()._sync()
-        # `PaginatedEmbedView.__init__` calls this before the subclass has
-        # finished, so the toggles may not exist yet on the very first pass.
-        button = getattr(self, "section_button", None)
-        if button is not None:
-            button.label = (
-                "Top Holders" if self._showing_traders() else "Top Traders"
-            )
-        sort = getattr(self, "sort_button", None)
-        if sort is not None:
-            sort.label = f"Sort: {RANK_LABELS.get(self.rank, self.rank)}"
-            sort.disabled = not self._showing_traders()
-
-    async def _show_section(
-        self, interaction: discord.Interaction, section: str, *, edited: bool
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary, emoji="🔄")
+    async def refresh_button(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
-        self._indexes[self.section] = self.index
-        self.section = section
-        self.embeds = self._pages[section]
-        self.index = min(self._indexes.get(section, 0), len(self.embeds) - 1)
+        """Re-read the holders and re-render every page.
+
+        A failed rebuild leaves the card exactly as it was and says so
+        privately: stale holders are a better answer than an error card
+        replacing data that is still perfectly readable.
+        """
+        waited = time.monotonic() - self._last_refresh
+        if waited < TOKEN_REFRESH_COOLDOWN:
+            await interaction.response.send_message(
+                f"Just refreshed — try again in "
+                f"{TOKEN_REFRESH_COOLDOWN - waited:.0f}s.",
+                ephemeral=True,
+            )
+            return
+        if self._refreshing.locked():
+            await interaction.response.send_message(
+                "A refresh is already running.", ephemeral=True
+            )
+            return
+        # The holder query can outlast Discord's three-second reply budget --
+        # acknowledge first, then edit.
+        try:
+            if not await _safe_defer(interaction):
+                return
+        except discord.HTTPException as exc:
+            log.debug("could not defer the /token refresh: %s", exc)
+            return
+        async with self._refreshing:
+            try:
+                embeds = await self._refresh()
+            except Exception:
+                log.exception("refreshing the /token card failed")
+                embeds = []
+            self._last_refresh = time.monotonic()
+        if not embeds:
+            with contextlib.suppress(discord.HTTPException):
+                await interaction.followup.send(
+                    "The refresh could not read the holders, so the card is "
+                    "unchanged.", ephemeral=True,
+                )
+            return
+        self.embeds = embeds
+        self.index = min(self.index, len(self.embeds) - 1)
         self._sync()
         try:
-            if edited:
-                await interaction.edit_original_response(
-                    embed=self.embeds[self.index], view=self
-                )
-            else:
-                await interaction.response.edit_message(
-                    embed=self.embeds[self.index], view=self
-                )
+            await interaction.edit_original_response(
+                embed=self.embeds[self.index], view=self
+            )
         except discord.HTTPException as exc:
             # An expired or already-answered interaction is the normal end of
             # a card's life, not a failure worth an error card.
-            log.debug("could not switch the /token card to %s: %s", section, exc)
-
-    async def _open(self, interaction: discord.Interaction, target: str) -> None:
-        """Show a section, loading and remembering its pages the first time."""
-        if target in self._pages:
-            await self._show_section(interaction, target, edited=False)
-            return
-        # The first look costs provider requests, which can outlast Discord's
-        # three-second reply budget -- acknowledge, then edit.
-        try:
-            await interaction.response.defer()
-        except discord.HTTPException as exc:
-            log.debug("could not defer the Top Traders click: %s", exc)
-            return
-        async with self._loading:
-            if target not in self._pages:
-                try:
-                    self._pages[target] = await self._loader(
-                        target.split(":", 1)[1] if ":" in target else "pnl"
-                    )
-                except Exception:
-                    log.exception("loading the top traders failed")
-                    self._pages[target] = []
-        if not self._pages[target]:
-            # Remembered as a miss so a second click costs nothing, and shown
-            # as a card rather than an error: the holders are still fine.
-            self._pages[target] = [_token_empty_traders_embed()]
-        await self._show_section(interaction, target, edited=True)
-
-    @discord.ui.button(label="Top Traders", style=discord.ButtonStyle.primary)
-    async def section_button(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        await self._open(
-            interaction, "holders" if self._showing_traders() else self._trader_key
-        )
-
-    @discord.ui.button(label="Sort: PnL", style=discord.ButtonStyle.secondary)
-    async def sort_button(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        """Cycle the ranking: PnL → ROI → Volume.
-
-        Re-ranking is local -- the client already returned the rows that any of
-        the three orderings needs -- so this is a render, not another sample.
-        """
-        if not self._showing_traders():
-            return
-        order = list(RANK_KEYS)
-        self.rank = order[(order.index(self.rank) + 1) % len(order)]
-        await self._open(interaction, self._trader_key)
+            log.debug("could not redraw the refreshed /token card: %s", exc)
 
 
 class ActivityMultiSelect(discord.ui.Select):
@@ -505,7 +587,8 @@ class TrackedManagerView(discord.ui.View):
         self, interaction: discord.Interaction, indexes: list[int]
     ) -> None:
         self.selected = indexes
-        await interaction.response.defer()
+        if not await _safe_defer(interaction):
+            return
 
     @discord.ui.button(
         label="Edit", style=discord.ButtonStyle.primary, emoji="✏️", row=1
@@ -1261,6 +1344,8 @@ class FomoBot(discord.Client):
         except ImportError:
             log.warning("httpx not installed - Pump and wallet resolution disabled")
 
+        self.create_enrichment_task(_loop_watchdog(), name="loop-watchdog")
+
         synced = await self.tree.sync()
         self._tracking_tasks = [
             asyncio.create_task(
@@ -1798,7 +1883,8 @@ async def _resolve_pump_user(
 @bot.tree.command(name="wallet", description="Find FOMO and Pump profiles by wallet")
 @app_commands.describe(address="Solana or EVM wallet address")
 async def wallet_cmd(interaction: discord.Interaction, address: str) -> None:
-    await interaction.response.defer()
+    if not await _safe_defer(interaction):
+        return
     query = address.strip().strip("`").strip()
     fomo_matches = find_cached_wallets(query)
 
@@ -1908,6 +1994,7 @@ def _holder_explorer(chain: str, address: str) -> str | None:
         "BSC": "https://bscscan.com/address/",
         "Base": "https://basescan.org/address/",
         "Robinhood": "https://robinhoodchain.blockscout.com/address/",
+        "Hyperliquid": "https://hyperscan.com/address/",
     }
     base = bases.get(chain)
     return f"{base}{address}" if base else None
@@ -2013,9 +2100,9 @@ async def _wallet_identity(address: str, chain: str,
                            fomo_match: FomoHolder | None = None) -> str:
     """`@handle · wallet`, or the bare wallet when nothing names it.
 
-    Shared by Top Holders and Top Traders so the two lists cannot disagree
-    about who a wallet is; the row-specific figures are appended by the
-    callers.
+    Shared by the holder rows and `/connected`'s cards so no two lists can
+    disagree about who a wallet is; the row-specific figures are appended by
+    the callers.
     """
     identities: list[str] = []
     pump_wallet: str | None = None
@@ -2065,124 +2152,6 @@ async def _holder_label(holder: TokenHolder, chain: str,
     return f"{identity}{percentage} · {_fmt_holder_balance(holder.balance)}"
 
 
-def _fmt_signed_usd(value: Decimal | float | None) -> str:
-    """`+$12,450`. Whole dollars once a figure is big enough to need commas."""
-    if value is None:
-        return "—"
-    number = float(value)
-    sign = "-" if number < 0 else "+"
-    magnitude = abs(number)
-    if magnitude >= 1000:
-        return f"{sign}${magnitude:,.0f}"
-    if magnitude >= 1:
-        return f"{sign}${magnitude:,.2f}"
-    return f"{sign}${magnitude:.2f}"
-
-
-def _fmt_roi(value: Decimal | float | None) -> str:
-    """`+382.4%`, without four decimal places on a 12,000% run."""
-    if value is None:
-        return "—"
-    number = float(value)
-    sign = "-" if number < 0 else "+"
-    magnitude = abs(number)
-    if magnitude >= 1000:
-        return f"{sign}{magnitude:,.0f}%"
-    return f"{sign}{magnitude:.1f}%"
-
-
-def _fmt_compact_usd(value: Decimal | float | None) -> str:
-    """`$130K`. Market caps are read at a glance, not to the cent."""
-    if value is None:
-        return "—"
-    number = float(value)
-    for cutoff, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if abs(number) >= cutoff:
-            text = f"{number / cutoff:.1f}".rstrip("0").rstrip(".")
-            return f"${text}{suffix}"
-    return f"${number:,.0f}"
-
-
-def _entry_column(trader: TokenTrader, supply: Decimal | None) -> str:
-    """Where they got in: market cap when supply is known, price otherwise.
-
-    Market cap is what a memecoin entry is actually discussed in ("I'm in at
-    130k"), and the token's own circulating supply converts one into the other
-    exactly: `market cap / current price` is the supply the card's own header
-    already implies.
-    """
-    entry = trader.avg_entry_price
-    if entry is None:
-        return "—"
-    if supply:
-        return _fmt_compact_usd(entry * supply)
-    return fmt_price(float(entry))
-
-
-def _trader_metrics(
-    trader: TokenTrader, supply: Decimal | None,
-) -> tuple[str, str, str]:
-    """The three columns that decide the ranking, as text."""
-    return (
-        _entry_column(trader, supply),
-        _fmt_signed_usd(trader.total_pnl_usd),
-        _fmt_roi(trader.roi_pct),
-    )
-
-
-def _trader_flags(trader: TokenTrader) -> str:
-    """Say when a number is less than the whole story, rather than rounding it.
-
-    `◐` -- the position is still open, so PnL includes an unrealised part that
-    moves with the price. `~` -- this wallet's cost basis is incomplete: part
-    of the position arrived for free (so there is a PnL but no honest ROI),
-    could not be priced, or was bought before the sample starts.
-    """
-    flags = ""
-    if trader.open_tokens > 0 and not trader.realized_only:
-        flags += "◐"
-    if trader.partial:
-        flags += "~"
-    return f" {flags}" if flags else ""
-
-
-async def _trader_identity(trader: TokenTrader, chain: str,
-                           fomo_match: FomoHolder | None = None) -> str:
-    """The 'who' half of a Top Traders row."""
-    identity = await _wallet_identity(trader.address, chain, fomo_match)
-    count = f"{trader.transactions} tx" if trader.transactions != 1 else "1 tx"
-    return f"{identity} · {count}"
-
-
-def _trader_rows(
-    traders: Sequence[TokenTrader], identities: Sequence[str],
-    supply: Decimal | None,
-) -> list[str]:
-    """Two lines per trader: who they are, then entry / PnL / ROI aligned.
-
-    The figures go inside one inline-code span so Discord renders them in a
-    monospace font, which is the only way columns line up in an embed. Padding
-    is computed across the whole list rather than per page, so a column does
-    not shift when the card is turned.
-    """
-    metrics = [_trader_metrics(trader, supply) for trader in traders]
-    widths = [max((len(cell[index]) for cell in metrics), default=1)
-              for index in range(3)]
-    rows: list[str] = []
-    for position, (trader, identity) in enumerate(zip(traders, identities), 1):
-        entry, pnl, roi = metrics[position - 1]
-        total = trader.total_pnl_usd
-        marker = "⚪" if total is None else ("🟢" if total >= 0 else "🔴")
-        columns = (
-            f"{entry:>{widths[0]}}  {pnl:>{widths[1]}}  {roi:>{widths[2]}}"
-        )
-        rows.append(
-            f"`{position}.` {identity}\n{marker} `{columns}`"
-            f"{_trader_flags(trader)}"
-        )
-    return rows
-
-
 def _token_trade_url(token: TokenIntelligence) -> str | None:
     network = {
         "Solana": "solana",
@@ -2194,9 +2163,15 @@ def _token_trade_url(token: TokenIntelligence) -> str | None:
 
 
 def _token_page_embed(
-    token: TokenIntelligence, numbered: list[str], page: int, pages: int
+    token: TokenIntelligence, numbered: list[str], page: int, pages: int,
+    *, refreshed: bool = False,
 ) -> discord.Embed:
-    """One page of `/token`: the same header, a different slice of holders."""
+    """One page of `/token`: the same header, a different slice of holders.
+
+    `refreshed` only changes the footer. Discord renders `embed.timestamp` in
+    the reader's own timezone, so the card can say when these holders were
+    read without the bot having to guess where anybody is.
+    """
     market_cap = fmt_usd(token.market_cap) if token.market_cap is not None else "—"
     description = f"**Market cap:** {market_cap}"
     if token.price_usd is not None:
@@ -2229,167 +2204,17 @@ def _token_page_embed(
         )
     if token.image_url:
         embed.set_thumbnail(url=token.image_url)
+    embed.timestamp = datetime.now(tz=timezone.utc)
     embed.set_footer(
         text=f"Page {page} of {pages} · 🔵 FOMO · 🟢 Pump.fun • "
-             "identities do not need to be tracked"
+             + ("refreshed" if refreshed else "read")
     )
     return embed
-
-
-def _token_empty_traders_embed() -> discord.Embed:
-    """Shown when no provider could answer for traders. The holders still can."""
-    return discord.Embed(
-        title="🪙 Top traders",
-        description=(
-            "Trader data is currently unavailable for this token.\n"
-            "Top Holders is unaffected — use the button to go back."
-        ),
-        colour=BRAND,
-    )
-
-
-def _sample_window(meta: TokenTraders) -> str:
-    """Say what the ranking covers rather than implying it covers everything.
-
-    The distinction that matters is whether paging reached the token's first
-    transaction. If it did, the ledger is the whole story and the card says so;
-    if the budget cut it short, the winners may have entered before the sample
-    starts, and a `+` is the warning that it is a window rather than a history.
-    """
-    if not meta.transactions:
-        return "no sampled transactions"
-    kind = "recent transaction" if meta.truncated else "transaction"
-    span = f"{meta.transactions:,} {kind}"
-    span += "s" if meta.transactions != 1 else ""
-    if meta.truncated:
-        span += "+"
-    else:
-        span += " · full history"
-    if meta.earliest and meta.latest:
-        first = datetime.fromtimestamp(meta.earliest, tz=timezone.utc)
-        last = datetime.fromtimestamp(meta.latest, tz=timezone.utc)
-        span += f" · {first:%d %b} – {last:%d %b %Y}"
-    return span
-
-
-RANK_LABELS = {"pnl": "PnL", "roi": "ROI", "volume": "Volume"}
-RANK_DESCRIPTIONS = {
-    "pnl": "PnL — realised + unrealised, in USD",
-    "roi": "ROI — PnL over invested capital",
-    "volume": "tokens traded (activity, not performance)",
-}
-
-
-def _token_supply(token: TokenIntelligence) -> Decimal | None:
-    """Circulating supply, implied by the market cap the card already shows."""
-    cap = token.market_cap if token.market_cap is not None else token.fdv
-    if not cap or not token.price_usd or token.price_usd <= 0:
-        return None
-    try:
-        return Decimal(str(cap)) / Decimal(str(token.price_usd))
-    except (InvalidOperation, ZeroDivisionError):
-        return None
-
-
-def _token_traders_embed(
-    token: TokenIntelligence, meta: TokenTraders, numbered: list[str],
-    page: int, pages: int, rank: str = "pnl",
-) -> discord.Embed:
-    """One page of Top Traders: the `/token` header, a slice of the ranking."""
-    market_cap = fmt_usd(token.market_cap) if token.market_cap is not None else "—"
-    description = f"**Market cap:** {market_cap}"
-    if token.price_usd is not None:
-        description += f"\n**Price:** {fmt_price(token.price_usd)}"
-    description += f"\n**Ranked by:** {RANK_DESCRIPTIONS.get(rank, rank)}"
-    description += f"\n**Sampled:** {_sample_window(meta)}"
-    if meta.traders and not meta.priced:
-        description += (
-            "\n⚠️ No trade in this sample carried a priceable counter-asset, "
-            "so PnL and ROI are unavailable — the rows below are ordered by "
-            "tokens traded."
-        )
-
-    embed = discord.Embed(
-        title=f"🪙 ${token.symbol} · {token.chain}",
-        url=_token_trade_url(token),
-        description=description,
-        colour=BRAND,
-    )
-    embed.add_field(name="Contract address", value=f"`{token.address}`", inline=False)
-
-    start = (page - 1) * TOKEN_TRADER_PAGE
-    rows = numbered[start:start + TOKEN_TRADER_PAGE]
-    chunks = _discord_line_chunks(rows)
-    if not chunks:
-        chunks = ["No trader activity was found in the sampled window."]
-        span = ""
-    else:
-        span = f" · {start + 1}-{start + len(rows)}"
-    for index, chunk in enumerate(chunks, 1):
-        suffix = f" · {index}/{len(chunks)}" if len(chunks) > 1 else ""
-        embed.add_field(
-            name=f"Best traders{span} of {len(numbered)}"
-                 f" · entry · PnL · ROI{suffix}",
-            value=chunk,
-            inline=False,
-        )
-    if token.image_url:
-        embed.set_thumbnail(url=token.image_url)
-    embed.set_footer(
-        text=f"Page {page} of {pages} · by {RANK_LABELS.get(rank, rank)} · "
-             f"◐ open position · ~ cost basis incomplete (free tokens, "
-             f"unpriced, or bought before the sample) · {meta.source}"
-    )
-    return embed
-
-
-async def _token_trader_embeds(
-    token: TokenIntelligence, fomo_matches: dict[str, FomoHolder],
-    rank: str = "pnl",
-) -> list[discord.Embed]:
-    """Render every Top Traders page, or [] when nothing could be read.
-
-    The client hands back the union of the top rows under every ranking, so
-    switching the sort re-orders in place and costs no provider request at all.
-
-    Identity goes through the same `_wallet_identity` the holders use, so a
-    wallet named on one list is named on the other. The Pump prefetch is
-    repeated for the trader set because these are mostly different wallets --
-    it is one bounded batch and the resolver remembers both hits and misses.
-    """
-    if not bot.tokens:
-        return []
-    meta = await bot.tokens.top_traders(
-        token.address, token.chain,
-        limit=TOKEN_TRADER_LIMIT, price_usd=token.price_usd,
-    )
-    if not meta.traders:
-        return []
-    traders = rank_traders(meta.traders, key=rank, limit=TOKEN_TRADER_LIMIT)
-
-    if token.chain == "Solana" and bot.pump_profiles:
-        pending = [
-            trader.address for trader in traders
-            if not (bot.pump_evm and bot.pump_evm.cached(trader.address))
-        ]
-        try:
-            await bot.pump_profiles.prefetch(pending)
-        except Exception as exc:
-            log.debug("pump trader prefetch failed for %s: %s", token.address, exc)
-
-    identities = await asyncio.gather(*(
-        _trader_identity(trader, token.chain, fomo_matches.get(trader.address))
-        for trader in traders
-    ))
-    numbered = _trader_rows(traders, identities, _token_supply(token))
-    pages = max(1, -(-len(numbered) // TOKEN_TRADER_PAGE))
-    return [_token_traders_embed(token, meta, numbered, page, pages, rank)
-            for page in range(1, pages + 1)]
 
 
 @bot.tree.command(
     name="token",
-    description="Show token market cap, top holders and top traders",
+    description="Show token market cap and its top 50 holders",
 )
 @app_commands.describe(address="Solana or EVM token contract address")
 async def token_cmd(interaction: discord.Interaction, address: str) -> None:
@@ -2399,12 +2224,13 @@ async def token_cmd(interaction: discord.Interaction, address: str) -> None:
     50: every page is rendered up front, so paging costs a message edit rather
     than another round of identity lookups.
 
-    Top Traders sits behind a button on the same card. It is the same shape --
-    fifty rows, ten a page, the same identity labelling -- but it is rendered
-    on demand, because it aggregates transfer history rather than reading a
-    ranked list and nobody should pay for it who did not ask.
+    That is also why the card carries a Refresh button rather than asking the
+    reader to run the command again. `_render_token_card` below is the whole
+    of the work, so refreshing repeats exactly it -- the market data, the
+    holder query and the identity labelling -- and nothing else.
     """
-    await interaction.response.defer()
+    if not await _safe_defer(interaction):
+        return
     if not bot.tokens:
         await interaction.followup.send(
             "Token intelligence is unavailable because the HTTP client did not start.",
@@ -2413,20 +2239,47 @@ async def token_cmd(interaction: discord.Interaction, address: str) -> None:
         return
 
     clean = address.strip().strip("`").strip()
-    count = TOKEN_HOLDER_LIMIT
-    pump_coin: PumpCoin | None = None
-    if bot.pump and not EVM_RE.fullmatch(clean):
-        try:
-            pump_coin = await bot.pump.coin(clean)
-        except (PumpError, asyncio.TimeoutError):
-            pass
     try:
-        token = await bot.tokens.lookup(clean, limit=count, pump_coin=pump_coin)
+        embeds = await _render_token_card(clean)
     except TokenIntelligenceError as exc:
         await interaction.followup.send(
             f"Token lookup failed: `{str(exc)[:180]}`", ephemeral=True
         )
         return
+
+    async def refresh() -> list[discord.Embed]:
+        # A refresh that cannot read the token leaves the card standing; the
+        # view turns an empty list into a private note rather than an error.
+        try:
+            return await _render_token_card(clean, refreshed=True)
+        except TokenIntelligenceError as exc:
+            log.info("refreshing /token %s failed: %s", clean, exc)
+            return []
+
+    await interaction.followup.send(
+        embed=embeds[0], view=TokenCardView(embeds, refresh)
+    )
+
+
+async def _render_token_card(
+    address: str, *, refreshed: bool = False
+) -> list[discord.Embed]:
+    """Every page of a `/token` card, read fresh from the providers.
+
+    Called once when the command runs and again for each Refresh, so the two
+    can never drift apart. Identity caches are deliberately *not* bypassed: a
+    wallet's handle does not go stale in the way a holder list does, and
+    re-asking Pump for fifty profiles is the expensive half of this.
+    """
+    pump_coin: PumpCoin | None = None
+    if bot.pump and not EVM_RE.fullmatch(address):
+        try:
+            pump_coin = await bot.pump.coin(address)
+        except (PumpError, asyncio.TimeoutError):
+            pass
+    token = await bot.tokens.lookup(
+        address, limit=TOKEN_HOLDER_LIMIT, pump_coin=pump_coin
+    )
 
     fomo_matches = await _fomo_holder_matches(token)
     # One deduplicated, bounded batch for every Solana holder before the rows
@@ -2448,17 +2301,8 @@ async def token_cmd(interaction: discord.Interaction, address: str) -> None:
     )
     numbered = [f"`{index}.` {line}" for index, line in enumerate(holder_lines, 1)]
     pages = max(1, -(-len(numbered) // TOKEN_HOLDER_PAGE))
-    embeds = [_token_page_embed(token, numbered, page, pages)
-              for page in range(1, pages + 1)]
-
-    async def load_traders(rank: str = "pnl") -> list[discord.Embed]:
-        return await _token_trader_embeds(token, fomo_matches, rank)
-
-    # The card always carries the view now: even a single holder page has a
-    # Top Traders button, and paging is disabled the same way it always was.
-    await interaction.followup.send(
-        embed=embeds[0], view=TokenCardView(embeds, load_traders)
-    )
+    return [_token_page_embed(token, numbered, page, pages, refreshed=refreshed)
+            for page in range(1, pages + 1)]
 
 
 async def _token_theses(token: TokenIntelligence) -> list[HolderThesis]:
@@ -2576,7 +2420,8 @@ def _thesis_page_embed(
 )
 @app_commands.describe(address="Solana or EVM token contract address")
 async def thesis_cmd(interaction: discord.Interaction, address: str) -> None:
-    await interaction.response.defer()
+    if not await _safe_defer(interaction):
+        return
     if not bot.tokens or not bot.fomo:
         await interaction.followup.send(
             "Thesis lookup is unavailable because the HTTP client did not start.",
@@ -2615,12 +2460,16 @@ async def thesis_cmd(interaction: discord.Interaction, address: str) -> None:
     await interaction.followup.send(embed=embeds[0], **extra)
 
 
-CONNECTED_PAGE = 3
-# A percentage on this card is the strength of the evidence, never a claim
-# about ownership. It is spelled out on every page for exactly that reason.
+CONNECTED_PAGE = 4
+# The whole bar, spelled out on every page, because a reader who does not know
+# what was excluded cannot tell an empty answer from a broken one.
+CONNECTED_RULE = (
+    f"Direct transfers only — {MIN_SOL:g}+ SOL / {MIN_STABLE:g}+ USDC on "
+    f"Solana, ${MIN_EVM_USD:,.0f}+ native or {MIN_STABLE:g}+ stablecoin on EVM."
+)
 CONNECTED_DISCLAIMER = (
-    "Scores measure how strong the on-chain evidence is — not proof that one "
-    "person owns both wallets."
+    "Swaps, pools, DEX routers, exchanges and program accounts are excluded. "
+    "A shared transfer history is not proof of shared ownership."
 )
 
 
@@ -2729,84 +2578,124 @@ async def _connected_wallets_for(
     return pairs, f"@{user.handle}"
 
 
-def _connected_entry(index: int, item: Association) -> tuple[str, str]:
-    """One association as a Discord field: who, how strong, and why."""
+def _connected_amount(amount: float, symbol: str, usd: float | None) -> str:
+    """`2.5 SOL ($412)` — the figure first, the dollars only if they are real."""
+    text = f"{amount:,.4f}".rstrip("0").rstrip(".") or "0"
+    text = f"{text} {symbol}".strip()
+    return f"{text} ({fmt_usd(usd)})" if usd else text
+
+
+def _funding_field(item: Funding) -> tuple[str, str]:
+    """The funding wallet, as its own field at the top of the first page."""
+    link = address_url(item.chain, item.address)
+    address = _short_wallet(item.address)
+    address_text = f"[`{address}`]({link})" if link else f"`{address}`"
+    who = f"🔵 [@{item.identity}](https://fomo.family/profile/{item.identity})" \
+        if item.identity else address_text
+    lines = [who]
+    if item.identity:
+        lines[0] += f" · {address_text}"
+    if item.label:
+        lines.append(f"Labelled **{item.label}** — a service, not a person.")
+    lines.append(
+        f"First funded {_short_wallet(item.wallet)} with "
+        f"**{_connected_amount(item.amount, item.symbol, item.usd)}**"
+        + (f" on {fmt_day(item.timestamp)}" if item.timestamp else "")
+    )
+    tx = explorer_url(item.chain, item.reference)
+    if tx:
+        lines.append(f"[View the funding transaction]({tx})")
+    return f"💰 Funding wallet · {item.chain.title()}", _fit_field(lines)
+
+
+def _connected_entry(index: int, item: Connection) -> tuple[str, str]:
+    """One connected wallet as a Discord field: who, how much, how often."""
     record = item.relationship
     link = address_url(record.chain, record.address)
     address = _short_wallet(record.address)
     address_text = f"[`{address}`]({link})" if link else f"`{address}`"
-    name = f"{index}. @{record.identity}" if record.identity else f"{index}. {address}"
+    marker = "💰 " if item.funder else ""
+    name = (f"{index}. {marker}@{record.identity}" if record.identity
+            else f"{index}. {marker}{address}")
 
     lines = [
-        f"**{item.band}** · **{item.score}/100** · {record.chain.title()}",
-        f"Wallet: {address_text}",
-        f"Direct transfers: **{record.transfers}** "
+        f"Wallet: {address_text} · {record.chain.title()}",
+        f"Qualifying transfers: **{record.transfers}** "
         f"({record.sent_count} out / {record.received_count} in)",
     ]
     if record.total_usd:
         lines.append(
-            f"Total transferred: **{fmt_usd(record.total_usd)}** "
+            f"Value moved: **{fmt_usd(record.total_usd)}** "
             f"(sent {fmt_usd(record.sent_usd)} / received "
             f"{fmt_usd(record.received_usd)})"
         )
     if record.unpriced:
-        lines.append(f"Unpriced transfers: {record.unpriced}")
+        lines.append(
+            f"{record.unpriced} of those could not be priced, so the total "
+            "understates them."
+        )
     lines.append(
         f"First: {fmt_day(record.first_seen)} · "
         f"Latest: {fmt_day(record.last_seen)} · "
         f"{record.active_days} separate dates"
     )
-    if item.reasons:
-        lines.append("Evidence: " + "; ".join(item.reasons[:4]) + ".")
+    if item.funder:
+        lines.append("This wallet funded the analysed one.")
+    if record.is_contract and not record.identity:
+        lines.append("Contract code, and no known identity — treat with care.")
     return name, _fit_field(lines)
 
 
-def _connected_embeds(
-    report: ConnectedReport, label: str, *, weaker: bool = False
-) -> list[discord.Embed]:
+def _connected_embeds(report: ConnectedReport, label: str) -> list[discord.Embed]:
     """Every page of one `/connected` run, rendered before the first is sent."""
-    items = list(report.weaker if weaker else report.associations)
-    title = "🔗 Possible associations" if weaker else "🔗 Connected wallets"
+    items = list(report.connections)
     scope = ", ".join(
         f"{chain.title()} `{_short_wallet(address)}`"
         for address, chain in report.wallets
     ) or "—"
     header = f"**{label}** · analysed {scope}"
     if report.transactions:
-        header += f"\n{report.transactions:,} transactions sampled"
-
-    if not items:
-        empty = discord.Embed(
-            title=title,
-            description=(
-                f"{header}\n\n"
-                + ("No further candidates cleared the evidence bar."
-                   if weaker else
-                   "**No wallet met the evidence bar.** That is the intended "
-                   "answer when the chain does not show a strong, repeated, "
-                   "multi-signal relationship — exchanges, bridges, routers, "
-                   "contracts and high-degree service wallets are excluded by "
-                   "design.")
-            ),
-            colour=BRAND,
-        )
-        for warning in report.warnings[:3]:
-            empty.add_field(name="Note", value=warning[:1024], inline=False)
-        empty.set_footer(text=CONNECTED_DISCLAIMER)
-        return [empty]
+        header += f"\n{report.transactions:,} transactions read"
+    header += f"\n{CONNECTED_RULE}"
 
     pages = max(1, -(-len(items) // CONNECTED_PAGE))
     embeds: list[discord.Embed] = []
     for page in range(1, pages + 1):
         embed = discord.Embed(
-            title=title,
+            title="🔗 Connected wallets",
             description=header,
-            colour=WIN if not weaker else BRAND,
+            colour=WIN if items else BRAND,
         )
-        start = (page - 1) * CONNECTED_PAGE
-        for offset, item in enumerate(items[start:start + CONNECTED_PAGE], start + 1):
-            name, value = _connected_entry(offset, item)
-            embed.add_field(name=name[:256], value=value, inline=False)
+        # The funder belongs on the first page whether or not anything else
+        # cleared the bar -- it is usually the answer somebody came for.
+        if page == 1:
+            for item in report.funding[:2]:
+                name, value = _funding_field(item)
+                embed.add_field(name=name[:256], value=value, inline=False)
+            if not report.funding:
+                embed.add_field(
+                    name="💰 Funding wallet",
+                    value="Not determined — see the notes below.",
+                    inline=False,
+                )
+        if items:
+            start = (page - 1) * CONNECTED_PAGE
+            for offset, item in enumerate(
+                items[start:start + CONNECTED_PAGE], start + 1
+            ):
+                name, value = _connected_entry(offset, item)
+                embed.add_field(name=name[:256], value=value, inline=False)
+        elif page == 1:
+            embed.add_field(
+                name="Connected wallets",
+                value=(
+                    "**No wallet cleared the transfer bar.** That is the "
+                    "intended answer when a trader only ever swaps: buying and "
+                    "selling on Jupiter, Raydium or Meteora connects them to a "
+                    "pool, not to a person, so none of it is counted here."
+                ),
+                inline=False,
+            )
         for warning in report.warnings[:2]:
             embed.add_field(name="Note", value=warning[:1024], inline=False)
         embed.set_footer(
@@ -2816,14 +2705,14 @@ def _connected_embeds(
     return embeds
 
 
-def _connected_evidence_embed(item: Association) -> discord.Embed:
-    """The transactions behind one association, so the claim can be checked."""
+def _connected_evidence_embed(item: Connection) -> discord.Embed:
+    """The transactions behind one wallet, so the claim can be checked."""
     record = item.relationship
     embed = discord.Embed(
         title=f"🔍 Evidence · {_short_wallet(record.address)}",
         description=(
-            f"**{item.band}** · {item.score}/100 · {record.chain.title()}\n"
-            f"Between `{_short_wallet(record.known_wallet)}` and "
+            f"{record.chain.title()} · **{record.transfers}** qualifying "
+            f"transfers between `{_short_wallet(record.known_wallet)}` and "
             f"`{_short_wallet(record.address)}`"
         ),
         colour=BRAND,
@@ -2834,16 +2723,22 @@ def _connected_evidence_embed(item: Association) -> discord.Embed:
         short = f"{reference[:10]}…{reference[-6:]}" if len(reference) > 20 else reference
         links.append(f"• [{short}]({url})" if url else f"• `{short}`")
     embed.add_field(
-        name=f"Sampled transactions ({len(record.references)} kept)",
+        name=f"Transactions ({len(record.references)} kept)",
         value=_fit_field(links) if links else "No transaction reference was kept.",
         inline=False,
     )
-    if item.reasons:
-        embed.add_field(
-            name="Why this scored",
-            value=_fit_field([f"• {reason}" for reason in item.reasons]),
-            inline=False,
-        )
+    embed.add_field(
+        name="What was counted",
+        value=_fit_field([
+            f"• {CONNECTED_RULE}",
+            f"• Sent {fmt_usd(record.sent_usd)} in {record.sent_count} "
+            f"transfers, received {fmt_usd(record.received_usd)} in "
+            f"{record.received_count}",
+            f"• {fmt_day(record.first_seen)} – {fmt_day(record.last_seen)}, "
+            f"on {record.active_days} separate dates",
+        ]),
+        inline=False,
+    )
     embed.set_footer(text=CONNECTED_DISCLAIMER)
     return embed
 
@@ -2856,49 +2751,26 @@ class ConnectedEvidenceSelect(discord.ui.Select):
 
 
 class ConnectedView(PaginatedEmbedView):
-    """`/connected`'s pager, its weaker-evidence half, and the evidence drawer.
+    """`/connected`'s pager and its evidence drawer.
 
-    Both result sets are rendered up front -- the analysis is already paid for
-    by the time the card exists -- so every button here is a message edit.
-    Evidence is sent ephemerally rather than replacing the card, because it is
-    a drill-down on one row, not another page.
+    Every page is rendered up front -- the analysis is already paid for by the
+    time the card exists -- so paging is a message edit. Evidence is sent
+    ephemerally rather than replacing the card, because it is a drill-down on
+    one row, not another page.
     """
 
     def __init__(
         self, report: ConnectedReport, label: str, *, timeout: float = 3600
     ) -> None:
         self.report = report
-        self.section = "strong"
-        self._pages = {
-            "strong": _connected_embeds(report, label),
-            "weaker": _connected_embeds(report, label, weaker=True),
-        }
-        self._indexes = {"strong": 0, "weaker": 0}
-        super().__init__(self._pages["strong"], timeout=timeout)
+        super().__init__(_connected_embeds(report, label), timeout=timeout)
         self._install_select()
 
-    def _sync(self) -> None:
-        super()._sync()
-        button = getattr(self, "section_button", None)
-        if button is not None:
-            button.label = (
-                "Strongest only" if self.section == "weaker"
-                else f"Possible ({len(self.report.weaker)})"
-            )
-            button.disabled = not self.report.weaker
-
-    def _items(self) -> list[Association]:
-        return list(
-            self.report.weaker if self.section == "weaker"
-            else self.report.associations
-        )
-
     def _install_select(self) -> None:
-        """Rebuild the evidence picker for whichever list is showing."""
         for child in list(self.children):
             if isinstance(child, ConnectedEvidenceSelect):
                 self.remove_item(child)
-        items = self._items()[:25]
+        items = list(self.report.connections)[:25]
         if not items:
             return
         options = [
@@ -2907,8 +2779,10 @@ class ConnectedView(PaginatedEmbedView):
                        if item.relationship.identity
                        else _short_wallet(item.relationship.address))[:100],
                 value=f"{item.chain}:{item.address}"[:100],
-                description=f"{item.band} · {item.score}/100 · "
-                            f"{item.relationship.transfers} transfers"[:100],
+                description=(
+                    f"{item.relationship.transfers} transfers · "
+                    f"{fmt_usd(item.relationship.total_usd)}"
+                )[:100],
             )
             for item in items
         ]
@@ -2921,7 +2795,7 @@ class ConnectedView(PaginatedEmbedView):
         self, interaction: discord.Interaction, value: str
     ) -> None:
         match = next(
-            (item for item in self._items()
+            (item for item in self.report.connections
              if f"{item.chain}:{item.address}"[:100] == value), None
         )
         if match is None:
@@ -2933,43 +2807,28 @@ class ConnectedView(PaginatedEmbedView):
             embed=_connected_evidence_embed(match), ephemeral=True
         )
 
-    @discord.ui.button(label="Possible", style=discord.ButtonStyle.secondary)
-    async def section_button(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        self._indexes[self.section] = self.index
-        self.section = "strong" if self.section == "weaker" else "weaker"
-        self.embeds = self._pages[self.section]
-        self.index = min(self._indexes[self.section], len(self.embeds) - 1)
-        self._sync()
-        self._install_select()
-        try:
-            await interaction.response.edit_message(
-                embed=self.embeds[self.index], view=self
-            )
-        except discord.HTTPException as exc:
-            log.debug("could not switch the /connected card: %s", exc)
-
 
 @bot.tree.command(
     name="connected",
-    description="Find wallets with strong on-chain ties to a FOMO trader",
+    description="The funding wallet, and wallets a trader moves real money with",
 )
 @app_commands.describe(
     target="FOMO username, or a Solana / EVM wallet address",
-    strict="Very High evidence only (default: High and above)",
+    fresh="Re-read the chain instead of using the cached run",
 )
 async def connected_cmd(
-    interaction: discord.Interaction, target: str, strict: bool = False,
+    interaction: discord.Interaction, target: str, fresh: bool = False,
 ) -> None:
-    """Wallets that the chain says are unusually close to a known one.
+    """Who funded this wallet, and who it actually sends money to.
 
-    The command never claims shared ownership. It reports how much evidence
-    there is, having first thrown away everything that looks like exchange,
-    bridge, router, contract or service infrastructure -- so an empty answer is
-    a real answer, and the common one.
+    Only direct transfers count, and only ones big enough to mean something:
+    1+ SOL or 50+ USDC on Solana, $200+ on EVM. Swaps are not connections --
+    a Jupiter, Raydium or Meteora trade ties a wallet to a liquidity pool, not
+    to a person -- so they never reach this card, and neither do exchanges,
+    routers, program accounts or high-degree service wallets.
     """
-    await interaction.response.defer()
+    if not await _safe_defer(interaction):
+        return
     if not bot.connected:
         await interaction.followup.send(
             "Wallet connection analysis is unavailable because the HTTP client "
@@ -2982,9 +2841,8 @@ async def connected_cmd(
         return
     pairs, label = resolved
 
-    min_score = SCORE_VERY_HIGH if strict else DEFAULT_MIN_SCORE
     try:
-        report = await bot.connected.analyse(pairs, min_score=min_score)
+        report = await bot.connected.analyse(pairs, fresh=fresh)
     except Exception as exc:
         log.exception("connected analysis failed for %s", label)
         await interaction.followup.send(
@@ -2993,8 +2851,8 @@ async def connected_cmd(
         return
 
     log.info(
-        "connected: %s -> %d strong, %d possible, from %d sampled transactions",
-        label, len(report.associations), len(report.weaker), report.transactions,
+        "connected: %s -> %d wallet(s), %d funder(s), from %d transactions",
+        label, len(report.connections), len(report.funding), report.transactions,
     )
     view = ConnectedView(report, label)
     await interaction.followup.send(embed=view.embeds[0], view=view)
@@ -3190,7 +3048,8 @@ async def _track_fomo(interaction: discord.Interaction, handle: str) -> None:
 @bot.tree.command(name="pump", description="Look up a Pump.fun profile")
 @app_commands.describe(handle="Pump username or Solana wallet")
 async def pump_cmd(interaction: discord.Interaction, handle: str) -> None:
-    await interaction.response.defer()
+    if not await _safe_defer(interaction):
+        return
     if not bot.pump:
         await interaction.followup.send("Pump support is unavailable: httpx is not installed.", ephemeral=True)
         return
@@ -3321,7 +3180,8 @@ async def track_cmd(
     rather than a command name. Each half still owns its own resolution,
     baseline snapshot and alert picker.
     """
-    await interaction.response.defer()
+    if not await _safe_defer(interaction):
+        return
     if platform.value == "pump":
         await _track_pump(interaction, target)
     else:
@@ -3341,7 +3201,8 @@ async def fomo_top_cmd(
     period: app_commands.Choice[str] | None = None,
     count: int = 10,
 ) -> None:
-    await interaction.response.defer()
+    if not await _safe_defer(interaction):
+        return
     assert bot.fomo
     value = period.value if period else "24h"
     count = max(1, min(count, 25))
@@ -3369,4 +3230,15 @@ async def fomo_top_cmd(
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise SystemExit("DISCORD_BOT_TOKEN missing from .env")
-    bot.run(DISCORD_TOKEN)
+    if not claim_single_instance():
+        raise SystemExit(
+            f"another fomo_bot is already running (port "
+            f"{SINGLE_INSTANCE_PORT} is held). Two processes on one bot token "
+            f"both receive interactions and one of them always fails to "
+            f"acknowledge with 10062. Close the other one, or set "
+            f"FOMO_SINGLE_INSTANCE=0 if you really mean to run two."
+        )
+    # `basicConfig` above already owns the root logger. Left to itself
+    # `run()` adds a second handler to it, which is why every record --
+    # tracebacks included -- was printed twice in two different formats.
+    bot.run(DISCORD_TOKEN, log_handler=None)

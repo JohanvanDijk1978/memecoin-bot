@@ -1,45 +1,56 @@
 """
-connected_wallets.py -- wallets with strong on-chain evidence of belonging to
-the same cluster as a known one.
+connected_wallets.py -- the wallet that funded a trader, and the wallets they
+actually move money to and from.
 
-What this can and cannot say
-----------------------------
-It cannot say two wallets have the same owner. Nothing observable on a chain
-says that. What it can say is how much *evidence* there is for a relationship
-that is hard to produce any other way: the same two addresses moving value
-between each other repeatedly, in both directions, over months, with one of
-them having funded the other in the first place. Any one of those is ordinary.
-Several of them together, between two addresses that interact with almost
-nobody else, is not.
+What counts as a connection
+---------------------------
+One thing only: a **direct transfer of real size** between two addresses.
 
-So the output is a score with a band -- Very High, High, Possible -- and the
-score is the strength of the evidence, never a probability of ownership. A
-band is additionally capped by how many *independent* signals fired, because
-one very loud signal (a hundred transfers on a single day) is a worse case
-than three quiet ones (regular transfers, both directions, across nine
-months).
+* on Solana, 1+ SOL or 50+ USDC/USDT
+* on EVM, $200+ of the chain's native coin, or 50+ of a stablecoin
 
-Precision over recall
----------------------
-It is better to return nothing than to return a router. Three defences, in
-order of how much they cost:
+Everything else is thrown away before it is ever scored, counted or shown. A
+swap is not a connection -- when a wallet buys a token on Jupiter, Raydium or
+Meteora the chain records value leaving that wallet and arriving at a pool, and
+earlier versions of this module read those legs as a relationship with the
+pool. They are not relationships with anybody. Neither are liquidity deposits,
+NFT sales, staking, or the dust a wallet sprays at a hundred addresses.
 
-1. **Known addresses** -- exchanges, bridges, routers, programs, the FOMO gas
-   sponsor. A static list, extendable at runtime through
-   `CONNECTED_LABELS_FILE` so an operator can add one without a release.
-2. **What kind of account it is** -- on Solana a real wallet is owned by the
-   system program and is not executable, which rules out pools, token
-   accounts, vaults and PDAs outright. On EVM the same test would be wrong:
-   FOMO's own wallets are ERC-4337 contracts, so contract code caps the band
-   instead of excluding, and only for an address the wallet cache does not
-   already know.
-3. **Degree** -- one bounded page of the candidate's own history. An address
-   that deals with dozens of unrelated counterparties is a service, whatever
-   it is called. This costs a request per candidate, so it runs last and only
-   on the few that survived everything else.
+So on Solana only Helius transactions typed `TRANSFER`, carrying no swap event
+and no DEX source, are read at all. On EVM there is no such type, so the
+defences are the ones that were always here -- known routers, contract code,
+counterparty degree -- plus the $200 floor, which is what most swap legs of a
+memecoin trade fall under.
+
+The funding wallet
+------------------
+Separate from the list, and never value-gated: a wallet is usually opened with
+a fraction of a SOL, and whoever sent it is the single most interesting address
+in the whole report. Finding it means reading a wallet's *oldest* transaction,
+which is the one thing Solana RPC will not sort for you:
+
+* with a `SOLSCAN_API_KEY`, Solscan Pro answers it in one request --
+  `/account/transfer?flow=in&sort_by=block_time&sort_order=asc`, which is what
+  the "oldest first" toggle on solscan.io does
+* without one, Helius history is paged backwards until it runs out. If it runs
+  out, the oldest page holds the wallet's first transaction and the answer is
+  exact; if the page budget runs out first, the report says the funder is
+  unknown rather than naming the oldest thing it happened to see
+* on EVM `alchemy_getAssetTransfers` takes `order: "asc"` directly, so the
+  first incoming transfer is one request away
+
+No scores
+---------
+There are no confidence bands here any more. The bar is the transfer rule
+above: a wallet either moved real money with this one or it did not, and the
+card shows how much, how often and when, so the reader can judge it. What is
+still excluded structurally is infrastructure -- exchanges, bridges, routers,
+programs, program-owned accounts, and any address dealing with more
+counterparties in one page than a person's second wallet ever would.
 
 Data sources are the ones the project already pays for: Helius parsed
-transaction history on Solana, `alchemy_getAssetTransfers` on EVM.
+transaction history on Solana, `alchemy_getAssetTransfers` on EVM, and
+optionally Solscan Pro for the funding lookup.
 """
 
 from __future__ import annotations
@@ -49,9 +60,11 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
+
+from solscan_api import solscan_get
 
 log = logging.getLogger("fomo.connected")
 
@@ -98,27 +111,47 @@ HIGH_DEGREE_COUNTERPARTIES = _env_int(
 )
 DEGREE_SAMPLE = 100
 
+# ------------------------------------------------------------ what counts --
+# The whole bar. A transfer under these is noise: gas top-ups, dust, the tail
+# of a swap route. A transfer over them is somebody moving money on purpose.
+MIN_SOL = _env_float("CONNECTED_MIN_SOL", 1.0)
+MIN_STABLE = _env_float("CONNECTED_MIN_STABLE", 50.0)
+# EVM has no "1 SOL", so the native leg is judged in dollars. 200 is roughly
+# what 1 SOL is worth, which keeps the bar reading the same on every chain.
+MIN_EVM_USD = _env_float("CONNECTED_MIN_EVM_USD", 200.0)
+
+# How far back the funding lookup will page Helius when Solscan is not
+# configured. 20 pages is 2000 transactions; if that does not reach a wallet's
+# first transaction, the report says so instead of guessing.
+FUNDING_PAGES = _env_int("CONNECTED_FUNDING_PAGES", 20, low=1, high=100)
+# A logical path, not a URL -- `solscan_api` decides whether this key reaches
+# it under /v2.0 or only under /playground. A full URL here still works and
+# skips that resolution.
+SOLSCAN_TRANSFER_URL = os.getenv("SOLSCAN_TRANSFER_URL", "account/transfer").strip()
+
 CACHE_TTL = _env_float("CONNECTED_CACHE_TTL", 6 * 3600)
 CACHE_FILE = os.getenv("CONNECTED_CACHE_FILE", "connected_cache.json")
+# Bumped whenever the shape of a cached report changes, so an old file is
+# ignored rather than misread. v1 was the score/band era.
+CACHE_SCHEMA = "v2"
 
 # ------------------------------------------------------------- thresholds --
 
-# A single transfer is never evidence. Two is a coincidence with a receipt.
-MIN_TRANSFERS = 3
-SCORE_VERY_HIGH = 85
-SCORE_HIGH = 70
-SCORE_POSSIBLE = 55
-# `/connected` shows only the strongest by default; the weaker band is behind
-# a button rather than dropped, so a run that found something borderline can
-# say so without putting it on the first page.
-DEFAULT_MIN_SCORE = SCORE_HIGH
-BANDS = (
-    (SCORE_VERY_HIGH, "Very High"),
-    (SCORE_HIGH, "High"),
-    (SCORE_POSSIBLE, "Possible"),
-)
-# A band no number of points can reach without this many independent signals.
-BAND_SIGNAL_FLOOR = {"Very High": 4, "High": 3, "Possible": 2}
+# Helius types a plain send as TRANSFER. A swap is SWAP, a liquidity move is
+# ADD_LIQUIDITY / WITHDRAW_LIQUIDITY, an NFT sale is NFT_SALE -- none of them
+# are a relationship with the counterparty they name, so only TRANSFER is
+# read. `events.swap` and the DEX source list below are belt and braces for a
+# router that manages to route through a transfer-typed instruction.
+TRANSFER_TYPES = {"TRANSFER"}
+SWAP_SOURCES = {
+    "JUPITER", "RAYDIUM", "RAYDIUM_CLMM", "ORCA", "METEORA", "PUMP_FUN",
+    "PUMP_AMM", "PUMPSWAP", "PHOENIX", "LIFINITY", "SABER", "SERUM",
+    "OPENBOOK", "MERCURIAL", "ALDRIN", "CROPPER", "STABBLE", "FLUXBEAM",
+    "INVARIANT", "MOONSHOT", "VIRTUALS", "OKX", "DRIFT", "MARINADE", "JITO",
+    "MAGIC_EDEN", "TENSOR", "HADESWAP", "SOLANART", "STAKED", "SANCTUM",
+    "KAMINO", "MARGINFI", "SOLEND", "BONKSWAP", "DEXLAB", "STEPN", "ONE_DEX",
+    "GOOSEFX", "PERPS", "ZETA", "MANGO", "SYMMETRY", "BOOP", "DAOS_FUN",
+}
 
 STABLE_SYMBOLS = {
     "USDC", "USDT", "USDG", "USDS", "DAI", "USDC.E", "USDBC", "BUSD", "FDUSD",
@@ -277,14 +310,11 @@ class Relationship:
 
 
 @dataclass(frozen=True)
-class Association:
-    """A scored relationship, ready to render."""
+class Connection:
+    """One counterparty this wallet has moved real money with."""
 
     relationship: Relationship
-    score: int
-    band: str
-    reasons: tuple[str, ...]
-    signals: tuple[str, ...]
+    funder: bool = False   # this address is the analysed wallet's first funder
 
     @property
     def address(self) -> str:
@@ -293,6 +323,35 @@ class Association:
     @property
     def chain(self) -> str:
         return self.relationship.chain
+
+
+@dataclass(frozen=True)
+class Funding:
+    """The first money that ever arrived at an analysed wallet.
+
+    `exact` is the honest half. It is True only when the lookup actually
+    reached the wallet's first transaction -- Solscan sorted ascending, an
+    ascending Alchemy scan, or Helius history that ran out inside the page
+    budget. When it is False there is no funder to report, only a note saying
+    how deep the search got.
+    """
+
+    wallet: str
+    chain: str
+    address: str = ""
+    amount: float = 0.0
+    symbol: str = ""
+    usd: float | None = None
+    timestamp: int = 0
+    reference: str = ""
+    identity: str | None = None
+    label: str | None = None
+    exact: bool = False
+    note: str = ""
+
+    @property
+    def found(self) -> bool:
+        return bool(self.address)
 
 
 # ------------------------------------------------------------ aggregation --
@@ -345,168 +404,41 @@ def build_relationships(
     return list(grouped.values())
 
 
-# ----------------------------------------------------------------- scoring --
+# ----------------------------------------------------------------- ranking --
 
 
-def _points(value: float, ladder: Sequence[tuple[float, int]]) -> int:
-    """The highest rung whose threshold `value` reaches."""
-    awarded = 0
-    for threshold, points in ladder:
-        if value >= threshold:
-            awarded = points
-    return awarded
+def rank_connections(
+    records: Iterable[Relationship], *, funders: Iterable[str] = (),
+) -> list[Connection]:
+    """Order the counterparties by how much money actually moved.
 
+    There is no filtering left to do here: a relationship only exists at all
+    if `solana_transfers_from_history` / `evm_transfers_from_rows` already
+    judged its transfers big enough to count. What remains is the order, which
+    is value first and transfer count as the tie-break -- one $80,000 transfer
+    says more than nine $60 ones, and the card shows both numbers either way.
 
-def score_relationship(record: Relationship) -> Association:
-    """Turn one relationship into a score, a band and the reasons behind it.
-
-    Every rung is deliberately hard to reach by accident. The band is then
-    capped by the number of *independent* signals, so a single loud one never
-    reads as strongly as several quiet ones agreeing.
+    A funding wallet is pinned to the top whatever it moved since, because it
+    is the address the reader came for.
     """
-    signals: list[str] = []
-    reasons: list[str] = []
-    score = 0
-
-    repeat = _points(record.transfers, ((3, 12), (5, 18), (10, 25), (20, 30)))
-    if repeat:
-        score += repeat
-        signals.append("repetition")
-        reasons.append(
-            f"{record.transfers} direct transfers between the two wallets"
+    funding = {address for address in funders if address}
+    lowered = {address.lower() for address in funding}
+    items = [
+        Connection(
+            relationship=record,
+            funder=record.address in funding or record.address.lower() in lowered,
         )
-
-    if record.reciprocal and min(record.sent_count, record.received_count) >= 2:
-        score += 18
-        signals.append("reciprocity")
-        reasons.append(
-            f"value moved both ways ({record.sent_count} out, "
-            f"{record.received_count} in)"
-        )
-
-    longevity = _points(record.span_days, ((7, 6), (30, 12), (90, 18)))
-    if longevity:
-        score += longevity
-        signals.append("longevity")
-        reasons.append(
-            f"the relationship spans {record.span_days:.0f} days"
-        )
-
-    spread = _points(record.active_days, ((3, 6), (8, 10), (20, 14)))
-    if spread:
-        score += spread
-        signals.append("spread")
-        reasons.append(f"transfers on {record.active_days} separate dates")
-
-    value = _points(record.total_usd, ((1_000, 6), (10_000, 12), (100_000, 20)))
-    if value:
-        score += value
-        signals.append("value")
-        reasons.append(f"${record.total_usd:,.0f} moved in total")
-
-    # A wallet whose first sight of the chain is money arriving from the known
-    # wallet was, in all likelihood, opened by whoever controls it.
-    if (record.first_direction == "out" and record.sent_count >= 2
-            and record.received_count >= 1):
-        score += 10
-        signals.append("funding")
-        reasons.append(
-            "the known wallet funded it first, and funds later came back"
-        )
-    elif record.first_direction == "out" and record.sent_count >= 3:
-        score += 6
-        signals.append("funding")
-        reasons.append("the known wallet has repeatedly funded it")
-
-    if record.identity:
-        score += 8
-        signals.append("identity")
-        reasons.append(f"the wallet cache already knows it as @{record.identity}")
-
-    if record.is_contract and not record.identity:
-        # FOMO's own wallets are contracts, so this is a caution rather than a
-        # disqualification -- but an unrecognised contract is far more likely
-        # to be a protocol than a person.
-        score -= 15
-        reasons.append("contract code, and no known identity — treat with care")
-
-    if record.unpriced and not record.total_usd:
-        reasons.append(
-            f"{record.unpriced} transfers carried assets that could not be "
-            "priced, so no USD total is claimed"
-        )
-
-    score = max(0, min(100, score))
-    band = ""
-    for floor, name in BANDS:
-        if score >= floor and len(signals) >= BAND_SIGNAL_FLOOR[name]:
-            band = name
-            break
-    if not band:
-        # Enough points, not enough independent evidence: say so rather than
-        # promoting it.
-        for floor, name in BANDS:
-            if score >= floor:
-                reasons.append(
-                    f"only {len(signals)} independent signal"
-                    f"{'s' if len(signals) != 1 else ''} — held below {name}"
-                )
-                break
-    return Association(
-        relationship=record,
-        score=score,
-        band=band,
-        reasons=tuple(reasons),
-        signals=tuple(signals),
-    )
-
-
-def rank_associations(
-    records: Iterable[Relationship], *, min_score: int = DEFAULT_MIN_SCORE
-) -> list[Association]:
-    """Score, filter and order. Nothing under `MIN_TRANSFERS` is ever scored."""
-    scored = [
-        score_relationship(record) for record in records
-        if record.transfers >= MIN_TRANSFERS
+        for record in records
     ]
-    kept = [item for item in scored if item.band and item.score >= min_score]
-    kept.sort(key=lambda item: (item.score, item.relationship.transfers), reverse=True)
-    return kept
-
-
-def link_cross_chain(associations: Sequence[Association]) -> list[Association]:
-    """Promote a candidate whose identity is connected on more than one chain.
-
-    This is the only cross-chain claim made anywhere in here, and it is not an
-    inference from transaction patterns: it holds when the *same* verified
-    identity turns up as a candidate on two chains, which the wallet cache
-    states rather than this module guessing.
-    """
-    chains: dict[str, set[str]] = {}
-    for item in associations:
-        if item.relationship.identity:
-            chains.setdefault(item.relationship.identity.lower(), set()).add(item.chain)
-
-    out: list[Association] = []
-    for item in associations:
-        identity = (item.relationship.identity or "").lower()
-        seen = chains.get(identity, set())
-        if identity and len(seen) > 1:
-            score = min(100, item.score + 8)
-            signals = tuple(dict.fromkeys(item.signals + ("cross-chain",)))
-            reasons = item.reasons + (
-                f"the same identity is connected on {', '.join(sorted(seen))}",
-            )
-            band = item.band
-            for floor, name in BANDS:
-                if score >= floor and len(signals) >= BAND_SIGNAL_FLOOR[name]:
-                    band = name
-                    break
-            out.append(Association(item.relationship, score, band, reasons, signals))
-        else:
-            out.append(item)
-    out.sort(key=lambda item: (item.score, item.relationship.transfers), reverse=True)
-    return out
+    items.sort(
+        key=lambda item: (
+            item.funder,
+            item.relationship.total_usd,
+            item.relationship.transfers,
+        ),
+        reverse=True,
+    )
+    return items
 
 
 def explorer_url(chain: str, reference: str) -> str | None:
@@ -546,8 +478,8 @@ def fmt_day(timestamp: int | None) -> str:
 @dataclass(frozen=True)
 class ConnectedReport:
     wallets: tuple[tuple[str, str], ...]      # (address, chain)
-    associations: tuple[Association, ...]
-    weaker: tuple[Association, ...]           # scored, below the surfacing bar
+    funding: tuple[Funding, ...]              # one per analysed wallet, when found
+    connections: tuple[Connection, ...]
     transactions: int
     warnings: tuple[str, ...] = ()
     generated_at: int = 0
@@ -591,18 +523,44 @@ def _relationship_from_payload(raw: dict[str, Any]) -> Relationship:
     return record
 
 
+def _funding_payload(item: Funding) -> dict[str, Any]:
+    return {
+        "wallet": item.wallet, "chain": item.chain, "address": item.address,
+        "amount": item.amount, "symbol": item.symbol, "usd": item.usd,
+        "timestamp": item.timestamp, "reference": item.reference,
+        "identity": item.identity, "label": item.label,
+        "exact": item.exact, "note": item.note,
+    }
+
+
+def _funding_from_payload(raw: dict[str, Any]) -> Funding:
+    return Funding(
+        wallet=str(raw.get("wallet") or ""),
+        chain=str(raw.get("chain") or ""),
+        address=str(raw.get("address") or ""),
+        amount=float(raw.get("amount") or 0.0),
+        symbol=str(raw.get("symbol") or ""),
+        usd=(None if raw.get("usd") is None else float(raw.get("usd") or 0.0)),
+        timestamp=int(raw.get("timestamp") or 0),
+        reference=str(raw.get("reference") or ""),
+        identity=raw.get("identity") or None,
+        label=raw.get("label") or None,
+        exact=bool(raw.get("exact")),
+        note=str(raw.get("note") or ""),
+    )
+
+
 def report_payload(report: ConnectedReport) -> dict[str, Any]:
-    def association(item: Association) -> dict[str, Any]:
+    def connection(item: Connection) -> dict[str, Any]:
         return {
-            "score": item.score, "band": item.band,
-            "reasons": list(item.reasons), "signals": list(item.signals),
+            "funder": item.funder,
             "relationship": _relationship_payload(item.relationship),
         }
 
     return {
         "wallets": [list(pair) for pair in report.wallets],
-        "associations": [association(item) for item in report.associations],
-        "weaker": [association(item) for item in report.weaker],
+        "funding": [_funding_payload(item) for item in report.funding],
+        "connections": [connection(item) for item in report.connections],
         "transactions": report.transactions,
         "warnings": list(report.warnings),
         "generatedAt": report.generated_at,
@@ -610,13 +568,10 @@ def report_payload(report: ConnectedReport) -> dict[str, Any]:
 
 
 def report_from_payload(raw: dict[str, Any]) -> ConnectedReport:
-    def association(row: dict[str, Any]) -> Association:
-        return Association(
+    def connection(row: dict[str, Any]) -> Connection:
+        return Connection(
             relationship=_relationship_from_payload(row.get("relationship") or {}),
-            score=int(row.get("score") or 0),
-            band=str(row.get("band") or ""),
-            reasons=tuple(str(item) for item in row.get("reasons") or []),
-            signals=tuple(str(item) for item in row.get("signals") or []),
+            funder=bool(row.get("funder")),
         )
 
     return ConnectedReport(
@@ -624,12 +579,12 @@ def report_from_payload(raw: dict[str, Any]) -> ConnectedReport:
             (str(pair[0]), str(pair[1]))
             for pair in raw.get("wallets") or [] if len(pair) == 2
         ),
-        associations=tuple(
-            association(row) for row in raw.get("associations") or []
+        funding=tuple(
+            _funding_from_payload(row) for row in raw.get("funding") or []
             if isinstance(row, dict)
         ),
-        weaker=tuple(
-            association(row) for row in raw.get("weaker") or []
+        connections=tuple(
+            connection(row) for row in raw.get("connections") or []
             if isinstance(row, dict)
         ),
         transactions=int(raw.get("transactions") or 0),
@@ -645,6 +600,7 @@ HELIUS_TX_URL = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens"
 LAMPORTS = 1_000_000_000
 SOLANA_SYSTEM_PROGRAM = "11111111111111111111111111111111"
+SOLANA_WRAPPED_SOL = "So11111111111111111111111111111111111111112"
 SOLANA_STABLE_MINTS = {
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
@@ -692,6 +648,9 @@ class ConnectedWalletAnalyzer:
             for chain, (primary, fallback) in EVM_CHAIN_ENV.items()
         }
         self.identify = identify
+        # Optional. With it, the funding wallet is one ascending request; without
+        # it, Helius history is paged backwards and may not reach far enough.
+        self.solscan_key = os.getenv("SOLSCAN_API_KEY", "").strip()
         self.extra_labels = _load_extra_labels()
         self.cache = ProfileCache(
             cache_path, ttl=CACHE_TTL, negative_ttl=CACHE_TTL,
@@ -705,14 +664,13 @@ class ConnectedWalletAnalyzer:
         self,
         wallets: Sequence[tuple[str, str]],
         *,
-        min_score: int = DEFAULT_MIN_SCORE,
         fresh: bool = False,
     ) -> ConnectedReport:
-        """Analyse every known wallet and return one ranked report.
+        """Analyse every known wallet and return one report.
 
-        A run is cached whole, keyed by the wallet set and the bar it was run
-        at, because the expensive half is the history paging and that does not
-        become cheaper for the second person to ask.
+        A run is cached whole, keyed by the wallet set, because the expensive
+        half is the history paging and that does not become cheaper for the
+        second person to ask. `fresh` is what the card's Refresh spends.
         """
         pairs = tuple(
             (address.strip(), chain.strip().lower())
@@ -721,8 +679,9 @@ class ConnectedWalletAnalyzer:
         if not pairs:
             return ConnectedReport((), (), (), 0, ("No wallet to analyse.",))
 
-        key = "|".join(sorted(f"{chain}:{address}" for address, chain in pairs))
-        key += f"@{min_score}"
+        key = CACHE_SCHEMA + "|" + "|".join(
+            sorted(f"{chain}:{address}" for address, chain in pairs)
+        )
         if not fresh:
             entry = self.cache.get(key)
             if entry is not None and entry.found:
@@ -734,7 +693,7 @@ class ConnectedWalletAnalyzer:
                 entry = self.cache.get(key)
                 if entry is not None and entry.found:
                     return report_from_payload(entry.payload)
-            report = await self._analyse(pairs, min_score)
+            report = await self._analyse(pairs)
         try:
             self.cache.put(key, report_payload(report), source="onchain")
         except Exception as exc:  # a cache that raises must not lose the answer
@@ -744,10 +703,11 @@ class ConnectedWalletAnalyzer:
     # ----------------------------------------------------------- internal --
 
     async def _analyse(
-        self, pairs: tuple[tuple[str, str], ...], min_score: int
+        self, pairs: tuple[tuple[str, str], ...]
     ) -> ConnectedReport:
         warnings: list[str] = []
         records: list[Relationship] = []
+        funding: list[Funding] = []
         transactions = 0
 
         for address, chain in pairs:
@@ -770,47 +730,203 @@ class ConnectedWalletAnalyzer:
                 transfers, address, chain, extra_labels=self.extra_labels
             )
             log.info(
-                "connected: %s %s -> %d transfer(s), %d counterparties worth scoring",
-                chain, address[:10], len(transfers),
-                sum(1 for item in found if item.transfers >= MIN_TRANSFERS),
+                "connected: %s %s -> %d qualifying transfer(s), %d counterparties",
+                chain, address[:10], len(transfers), len(found),
             )
             records.extend(found)
+
+            # The funder is looked for separately and is never value-gated: a
+            # wallet is usually opened with a fraction of a coin.
+            try:
+                first = await self._funder(address, chain)
+            except Exception as exc:
+                log.warning("connected: %s funding lookup failed for %s: %s",
+                            chain, address, exc)
+                first = Funding(
+                    wallet=address, chain=chain,
+                    note=f"{chain}: the funding wallet could not be read "
+                         f"({str(exc)[:60]}).",
+                )
+            if first.note:
+                warnings.append(first.note)
+            if first.found:
+                funding.append(first)
 
         for record in records:
             record.identity = self._identity(record.address)
 
-        # Score once to order the field, verify the top of it, then score again
-        # with what verification found. Verification is what costs requests, so
-        # it never runs on a candidate the first pass already refused.
+        # Order by value, verify the top of the field, then re-order with what
+        # verification found. Verification is what costs requests, so it never
+        # runs on a candidate the transfer rule already refused.
         shortlist = [
-            item.relationship for item in rank_associations(
-                records, min_score=SCORE_POSSIBLE
-            )
+            item.relationship for item in rank_connections(records)
         ][:VERIFY_CANDIDATES]
         if shortlist:
             await self._verify(shortlist, warnings)
 
         survivors = [record for record in shortlist if not record.label]
-        ranked = rank_associations(survivors, min_score=SCORE_POSSIBLE)
+        ranked = rank_connections(survivors)
         await self._drop_high_degree(ranked[:DEGREE_CANDIDATES], warnings)
 
-        ranked = link_cross_chain(
-            rank_associations(
-                [item.relationship for item in ranked
-                 if not item.relationship.label],
-                min_score=SCORE_POSSIBLE,
-            )
-        )
-        strong = tuple(item for item in ranked if item.score >= min_score)
-        weaker = tuple(item for item in ranked if item.score < min_score)
+        funding = [
+            replace(item, identity=item.identity or self._identity(item.address))
+            for item in funding
+        ]
+        funders = [item.address for item in funding]
+        connections = tuple(rank_connections(
+            [item.relationship for item in ranked if not item.relationship.label],
+            funders=funders,
+        ))
         return ConnectedReport(
             wallets=pairs,
-            associations=strong,
-            weaker=weaker,
+            funding=tuple(funding),
+            connections=connections,
             transactions=transactions,
             warnings=tuple(dict.fromkeys(warnings)),
             generated_at=int(time.time()),
         )
+
+    # ------------------------------------------------------------ funding --
+
+    async def _funder(self, wallet: str, chain: str) -> Funding:
+        """The address whose money first reached this wallet.
+
+        Three routes, in order of how exactly they answer the question:
+        Solscan sorted ascending (one request, exact), an ascending Alchemy
+        scan on EVM (one request, exact), or Helius paged backwards until it
+        runs out (exact only if it does).
+        """
+        if chain == "solana":
+            if self.solscan_key:
+                found = await self._solscan_funder(wallet)
+                if found is not None:
+                    return found
+            return await self._helius_funder(wallet)
+        return await self._evm_funder(wallet, chain)
+
+    async def _solscan_funder(self, wallet: str) -> Funding | None:
+        """Solscan Pro, sorted oldest first -- the site's own 'oldest' toggle.
+
+        Returns None rather than raising when the key is rejected or the shape
+        is unfamiliar, so the Helius walk-back still gets its turn.
+        """
+        payload = await solscan_get(
+            self.http,
+            SOLSCAN_TRANSFER_URL,
+            {
+                "address": wallet, "flow": "in",
+                "sort_by": "block_time", "sort_order": "asc",
+                "page": 1, "page_size": 10,
+                "exclude_amount_zero": "true",
+            },
+            timeout=30,
+            key=self.solscan_key,
+        )
+        if payload is None:
+            return None
+        rows = (payload or {}).get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sender = str(row.get("from_address") or "").strip()
+            if not sender or sender == wallet:
+                continue
+            decimals = int(row.get("token_decimals") or 0)
+            try:
+                amount = float(row.get("amount") or 0) / (10 ** decimals)
+            except (TypeError, ValueError, OverflowError):
+                amount = 0.0
+            mint = str(row.get("token_address") or "")
+            symbol = "SOL" if mint in ("", SOLANA_WRAPPED_SOL) else \
+                SOLANA_STABLE_MINTS.get(mint, mint[:6])
+            return Funding(
+                wallet=wallet, chain="solana", address=sender,
+                amount=amount, symbol=symbol,
+                timestamp=int(row.get("block_time") or 0),
+                reference=str(row.get("trans_id") or ""),
+                label=known_label(sender, self.extra_labels),
+                exact=True,
+            )
+        return Funding(
+            wallet=wallet, chain="solana", exact=True,
+            note="Solana: no incoming transfer was found, so this wallet has "
+                 "no funder on record.",
+        )
+
+    async def _helius_funder(self, wallet: str) -> Funding:
+        """Page Helius backwards until the history runs out.
+
+        Helius returns newest first and takes no ascending order, so reaching
+        a wallet's first transaction means reading every transaction it has.
+        `FUNDING_PAGES` is the ceiling on that; hitting it means the answer is
+        unknown, and the report says so rather than naming whatever the oldest
+        page happened to hold.
+        """
+        key = self._helius_key()
+        if not key:
+            return Funding(
+                wallet=wallet, chain="solana",
+                note="Solana: the funding wallet needs a Helius endpoint in "
+                     "SOLANA_RPC, or a SOLSCAN_API_KEY.",
+            )
+        entries = await self._helius_history(wallet, key, FUNDING_PAGES)
+        exhausted = len(entries) < FUNDING_PAGES * HELIUS_TX_LIMIT
+        if not exhausted:
+            return Funding(
+                wallet=wallet, chain="solana",
+                note=f"Solana: the funding wallet is deeper than "
+                     f"{len(entries):,} transactions, so it is not reported. "
+                     "Set SOLSCAN_API_KEY to read it in one request.",
+            )
+        # Oldest last, because Helius pages newest first.
+        for entry in reversed(entries):
+            if not isinstance(entry, dict):
+                continue
+            for transfer in solana_transfers_from_history(
+                [entry], wallet, min_sol=0.0, min_stable=0.0, skip_swaps=False
+            ):
+                if transfer.outgoing or not transfer.counterparty:
+                    continue
+                return Funding(
+                    wallet=wallet, chain="solana",
+                    address=transfer.counterparty, amount=transfer.amount,
+                    symbol=transfer.symbol, timestamp=transfer.timestamp,
+                    reference=transfer.reference,
+                    label=known_label(transfer.counterparty, self.extra_labels),
+                    exact=True,
+                )
+        return Funding(
+            wallet=wallet, chain="solana", exact=True,
+            note="Solana: no incoming transfer was found, so this wallet has "
+                 "no funder on record.",
+        )
+
+    async def _evm_funder(self, wallet: str, chain: str) -> Funding:
+        """`alchemy_getAssetTransfers` takes `order: "asc"` -- one request."""
+        if not self.evm_rpcs.get(chain):
+            return Funding(wallet=wallet, chain=chain)
+        rows = await self._asset_transfers(
+            chain, page_size="0xa", pages=1, order="asc", toAddress=wallet
+        )
+        price = await self._native_price(chain)
+        transfers = evm_transfers_from_rows(
+            [], rows, wallet, chain, native_price=price,
+            min_usd=0.0, min_stable=0.0,
+        )
+        for transfer in transfers:
+            if transfer.outgoing or not transfer.counterparty:
+                continue
+            return Funding(
+                wallet=wallet, chain=chain, address=transfer.counterparty,
+                amount=transfer.amount, symbol=transfer.symbol,
+                usd=transfer.usd, timestamp=transfer.timestamp,
+                reference=transfer.reference,
+                label=known_label(transfer.counterparty, self.extra_labels),
+                exact=True,
+            )
+        return Funding(wallet=wallet, chain=chain, exact=True)
 
     def _identity(self, address: str) -> str | None:
         if not self.identify:
@@ -919,6 +1035,11 @@ class ConnectedWalletAnalyzer:
                 f"Solana: only the most recent {len(entries)} transactions were "
                 "read, so older relationships may be missing."
             )
+        log.debug(
+            "connected: %s -> %d of %d transactions were plain transfers",
+            wallet[:10], sum(1 for e in entries if is_plain_transfer(e)),
+            len(entries),
+        )
         return transfers, len(entries), note
 
     # ---------------------------------------------------------------- evm --
@@ -1079,7 +1200,7 @@ class ConnectedWalletAnalyzer:
             )
 
     async def _drop_high_degree(
-        self, candidates: Sequence[Association], warnings: list[str]
+        self, candidates: Sequence[Connection], warnings: list[str]
     ) -> None:
         """Label whatever deals with far too many people to be a second wallet.
 
@@ -1116,7 +1237,11 @@ class ConnectedWalletAnalyzer:
             if not key:
                 return None
             entries = await self._helius_history(address, key, 1)
-            transfers = solana_transfers_from_history(entries, address)
+            # Everything, unfiltered: a service is a service because of the
+            # swaps and dust it handles, not in spite of them.
+            transfers = solana_transfers_from_history(
+                entries, address, min_sol=0.0, min_stable=0.0, skip_swaps=False
+            )
             return len({transfer.counterparty for transfer in transfers})
         outgoing, incoming = await asyncio.gather(
             self._asset_transfers(
@@ -1126,26 +1251,72 @@ class ConnectedWalletAnalyzer:
                 chain, page_size=hex(DEGREE_SAMPLE), pages=1, toAddress=address
             ),
         )
-        transfers = evm_transfers_from_rows(outgoing, incoming, address, chain)
+        transfers = evm_transfers_from_rows(
+            outgoing, incoming, address, chain, min_usd=0.0, min_stable=0.0
+        )
         return len({transfer.counterparty for transfer in transfers})
 
 
 # ------------------------------------------------------------- parsing -----
 
 
+def is_plain_transfer(entry: Any) -> bool:
+    """True when a Helius transaction is somebody sending somebody money.
+
+    This is the filter the whole command turns on. A swap moves value between
+    a wallet and a liquidity pool, and reading those legs is how `/connected`
+    used to report Meteora, Jupiter and Raydium as a trader's associates. They
+    are venues, not associates.
+
+    Helius types a plain send `TRANSFER`; a swap is `SWAP`, a liquidity move is
+    `ADD_LIQUIDITY` / `WITHDRAW_LIQUIDITY`, an NFT trade is `NFT_SALE`. The
+    swap-event and source checks are belt and braces for anything that manages
+    to route through a transfer-typed instruction. A failed transaction moved
+    nothing and is dropped too.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("transactionError"):
+        return False
+    if str(entry.get("type") or "").upper() not in TRANSFER_TYPES:
+        return False
+    if str(entry.get("source") or "").upper() in SWAP_SOURCES:
+        return False
+    events = entry.get("events")
+    if isinstance(events, dict) and events.get("swap"):
+        return False
+    return True
+
+
 def solana_transfers_from_history(
     entries: Iterable[Any], wallet: str, *, sol_price: float | None = None,
+    min_sol: float | None = None, min_stable: float | None = None,
+    skip_swaps: bool = True,
 ) -> list[Transfer]:
-    """Transfers touching `wallet` out of Helius's parsed transaction history.
+    """Qualifying transfers touching `wallet`, out of Helius parsed history.
 
     Both `nativeTransfers` and `tokenTransfers` name owner accounts, so the
     counterparty is read directly rather than resolved from a token account.
-    Only SOL and the two stablecoin mints carry a USD figure; everything else
-    is counted and left unpriced.
+
+    Two filters run here rather than downstream, because a transfer that does
+    not qualify should never reach a relationship, a reference list or a
+    counterparty count: the transaction must be a plain transfer
+    (`is_plain_transfer`), and the amount must clear `min_sol` / `min_stable`.
+    Assets that are neither SOL nor a known stablecoin cannot be priced
+    honestly, so they are not evidence of anything and are dropped.
+
+    `min_sol=0`, `min_stable=0` and `skip_swaps=False` turn all of that off,
+    which is what the funding lookup and the degree probe want -- the first
+    money into a wallet is usually dust, and a service address should be
+    counted on everything it touches.
     """
+    floor_sol = MIN_SOL if min_sol is None else min_sol
+    floor_stable = MIN_STABLE if min_stable is None else min_stable
     out: list[Transfer] = []
     for entry in entries:
         if not isinstance(entry, dict):
+            continue
+        if skip_swaps and not is_plain_transfer(entry):
             continue
         reference = str(entry.get("signature") or "")
         timestamp = int(entry.get("timestamp") or 0)
@@ -1158,7 +1329,9 @@ def solana_transfers_from_history(
                 amount = float(row.get("amount") or 0) / LAMPORTS
             except (TypeError, ValueError):
                 continue
-            if amount <= 0 or wallet not in (sender, recipient):
+            if amount < floor_sol or amount <= 0:
+                continue
+            if wallet not in (sender, recipient):
                 continue
             outgoing = sender == wallet
             counterparty = recipient if outgoing else sender
@@ -1181,12 +1354,26 @@ def solana_transfers_from_history(
                 continue
             mint = str(row.get("mint") or "")
             symbol = SOLANA_STABLE_MINTS.get(mint, "")
+            if symbol:
+                if amount < floor_stable:
+                    continue
+                usd: float | None = amount
+            elif mint == SOLANA_WRAPPED_SOL:
+                if amount < floor_sol:
+                    continue
+                symbol = "SOL"
+                usd = amount * sol_price if sol_price else None
+            elif floor_stable or floor_sol:
+                # An arbitrary token cannot be priced honestly, so it can
+                # neither clear the bar nor be shown as value moved.
+                continue
+            else:
+                symbol, usd = mint[:6], None
             outgoing = sender == wallet
             out.append(Transfer(
                 counterparty=recipient if outgoing else sender,
                 outgoing=outgoing, amount=amount,
-                symbol=symbol or mint[:6],
-                usd=amount if symbol else None,
+                symbol=symbol, usd=usd,
                 timestamp=timestamp, reference=reference,
             ))
     return out
@@ -1195,12 +1382,25 @@ def solana_transfers_from_history(
 def evm_transfers_from_rows(
     outgoing: Iterable[Any], incoming: Iterable[Any], wallet: str, chain: str,
     *, native_price: float | None = None,
+    min_usd: float | None = None, min_stable: float | None = None,
 ) -> list[Transfer]:
-    """Transfers from the two `alchemy_getAssetTransfers` directions.
+    """Qualifying transfers from the two `alchemy_getAssetTransfers` directions.
+
+    EVM carries no transaction type, so there is no swap filter to apply here;
+    what keeps pools and routers out is the label list, the contract-code
+    check, the degree probe -- and `min_usd`, which most legs of a memecoin
+    swap fall under.
+
+    Only the chain's native coin and known stablecoins can be priced honestly,
+    so an arbitrary ERC-20 is dropped rather than counted unpriced. Passing
+    zero for both floors keeps everything, which is what the funding lookup
+    and the degree probe want.
 
     The two calls can return the same row when a wallet sends to itself, so
     rows are deduplicated on (hash, from, to, value) rather than trusted.
     """
+    floor_usd = MIN_EVM_USD if min_usd is None else min_usd
+    floor_stable = MIN_STABLE if min_stable is None else min_stable
     native = NATIVE_SYMBOLS.get(chain, "")
     lowered = wallet.lower()
     seen: set[tuple[str, str, str, str]] = set()
@@ -1221,20 +1421,27 @@ def evm_transfers_from_rows(
             fingerprint = (reference, sender, recipient, repr(row.get("value")))
             if fingerprint in seen:
                 continue
-            seen.add(fingerprint)
             symbol = str(row.get("asset") or "").upper()
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-            timestamp = _iso_epoch(metadata.get("blockTimestamp"))
             usd: float | None = None
             if symbol in STABLE_SYMBOLS:
                 usd = amount
-            elif native and symbol == native and native_price:
-                usd = amount * native_price
+                if amount < floor_stable:
+                    continue
+            elif native and symbol == native:
+                usd = amount * native_price if native_price else None
+                if floor_usd:
+                    if usd is None or usd < floor_usd:
+                        continue
+            elif floor_usd or floor_stable:
+                continue
+            seen.add(fingerprint)
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
             out.append(Transfer(
                 counterparty=recipient if is_outgoing else sender,
                 outgoing=sender == lowered,
                 amount=amount, symbol=symbol or "?", usd=usd,
-                timestamp=timestamp, reference=reference,
+                timestamp=_iso_epoch(metadata.get("blockTimestamp")),
+                reference=reference,
             ))
     return out
 

@@ -614,9 +614,18 @@ class FakeResponseChannel:
         self.deferred += 1
 
 
+class FakeFollowup:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    async def send(self, content: str = "", **kwargs: object) -> None:
+        self.messages.append({"content": content, **kwargs})
+
+
 class FakeInteraction:
     def __init__(self, user_id: int = 1, channel_id: int = 99) -> None:
         self.response = FakeResponseChannel()
+        self.followup = FakeFollowup()
         self.user = type("U", (), {"id": user_id})()
         self.channel_id = channel_id
         self.guild_id = 7
@@ -1077,278 +1086,124 @@ class TrackedManagerTests(unittest.IsolatedAsyncioTestCase):
 
 
 
-class TokenTraderCardTests(unittest.IsolatedAsyncioTestCase):
-    """`/token`'s Top Traders: the rows, the pages and the toggle."""
+class TokenCardRefreshTests(unittest.IsolatedAsyncioTestCase):
+    """`/token`'s Refresh: what it rebuilds, and what it refuses to break."""
 
-    def _trader(self, address: str = "walletTrader", **kwargs):
-        from decimal import Decimal
-        from token_traders import TokenTrader
-        base = dict(
-            address=address, bought=Decimal("1200000"), sold=Decimal("800000"),
-            transactions=17, first_seen=1_755_000_000, last_seen=1_755_600_000,
-        )
-        base.update(kwargs)
-        return TokenTrader(**base)
-
-    def _meta(self, traders=(), **kwargs):
-        from token_intelligence import TokenTraders
-        base = dict(
-            traders=tuple(traders), transactions=412,
-            earliest=1_755_000_000, latest=1_755_600_000, source="helius",
-        )
-        base.update(kwargs)
-        return TokenTraders(**base)
-
-    def _winner(self, address: str = "walletTrader", **kwargs):
-        from decimal import Decimal
-        base = dict(
-            bought=Decimal("1000000"), sold=Decimal("1000000"), transactions=17,
-            invested_usd=Decimal("3255"), proceeds_usd=Decimal("15705"),
-            realized_pnl_usd=Decimal("12450"), unrealized_pnl_usd=Decimal(0),
-            avg_entry_price=Decimal("0.003255"), open_tokens=Decimal(0),
-        )
-        base.update(kwargs)
-        return self._trader(address, **base)
-
-    async def test_a_row_leads_with_pnl_roi_and_entry(self) -> None:
-        from decimal import Decimal
-        from fomo_bot import _trader_rows
-        trader = self._winner()
-        # $0.003255 x 40,000,000 supply = a $130.2K entry market cap.
-        rows = _trader_rows([trader], ["🔵 @rowdy · wall…der · 17 tx"],
-                            Decimal("40000000"))
-        self.assertIn("+$12,450", rows[0])
-        self.assertIn("+382.5%", rows[0])   # 12,450 / 3,255
-        self.assertIn("$130.2K", rows[0])
-        self.assertIn("🟢", rows[0])
-        self.assertIn("@rowdy", rows[0])
-
-    def test_a_loss_is_marked_red_and_signed(self) -> None:
-        from decimal import Decimal
-        from fomo_bot import _trader_rows
-        loser = self._winner(
-            invested_usd=Decimal("5000"), proceeds_usd=Decimal("1000"),
-            realized_pnl_usd=Decimal("-4000"),
-        )
-        row = _trader_rows([loser], ["wallet"], None)[0]
-        self.assertIn("🔴", row)
-        self.assertIn("-$4,000", row)
-        self.assertIn("-80.0%", row)
-
-    def test_columns_line_up_across_the_whole_list(self) -> None:
-        from decimal import Decimal
-        from fomo_bot import _trader_rows
-        traders = [
-            self._winner("a"),
-            self._winner("b", invested_usd=Decimal("10"),
-                         realized_pnl_usd=Decimal("1.5")),
-        ]
-        rows = _trader_rows(traders, ["one", "two"], Decimal("40000000"))
-        spans = [row.split("`")[3] for row in rows]
-        self.assertEqual(len(spans[0]), len(spans[1]))
-
-    def test_an_open_position_and_a_partial_history_are_flagged(self) -> None:
-        from decimal import Decimal
-        from fomo_bot import _trader_rows
-        open_position = self._winner(
-            open_tokens=Decimal("500000"), unrealized_pnl_usd=Decimal("900"),
-        )
-        partial = self._winner(untracked_sold=Decimal("250000"))
-        rows = _trader_rows([open_position, partial], ["a", "b"], None)
-        self.assertIn("◐", rows[0])
-        self.assertIn("~", rows[1])
-
-    def test_a_wallet_with_no_priced_trade_says_so_rather_than_zero(self) -> None:
-        from fomo_bot import _trader_rows
-        row = _trader_rows([self._trader()], ["wallet"], None)[0]
-        self.assertIn("⚪", row)
-        self.assertIn("—", row)
-        self.assertNotIn("$0.00", row)
-
-    async def test_a_named_wallet_reads_the_same_as_on_the_holders_list(self) -> None:
-        from fomo_bot import _trader_identity, _wallet_identity
-        from fomo_wallet import CachedWalletMatch
-        match = CachedWalletMatch("rowdy", "walletTrader", "Solana", 4)
-        with patch("fomo_bot.find_cached_wallets", return_value=[match]), \
-                patch("fomo_bot.bot") as fake_bot:
-            fake_bot.pump_evm = None
-            fake_bot.pump_profiles = None
-            identity = await _wallet_identity("walletTrader", "Solana")
-            line = await _trader_identity(self._trader(), "Solana")
-        self.assertIn("@rowdy", identity)
-        self.assertTrue(line.startswith(identity))
-        self.assertIn("17 tx", line)
-
-    def test_the_page_says_what_the_ranking_actually_covers(self) -> None:
-        from fomo_bot import _token_traders_embed
-        rows = [f"`{index}.` trader-{index}" for index in range(1, 51)]
-        embed = _token_traders_embed(
-            token_fixture(), self._meta(priced=40), rows, 2, 5
-        )
-        body = "\n".join(field.value for field in embed.fields[1:])
-        self.assertIn("`11.` trader-11", body)
-        self.assertNotIn("trader-21", body)
-        self.assertIn("412 transactions · full history", embed.description)
-        self.assertIn("PnL", embed.description)
-        self.assertIn("Page 2 of 5", embed.footer.text)
-        self.assertIn("helius", embed.footer.text)
-
-    def test_the_ranking_in_use_is_named_on_the_page(self) -> None:
-        from fomo_bot import _token_traders_embed
-        rows = ["`1.` trader-1"]
-        for rank, wanted in (("pnl", "PnL"), ("roi", "ROI"),
-                             ("volume", "Volume")):
-            embed = _token_traders_embed(
-                token_fixture(), self._meta(traders=(self._winner(),), priced=1),
-                rows, 1, 1, rank,
-            )
-            self.assertIn(f"by {wanted}", embed.footer.text)
-
-    def test_a_sample_that_priced_nothing_says_so(self) -> None:
-        from fomo_bot import _token_traders_embed
-        embed = _token_traders_embed(
-            token_fixture(),
-            self._meta(traders=(self._trader(),), priced=0),
-            ["`1.` trader-1"], 1, 1,
-        )
-        self.assertIn("PnL and ROI are unavailable", embed.description)
-
-    def test_a_truncated_sample_is_marked(self) -> None:
-        from fomo_bot import _sample_window
-        cut_short = _sample_window(self._meta(truncated=True))
-        self.assertIn("412 recent transactions+", cut_short)
-        self.assertNotIn("full history", cut_short)
-        self.assertEqual(_sample_window(self._meta(transactions=0)),
-                         "no sampled transactions")
-
-    def test_a_sample_that_reached_the_start_says_full_history(self) -> None:
-        from fomo_bot import _sample_window
-        # Whether paging reached the token's first transaction is the whole
-        # difference between "these are the best traders" and "these are the
-        # most recent ones".
-        self.assertIn("full history", _sample_window(self._meta()))
-
-    def _view(self, loader):
+    def _view(self, refresh, pages: int = 5):
         import discord
         from fomo_bot import TokenCardView
         return TokenCardView(
-            [discord.Embed(title=f"holders {index}") for index in range(5)],
-            loader,
+            [discord.Embed(title=f"holders {index}") for index in range(pages)],
+            refresh,
         )
 
-    async def test_the_card_starts_on_the_holders(self) -> None:
-        view = self._view(lambda _rank: None)
-        self.assertEqual(view.section, "holders")
-        self.assertEqual(view.section_button.label, "Top Traders")
-        self.assertEqual(view.embeds[0].title, "holders 0")
-        # The sort only means something on the trader list.
-        self.assertTrue(view.sort_button.disabled)
-        self.assertEqual(view.sort_button.label, "Sort: PnL")
-
-    async def test_the_toggle_loads_the_traders_once(self) -> None:
+    async def test_refresh_replaces_every_page(self) -> None:
         import discord
         calls = []
 
-        async def loader(rank: str) -> list:
-            calls.append(rank)
-            return [discord.Embed(title=f"traders {rank}")]
+        async def refresh() -> list:
+            calls.append(1)
+            return [discord.Embed(title=f"fresh {index}") for index in range(5)]
 
-        view = self._view(loader)
+        view = self._view(refresh)
         interaction = FakeInteraction()
-        await view.section_button.callback(interaction)
-        self.assertEqual(view.section, "traders:pnl")
-        self.assertEqual(view.section_button.label, "Top Holders")
-        self.assertFalse(view.sort_button.disabled)
-        self.assertEqual(
-            interaction.followup_edits[0]["embed"].title, "traders pnl"
-        )
+        await view.refresh_button.callback(interaction)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(interaction.response.deferred, 1)
+        self.assertEqual(view.embeds[0].title, "fresh 0")
+        self.assertEqual(
+            interaction.followup_edits[0]["embed"].title, "fresh 0"
+        )
 
-        # Back to the holders, and forward again: no second load.
-        await view.section_button.callback(interaction)
-        await view.section_button.callback(interaction)
-        self.assertEqual(calls, ["pnl"])
-        self.assertEqual(view.section, "traders:pnl")
-
-    async def test_the_sort_cycles_pnl_roi_volume_and_back(self) -> None:
-        import discord
-        calls = []
-
-        async def loader(rank: str) -> list:
-            calls.append(rank)
-            return [discord.Embed(title=f"traders {rank}")]
-
-        view = self._view(loader)
-        interaction = FakeInteraction()
-        await view.section_button.callback(interaction)
-        for expected in ("roi", "volume", "pnl"):
-            await view.sort_button.callback(interaction)
-            self.assertEqual(view.rank, expected)
-            self.assertEqual(view.section, f"traders:{expected}")
-        # Each ranking is rendered once and then kept; returning to PnL is free.
-        self.assertEqual(calls, ["pnl", "roi", "volume"])
-        self.assertEqual(view.sort_button.label, "Sort: PnL")
-
-    async def test_the_sort_does_nothing_while_the_holders_show(self) -> None:
-        calls = []
-
-        async def loader(rank: str) -> list:
-            calls.append(rank)
-            return []
-
-        view = self._view(loader)
-        await view.sort_button.callback(FakeInteraction())
-        self.assertEqual(view.section, "holders")
-        self.assertEqual(calls, [])
-
-    async def test_each_list_keeps_its_own_page(self) -> None:
+    async def test_the_reader_stays_on_the_page_they_were_reading(self) -> None:
         import discord
 
-        async def loader(_rank: str) -> list:
-            return [discord.Embed(title=f"traders {index}") for index in range(3)]
+        async def refresh() -> list:
+            return [discord.Embed(title=f"fresh {index}") for index in range(5)]
 
-        view = self._view(loader)
+        view = self._view(refresh)
         interaction = FakeInteraction()
         await view.next_button.callback(interaction)
         await view.next_button.callback(interaction)
         self.assertEqual(view.index, 2)
-        await view.section_button.callback(interaction)
+        await view.refresh_button.callback(interaction)
+        self.assertEqual(view.index, 2)
+        self.assertEqual(view.embeds[2].title, "fresh 2")
+
+    async def test_a_shorter_list_clamps_rather_than_crashing(self) -> None:
+        import discord
+
+        async def refresh() -> list:
+            return [discord.Embed(title="fresh 0")]
+
+        view = self._view(refresh)
+        interaction = FakeInteraction()
+        for _ in range(4):
+            await view.next_button.callback(interaction)
+        self.assertEqual(view.index, 4)
+        await view.refresh_button.callback(interaction)
         self.assertEqual(view.index, 0)
-        await view.section_button.callback(interaction)
-        self.assertEqual(view.index, 2)
+        self.assertTrue(view.next_button.disabled)
 
-    async def test_a_failing_loader_shows_a_card_not_an_error(self) -> None:
-        async def loader(_rank: str) -> list:
+    async def test_a_failed_refresh_leaves_the_card_standing(self) -> None:
+        async def refresh() -> list:
             raise RuntimeError("provider down")
 
-        view = self._view(loader)
+        view = self._view(refresh)
         interaction = FakeInteraction()
-        await view.section_button.callback(interaction)
-        self.assertEqual(view.section, "traders:pnl")
-        self.assertIn("unavailable", view.embeds[0].description)
+        await view.refresh_button.callback(interaction)
+        self.assertEqual(view.embeds[0].title, "holders 0")
+        self.assertTrue(interaction.followup.messages[0]["ephemeral"])
+        self.assertIn("unchanged", interaction.followup.messages[0]["content"])
 
-    async def test_an_empty_answer_is_remembered(self) -> None:
-        calls = []
-
-        async def loader(rank: str) -> list:
-            calls.append(rank)
+    async def test_an_empty_refresh_is_treated_as_a_failure(self) -> None:
+        async def refresh() -> list:
             return []
 
-        view = self._view(loader)
+        view = self._view(refresh)
         interaction = FakeInteraction()
-        for _ in range(3):
-            await view.section_button.callback(interaction)
-        self.assertEqual(calls, ["pnl"])
+        await view.refresh_button.callback(interaction)
+        self.assertEqual(view.embeds[0].title, "holders 0")
+        self.assertTrue(interaction.followup.messages)
+
+    async def test_the_cooldown_stops_a_second_press(self) -> None:
+        import discord
+        calls = []
+
+        async def refresh() -> list:
+            calls.append(1)
+            return [discord.Embed(title="fresh")]
+
+        view = self._view(refresh)
+        await view.refresh_button.callback(FakeInteraction())
+        second = FakeInteraction()
+        await view.refresh_button.callback(second)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(second.response.messages[0]["ephemeral"])
+        self.assertEqual(second.response.deferred, 0)
+
+    async def test_the_card_no_longer_offers_top_traders(self) -> None:
+        import fomo_bot
+        view = self._view(lambda: None)
+        labels = {getattr(child, "label", "") for child in view.children}
+        self.assertNotIn("Top Traders", labels)
+        self.assertIn("Refresh", labels)
+        for gone in ("_token_trader_embeds", "_trader_rows",
+                     "_token_traders_embed", "_sample_window"):
+            with self.subTest(attribute=gone):
+                self.assertFalse(hasattr(fomo_bot, gone))
 
 
 class ConnectedCardTests(unittest.IsolatedAsyncioTestCase):
-    """`/connected` — how an association reads, and what an empty run says."""
+    """`/connected` — the funding wallet, the list, and what an empty run says."""
 
     KNOWN = "KnownAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
     FRIEND = "FriendAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"
+    FUNDER = "FunderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA6"
 
-    def _association(self, **overrides):
-        from connected_wallets import Relationship, score_relationship
+    def _connection(self, **overrides):
+        from connected_wallets import Connection, Relationship
+        funder = overrides.pop("funder", False)
         record = Relationship(
             address=self.FRIEND, chain="solana", known_wallet=self.KNOWN,
             sent_count=24, received_count=19,
@@ -1360,13 +1215,23 @@ class ConnectedCardTests(unittest.IsolatedAsyncioTestCase):
         record.references = ["sig-a", "sig-b", "sig-c"]
         for key, value in overrides.items():
             setattr(record, key, value)
-        return score_relationship(record)
+        return Connection(record, funder=funder)
 
-    def _report(self, associations=(), weaker=(), **kwargs):
+    def _funding(self, **overrides):
+        from connected_wallets import Funding
+        base = dict(
+            wallet=self.KNOWN, chain="solana", address=self.FUNDER,
+            amount=0.05, symbol="SOL", timestamp=1_730_000_000,
+            reference="fund-sig", exact=True,
+        )
+        base.update(overrides)
+        return Funding(**base)
+
+    def _report(self, connections=(), funding=(), **kwargs):
         from connected_wallets import ConnectedReport
         base = dict(
             wallets=((self.KNOWN, "solana"),),
-            associations=tuple(associations), weaker=tuple(weaker),
+            funding=tuple(funding), connections=tuple(connections),
             transactions=500, warnings=(), generated_at=0,
         )
         base.update(kwargs)
@@ -1374,32 +1239,76 @@ class ConnectedCardTests(unittest.IsolatedAsyncioTestCase):
 
     def test_an_entry_carries_every_requested_field(self) -> None:
         from fomo_bot import _connected_entry
-        name, value = _connected_entry(1, self._association())
+        name, value = _connected_entry(1, self._connection())
         self.assertIn("Solana", value)
-        self.assertIn("/100", value)
-        self.assertIn("Direct transfers: **43**", value)
-        self.assertIn("Total transferred:", value)
+        self.assertIn("Qualifying transfers: **43**", value)
+        self.assertIn("Value moved:", value)
         self.assertIn("First:", value)
         self.assertIn("Latest:", value)
-        self.assertIn("Evidence:", value)
         self.assertTrue(name.startswith("1."))
+        # No scores, no bands, no confidence language.
+        self.assertNotIn("/100", value)
+        for word in ("Very High", "Possible", "Evidence:"):
+            self.assertNotIn(word, value)
 
     def test_a_known_identity_titles_the_entry(self) -> None:
         from fomo_bot import _connected_entry
-        name, _value = _connected_entry(2, self._association(identity="rowdy"))
+        name, _value = _connected_entry(2, self._connection(identity="rowdy"))
         self.assertEqual(name, "2. @rowdy")
 
-    def test_every_page_repeats_that_this_is_not_proof(self) -> None:
+    def test_the_funder_is_marked_in_the_list(self) -> None:
+        from fomo_bot import _connected_entry
+        name, value = _connected_entry(1, self._connection(funder=True))
+        self.assertIn("💰", name)
+        self.assertIn("funded the analysed one", value)
+
+    def test_the_funding_wallet_leads_the_first_page(self) -> None:
+        from fomo_bot import _connected_embeds
+        embeds = _connected_embeds(
+            self._report([self._connection()], [self._funding()]), "@rowdy")
+        first = embeds[0].fields[0]
+        self.assertIn("Funding wallet", first.name)
+        self.assertIn("0.05 SOL", first.value)
+        self.assertIn("solscan.io/tx/fund-sig", first.value)
+
+    def test_a_named_funder_reads_as_a_handle(self) -> None:
+        from fomo_bot import _connected_embeds
+        embeds = _connected_embeds(
+            self._report([], [self._funding(identity="banker")]), "@rowdy")
+        self.assertIn("@banker", embeds[0].fields[0].value)
+
+    def test_a_labelled_funder_is_called_what_it_is(self) -> None:
+        from fomo_bot import _connected_embeds
+        embeds = _connected_embeds(
+            self._report([], [self._funding(label="Binance")]), "@rowdy")
+        self.assertIn("Binance", embeds[0].fields[0].value)
+
+    def test_an_undetermined_funder_says_so(self) -> None:
+        from fomo_bot import _connected_embeds
+        embeds = _connected_embeds(self._report([self._connection()]), "@rowdy")
+        self.assertIn("Not determined", embeds[0].fields[0].value)
+
+    def test_every_page_says_what_the_bar_was(self) -> None:
+        from fomo_bot import CONNECTED_RULE, _connected_embeds
+        embeds = _connected_embeds(
+            self._report([self._connection() for _ in range(9)]), "@rowdy")
+        self.assertGreater(len(embeds), 1)
+        self.assertTrue(all(CONNECTED_RULE in e.description for e in embeds))
+
+    def test_every_page_repeats_what_was_excluded(self) -> None:
         from fomo_bot import CONNECTED_DISCLAIMER, _connected_embeds
         embeds = _connected_embeds(
-            self._report([self._association()]), "@rowdy")
+            self._report([self._connection()]), "@rowdy")
         self.assertTrue(all(CONNECTED_DISCLAIMER in e.footer.text for e in embeds))
+        self.assertIn("Swaps", CONNECTED_DISCLAIMER)
 
-    def test_finding_nothing_is_an_answer_not_a_failure(self) -> None:
+    def test_finding_nothing_names_the_reason(self) -> None:
         from fomo_bot import _connected_embeds
         embeds = _connected_embeds(self._report(), "@rowdy")
         self.assertEqual(len(embeds), 1)
-        self.assertIn("No wallet met the evidence bar", embeds[0].description)
+        body = "".join(field.value for field in embeds[0].fields)
+        self.assertIn("No wallet cleared the transfer bar", body)
+        self.assertIn("Jupiter", body)
 
     def test_warnings_reach_the_card(self) -> None:
         from fomo_bot import _connected_embeds
@@ -1412,40 +1321,30 @@ class ConnectedCardTests(unittest.IsolatedAsyncioTestCase):
 
     def test_the_evidence_card_links_the_transactions(self) -> None:
         from fomo_bot import _connected_evidence_embed
-        embed = _connected_evidence_embed(self._association())
+        embed = _connected_evidence_embed(self._connection())
         body = "".join(field.value for field in embed.fields)
         self.assertIn("solscan.io/tx/sig-a", body)
+        self.assertIn("separate dates", body)
 
-    async def test_the_possible_button_is_dead_when_there_is_nothing_weaker(self) -> None:
-        from fomo_bot import ConnectedView
-        view = ConnectedView(self._report([self._association()]), "@rowdy")
-        self.assertTrue(view.section_button.disabled)
-
-    async def test_the_possible_button_switches_lists(self) -> None:
-        from fomo_bot import ConnectedView
-        weak = self._association(sent_count=4, received_count=3)
-        view = ConnectedView(
-            self._report([self._association()], [weak]), "@rowdy")
-        self.assertFalse(view.section_button.disabled)
-        interaction = FakeInteraction()
-        await view.section_button.callback(interaction)
-        self.assertEqual(view.section, "weaker")
-        self.assertIn("Possible associations",
-                      interaction.response.edits[0]["embed"].title)
-
-    async def test_the_evidence_picker_lists_the_current_section(self) -> None:
+    async def test_the_evidence_picker_lists_the_connections(self) -> None:
         import discord
         from fomo_bot import ConnectedView
-        view = ConnectedView(self._report([self._association()]), "@rowdy")
+        view = ConnectedView(self._report([self._connection()]), "@rowdy")
         selects = [child for child in view.children
                    if isinstance(child, discord.ui.Select)]
         self.assertEqual(len(selects), 1)
         self.assertEqual(selects[0].options[0].value,
                          f"solana:{self.FRIEND}"[:100])
 
+    async def test_an_empty_run_still_renders_a_card(self) -> None:
+        from fomo_bot import ConnectedView
+        view = ConnectedView(self._report(funding=[self._funding()]), "@rowdy")
+        self.assertEqual(len(view.embeds), 1)
+        self.assertTrue(view.next_button.disabled)
+
     async def test_inspecting_a_wallet_answers_privately(self) -> None:
         from fomo_bot import ConnectedView
-        view = ConnectedView(self._report([self._association()]), "@rowdy")
+        view = ConnectedView(self._report([self._connection()]), "@rowdy")
         interaction = FakeInteraction()
         await view.show_evidence(interaction, f"solana:{self.FRIEND}"[:100])
         self.assertTrue(interaction.response.messages[0]["ephemeral"])
@@ -1487,14 +1386,14 @@ class CommandSurfaceTests(unittest.IsolatedAsyncioTestCase):
             ["fomo", "pump"],
         )
 
-    def test_connected_takes_a_target_and_an_optional_strict_flag(self) -> None:
+    def test_connected_takes_a_target_and_an_optional_fresh_flag(self) -> None:
         import fomo_bot
         command = fomo_bot.bot.tree.get_command("connected")
         names = [parameter.name for parameter in command.parameters]
-        self.assertEqual(names, ["target", "strict"])
+        self.assertEqual(names, ["target", "fresh"])
         required = {p.name: p.required for p in command.parameters}
         self.assertTrue(required["target"])
-        self.assertFalse(required["strict"])
+        self.assertFalse(required["fresh"])
 
     def test_token_no_longer_offers_a_holder_count(self) -> None:
         import fomo_bot

@@ -1,6 +1,6 @@
 # Full Memory — Zenza (Updated)
 
-**Last updated:** 2026-08-21
+**Last updated:** 2026-08-23 (session 40)
 
 ---
 
@@ -66,7 +66,7 @@ Entrepreneur and developer building automated crypto trading and monitoring tool
 - `/fomo` — FOMO trader profile lookup
 - `/pump` — Pump.fun data
 - `/wallet` — wallet lookup (Solana/EVM)
-- `/token` — token page with top 50 holders and top traders
+- `/token` — token page with top 50 holders, refreshable in place
 - `/thesis` — top holders' written theses
 - `/track` — platform choice for tracking (FOMO/Pump)
 - `/tracked` — edit/remove tracked items
@@ -80,45 +80,86 @@ Entrepreneur and developer building automated crypto trading and monitoring tool
 - Padre-linked tickers matching sell rows
 
 ### `/token` Implementation
+
+- **Chains:** Solana, Ethereum, Base, BSC, Robinhood, Hyperliquid (HyperEVM)
 - **Top 50 Holders:** 10 per page, paging through all 50
-- **Top Traders:** Best performers ranked by PnL in USD and ROI %
-  - Entry shown as entry market cap (weighted-average)
-  - Never by token volume
-  - Compact scannable table
-  - No invented data where PnL cannot be calculated
+- **🔄 Refresh button (Session 40):** re-runs the whole card — market data,
+  holder query, FOMO/Pump identity labelling — and replaces every page, keeping
+  the reader on their page. 15s cooldown, lock, and a failed rebuild leaves the
+  card standing rather than replacing it with an error
+- Identity caches are NOT bypassed on refresh (a handle does not go stale like a
+  holder list does)
 
-### `/token` Top Traders — Current Status (Session 36)
+### `/token` Top Traders — REMOVED (Session 40)
 
-**Implementation Complete:**
-- P/L calculation: ✅ Working correctly
-- Ranking by profitability: ✅ Working correctly  
-- Diagnostic tool (`token_traders_diag.py`): ✅ Confirms functionality
+Taken off the card at the user's request. The ranking and P/L accounting were
+correct; the sample depth never reliably reached a token's first transactions,
+so it systematically ranked recent buyers. `token_traders.py`,
+`token_intelligence.top_traders()` and `token_traders_diag.py` remain in the
+repo and still work from the command line, driven by the same `TOKEN_TRADER_*`
+env keys. The local-indexer plan below was the fix for the depth problem and is
+now moot unless the board comes back.
 
-**Current Issue — Sample Size Limitation:**
-- Sample currently covers: 110 transactions in 2 minutes
-- Real top trader: `gasAx5Y917MYdmdnwiomwYDhmDKNGDJnN1MmEbxVdVw` with +$394k
-- Showing instead: +$7.69 (different trader, due to limited window)
-- Warning: "CUT SHORT" appears when transaction budget exhausted
-- Root cause: TOKEN_TRADER_SOLANA_PAGES budget runs out before complete history is fetched
+### `/token` Hyperliquid Holders (Session 39)
 
-**Data Sources:**
-- Solana: Helius (`/v0/addresses/{mint}/transactions`)
-- EVM: CMC (`alchemy_getAssetTransfers`), Blockscout (Robinhood)
+**Problem:** `/token` returned 0 holders for every Hyperliquid token — CMC has
+no `hyperevm` platform and no Blockscout instance serves chain 999.
 
-**Solutions Evaluated:**
-- HelloMoon: Pre-calculated P/L (used by axiom.trade) — NOT FREE
-- Solscan: Blockchain data only, no pre-calculated P/L
-- DexScreener: Price/volume data, not trader rankings
-- GeckoTerminal: DEX data, not trader P/L
-- **Decision:** Build free local indexer (1-day effort, documented in fomo-indexer-architecture.md)
+**Pump.fun is NOT the source** (traced live in DevTools on EGG,
+`0xb75d5ee14708e7efbea939311090061d72265608`):
+- `/coins/top-holders/{mint}` → 400, Solana base58 only
+- `/token-holders/{addr}/count` → 404 `Codex has no holder data for this token`
+- `/pnl/coin/{addr}/holders` → POST, max 20 addresses, PnL enrichment only
+- The `Pump.fun (n)` panel is positions of pump.fun **users**, streamed over
+  `wss://multichain-prod.nats.realtime.pump.fun` and recomputed from trades —
+  a cold page load makes no holders request at all
 
-### `/connected` (New Command)
-- Finds wallets with strong on-chain evidence of same cluster as FOMO user's wallets
-- Confidence bands rather than ownership claims
-- Infrastructure excluded (CEX/bridge/router/contract/high-degree)
-- High precision preferred over recall
-- Accepts FOMO handle or raw wallet address
-- Analysis budget: ~500 transactions per wallet
+**Source used:** `scan-api.hl.eco/api/token/{addr}/holders?limit=50` (hl.eco /
+hyperscan.com, the HyperEVM explorer). Indexes Transfer events, then reads the
+top candidates' balances on-chain. Returns address, raw balance, `pct`,
+`totalSupply`, `decimals`, `holderCount`, plus labels.
+- Cross-check: its #1 row = 2.4568% of supply; pump.fun's panel shows Dior100x
+  at 2.46% — same wallet, two independent paths
+- Ranks within the top 500 transfer-delta candidates (`page.reachable`); exact
+  for a top 50, not a full census
+- Unknown token answers 200 with nulls → empty list, shorter card, no exception
+
+**Shipped:** `_hyperevm_holders()` in `token_intelligence.py`, `hyperevm` /
+`hyperliquid` → `Hyperliquid` in `CHAIN_NAMES`, `hyperscan.com/address/` in
+`_holder_explorer`, 3 tests, new `hyperliquid_holders_probe.py`, three
+`HYPEREVM_*` keys in `.env.example`.
+
+**Still missing on this chain:** Top Traders (`unsupported` — no transfer
+source for chain 999) and FOMO handle naming (`NETWORK_IDS` has no Hyperliquid
+id; fomo.family does not carry the chain).
+
+### `/connected` — rewritten (Session 40)
+
+**The problem:** it reported Meteora, Jupiter and Raydium as connected wallets.
+Not a filtering bug — an input bug. Helius parsed history was read whole, so
+every swap contributed a "transfer" between the trader and a liquidity pool, and
+a daily swapper produces exactly the pattern the scorer rewarded (many
+transfers, both directions, months of span, high value). The pool outranked the
+trader's real associates.
+
+**What it does now:**
+- Reads **only plain transfers** — Helius `type == "TRANSFER"`, no swap event,
+  no DEX source, no failed transactions
+- **Size bar:** 1+ SOL or 50+ USDC on Solana; $200+ native or 50+ stablecoin on
+  EVM (`CONNECTED_MIN_SOL` / `CONNECTED_MIN_STABLE` / `CONNECTED_MIN_EVM_USD`)
+- Non-native, non-stablecoin assets are **dropped**, not counted unpriced —
+  they cannot be priced honestly so they cannot clear a value bar
+- **Scores and bands deleted.** `Association` → `Connection`; ranked by value
+  moved then transfer count. `strict` flag → `fresh` flag
+- **Funding wallet**, never value-gated, its own field at the top of page one:
+  Solscan Pro `sort_order=asc` (one request, needs `SOLSCAN_API_KEY`) →
+  Helius paged backwards to exhaustion (`CONNECTED_FUNDING_PAGES` = 20 pages =
+  2000 tx; hitting the ceiling reports **unknown**, never a guess) → EVM
+  `alchemy_getAssetTransfers` with `order: "asc"`
+- Still excludes structurally: known addresses, Solana account type, degree
+  probe (run on **unfiltered** history — a service is a service because of the
+  swaps it handles)
+- Cache keys prefixed `CACHE_SCHEMA` = `v2`, so old scored reports are ignored
 
 ### `/thesis` (New Command)
 - Top holders' written theses ranked by position value
@@ -146,11 +187,24 @@ Entrepreneur and developer building automated crypto trading and monitoring tool
 8. `/feed/token/sortedThesis` never probed
 9. `_das_holders` never made a real request
 10. Batched `/hodlers/top` never sent with multiple tokens
-11. Top Traders never made a real request (now tested, sample size issue identified)
-12. `/connected` never made a real request
+11. Top Traders never made a real request (removed from `/token` in session 40;
+    `token_traders_diag.py` still exercises it)
+12. `/connected` never made a real request — and the session-40 rewrite adds
+    two things a live run must settle: whether Helius types a gas-sponsored
+    FOMO wallet's own sends as `TRANSFER` (if not, the filter is too strict and
+    the card comes back empty), and whether 2000 pages of walk-back reaches a
+    typical FOMO wallet's first transaction
 13. Cross-chain evidence is identity-based only (bridge tracing not implemented)
-14. `/connected` prices only SOL, native EVM coins and stablecoins (memecoins unpriced)
+14. `/connected` prices only SOL, native EVM coins and stablecoins; memecoin-only
+    relationships are now invisible rather than unpriced
+    15b. EVM has no swap filter — no transaction type exists there, so pools are
+    held off by labels, contract code, degree and the $200 floor alone
 15. Sponsor index reaches back under an hour (shrinking as FOMO grows)
+16. Hyperliquid holders rank within hl.eco's top 500 candidates, not the full
+    holder set
+17. `hyperliquid_holders_probe.py` has never been run from the venv — every
+    live read this session went through Chrome, since neither sandbox nor
+    desktop VM has egress to the HyperEVM RPC or pump.fun
 
 ---
 
@@ -179,7 +233,8 @@ Entrepreneur and developer building automated crypto trading and monitoring tool
 
 **Effort:** 4-6 hrs indexer + 1-2 hrs API + 2 hrs testing = ~1 workday
 
-**Status:** Architecture documented, not yet built (scheduled for later)
+**Status:** Architecture documented, not built — and moot as of session 40,
+since Top Traders came off `/token`. Revive only if the board comes back.
 
 ---
 
@@ -213,7 +268,9 @@ Entrepreneur and developer building automated crypto trading and monitoring tool
 - Anthropic API
 
 ### Crypto Tools & Platforms
-- Solscan (manual wallet tracing)
+- Solscan (manual wallet tracing; Solscan Pro `sort_order=asc` optionally used
+  by `/connected` for the funding wallet — the only route that reads a wallet's
+  oldest transaction in one request)
 - Dexscreener (signal data)
 - Axiom.trade (reference for top traders ranking)
 - Padre.gg (GMGN links)
@@ -234,3 +291,76 @@ Entrepreneur and developer building automated crypto trading and monitoring tool
 - No invented data where actual data unavailable
 - Wants to understand "how it works" before implementation (researches platforms/APIs)
 - Pragmatic approach: use free APIs/infrastructure when possible, but understand limitations clearly
+
+---
+
+## Session: Solscan + the 10062 interaction stall (Aug 2026)
+
+**Solscan.** The key is a *free* key. Free keys reach `/playground/...` only;
+`/v2.0/...` is the paid Pro API and rejects them. The header is `token: <key>`,
+not `Authorization: Bearer`. New `solscan_api.py` resolves prefix, header style
+and parameter spelling at runtime, caches what worked, and logs every attempt
+on failure. Solscan's gateway authenticates before it routes, so the body is
+the only signal: `Token is missing` = no key arrived, `Token is invalid` = one
+arrived and was rejected. **Answered:** `/playground/token/holders` is a 404 (so the key *is* accepted —
+routing happened) and `/v2.0/token/holders` says "Please upgrade your api key
+level". Solscan's holder list has no free route; only a Pro plan opens it.
+Playground is account-scoped, so `/connected`'s funding lookup is fine.
+`token:` is the only header Solscan reads.
+
+**The holder that was actually missing was never Solscan's fault.**
+`_query_helius_das` capped at 3 pages x 1,000 = 3,000 token accounts, and DAS
+returns accounts in index order, not by balance — so the cap kept an arbitrary
+slice, and any token over 3,000 accounts could drop a holder of any size.
+`DAS_MAX_PAGES` now defaults to 40 and warns when the ceiling is hit.
+
+**`404 Unknown interaction` (10062) on /token and /wallet.** Not a Discord or
+Solscan problem: `ProfileCache.put()` saved the *entire* cache file on every
+call. `wallet_cache.json` is ~770KB, so labelling 50 holders meant 50 full
+serialisations on the event loop — ~18ms each measured on a Linux mount, more
+on Windows with Defender inspecting each temporary file. Past three seconds of
+that, Discord expires the *next* interaction's token and `defer()` raises.
+Saves are now coalesced (`PROFILE_CACHE_SAVE_INTERVAL`, default 5s), with an
+`atexit` flush and an explicit `flush()`. Measured: 50 puts, 1 write.
+Coalescing is skipped when no event loop is running, so scripts and tests keep
+write-through semantics.
+
+Also: `_safe_defer()` turns a lost interaction into one warning instead of a
+two-deep `CommandInvokeError`, and `bot.run(..., log_handler=None)` stops
+discord.py adding a second root handler on top of `basicConfig` — which is why
+every traceback was printed twice in two different formats.
+
+**Follow-up: the 10062s got worse, not better.** Raising `DAS_MAX_PAGES` from
+3 to 40 turned `/token` into up to forty *sequential* Helius round trips
+(~10s+ at 250ms each) — it never blocked the loop, but it kept heavy work in
+flight far longer and invited retries, each of which started another crawl.
+DAS pages are independent, so they now go out concurrently
+(`DAS_CONCURRENCY`, default 8): page one alone, so a small token still costs
+exactly one request, then batches. Measured against a simulated 250ms round
+trip: 37k accounts 10.0s -> 1.6s, 4.2k accounts 2.25s -> 0.51s, small token
+unchanged at one request.
+
+What actually blocks the loop is still unproven. `_loop_watchdog()` now runs
+from `setup_hook`: it samples every 250ms and, on an overshoot past
+`FOMO_LOOP_LAG_WARN` (default 1.0s), logs the lag and every live task with its
+file and line. `FOMO_LOOP_DEBUG=1` additionally turns on asyncio's own
+slow-callback warning, which names the exact coroutine (real overhead, so it
+is opt-in). Ruled out by measurement: DAS page parsing (longest uninterrupted
+block 3.7ms across 40 pages) and profile-cache writes (now coalesced).
+
+**The watchdog stayed silent through five more 10062s — which settles it: the
+event loop is not blocked.** `_safe_defer`'s old message ("the event loop was
+busy") was an assumption, and a wrong one. Discord's three seconds run from
+when *it* mints the interaction token, not from when the bot sees it, so a
+10062 splits into two cases the traceback cannot tell apart: the event reached
+us late (gateway/network/a second process holding the session), or our
+acknowledgement was slow (REST). The snowflake carries the creation time, so
+`_safe_defer` now measures the interaction's age on arrival and again at
+refusal, logs both with `bot.latency`, and names which side is at fault.
+
+Added `claim_single_instance()`: binds 127.0.0.1:47821 (`FOMO_LOCK_PORT`) at
+startup and refuses to run beside another copy. Two processes on one bot token
+both hold a gateway session; Discord routes an interaction to one and the
+other fails to acknowledge with exactly this error — no stalled loop, no slow
+network, just a stale process surviving a restart. A bound socket cannot go
+stale the way a pid file can. `FOMO_SINGLE_INSTANCE=0` disables it.

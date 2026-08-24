@@ -28,6 +28,7 @@ resolution lives in `pump_profiles.py`.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import logging
 import os
@@ -40,12 +41,31 @@ log = logging.getLogger("wallet.cache")
 
 CACHE_VERSION = 1
 
+# Every `put()` used to rewrite the whole file. With `wallet_cache.json` near a
+# megabyte and `/token` labelling fifty holders, that is fifty full
+# serialisations on the event loop in one command -- measured at ~18ms each on
+# a Linux mount and several times that on Windows once Defender inspects each
+# temporary file. Discord gives a command three seconds to acknowledge, so the
+# stall showed up as `404 Unknown interaction` on whatever ran next.
+#
+# Saves are coalesced instead: the first write goes through, and further ones
+# inside the window are collapsed into a single flush at the end of it.
+SAVE_INTERVAL = float(os.getenv("PROFILE_CACHE_SAVE_INTERVAL", "5"))
+
 # A record with no `at` is treated as written at the epoch, so it expires
 # immediately rather than living forever with an unknown age.
 _UNKNOWN_TIME = 0
 
 
 # ------------------------------------------------------------------ json io
+
+
+def _loop_is_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def read_json(path: str | Path) -> Any:
@@ -169,8 +189,12 @@ class ProfileCache:
         self._entries: dict[str, CacheEntry] = {}
         self._aliases: dict[str, str] = {}
         self._dirty = False
+        self._last_save = 0.0
+        self._flush_handle: Any = None
+        self.save_interval = SAVE_INTERVAL
         self.locks = KeyedLocks()
         self.load()
+        atexit.register(self.flush)
 
     # -- persistence ----------------------------------------------------
 
@@ -201,9 +225,45 @@ class ProfileCache:
                 if isinstance(key, str) and key in self._entries:
                     self._aliases[str(alias)] = key
 
+    def flush(self) -> bool:
+        """Write now if anything is owed. Safe to call at any time."""
+        return self.save(force=True)
+
+    def _schedule_flush(self) -> None:
+        """Ask the running loop to flush when the window closes.
+
+        Without a loop -- a script, a test -- there is nothing to schedule on,
+        and the next `save()` past the window writes instead.
+        """
+        if self._flush_handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        def run() -> None:
+            self._flush_handle = None
+            self.save(force=True)
+
+        delay = max(0.0, self.save_interval - (time.monotonic() - self._last_save))
+        self._flush_handle = loop.call_later(delay, run)
+
     def save(self, *, force: bool = False) -> bool:
         if not self._dirty and not force:
             return True
+        if not force and self.save_interval > 0 and _loop_is_running():
+            # Coalescing only earns anything where a stalled loop costs
+            # something. A script or a test has no loop to protect, and
+            # deferring there would just make `save()` a lie.
+            since = time.monotonic() - self._last_save
+            if since < self.save_interval:
+                # Owed, not lost: the timer below writes it.
+                self._schedule_flush()
+                return False
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
         payload = {
             "version": CACHE_VERSION,
             "entries": {
@@ -218,6 +278,7 @@ class ProfileCache:
             "aliases": dict(sorted(self._aliases.items())),
         }
         written = write_json_atomic(self.path, payload, indent=self.indent)
+        self._last_save = time.monotonic()
         if written:
             self._dirty = False
         return written

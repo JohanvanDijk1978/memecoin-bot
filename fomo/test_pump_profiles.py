@@ -314,6 +314,10 @@ class PumpProfileResolverTests(unittest.IsolatedAsyncioTestCase):
         first = _resolver(self.tmp, path, pump=FakePump({WALLET: USER}))
         await first.lookup(WALLET)
         await first.lookup(OTHER)
+        # Writes inside one event-loop burst are coalesced, so the flush that
+        # `atexit` would run on the way out has to be asked for explicitly --
+        # this line is the process exit the test is pretending to have.
+        first.cache.flush()
         second = _resolver(self.tmp, path, pump=FakePump({}))
         self.assertEqual(second.cached(WALLET).username, "hdegroot")
         self.assertTrue(second.known_missing(OTHER))

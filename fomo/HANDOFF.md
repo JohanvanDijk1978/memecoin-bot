@@ -1,4 +1,4 @@
-# fomo bot — handoff (2026-08-21)
+# fomo bot — handoff (2026-08-23)
 
 ## Where this stands
 
@@ -19,7 +19,15 @@ was measuring: it ranked on tokens moved, which is activity, and it now runs a
 cost-basis ledger and ranks on PnL and ROI. Session 38 fixed what it was
 measuring it *over*: the sample reached 218 transactions of a live memecoin and
 ranked its newest buyers, so depth is now treated as a correctness parameter
-and the card says whether it read the token's full history.
+and the card says whether it read the token's full history. Session 39 added
+the chain the card could not see at all: Hyperliquid tokens returned zero
+holders, and the source that fixes it is not the one that looked obvious.
+Session 40 took things away: `/token` lost Top Traders and gained a Refresh
+button, and `/connected` stopped counting swaps — it was reporting Meteora,
+Jupiter and Raydium as a trader's associates, because reading a swap's legs
+makes a liquidity pool look exactly like a close relationship. It now reads
+plain transfers over 1 SOL / 50 USDC only, drops the score bands entirely, and
+leads with the wallet that funded the trader in the first place.
 
 The arc, shortest version:
 
@@ -35,12 +43,14 @@ The arc, shortest version:
    leaderboard). Matching those against on-chain owners is a wallet for the
    price of one holder query -- no sponsor index, no block scan. `/token` names
    holders from it live, and confirmed matches are adopted into the cache.
-4. Holders are a ranked query; traders are an aggregation. `/token`'s Top
-   Traders reads transfer history from the same providers, says what window it
-   covers, and throws away the venue rather than ranking it. `/connected`
-   applies the same discipline to identity: score the evidence, cap the band by
-   how many independent signals agree, and exclude infrastructure structurally
-   rather than by reputation.
+4. Holders are a ranked query; traders are an aggregation. `/token` now shows
+   only the ranked one, refreshable in place — Top Traders came off the card in
+   session 40 along with the sample-depth problem it never solved.
+5. `/connected` reads plain transfers and nothing else. A swap moves value
+   between a wallet and a pool, so reading its legs made Meteora, Jupiter and
+   Raydium look like a trader's closest associates; the fix was upstream of the
+   scoring, not in it. What is left is a size bar, the structural exclusions,
+   and the wallet that funded the trader in the first place.
 
 ### Run these first on a fresh session
 
@@ -92,30 +102,35 @@ fomo.family egress (section 5). Its first real run is the open item, and
     The `tokens` parameter is an array by construction and the per-token
     retry covers a cap, but which one FOMO actually accepts is unknown until
     a live run (session 35).
-11. **Top Traders has never made a real request.** Every provider shape is
-    unit-tested from a recorded or documented body, but the Helius parsed
-    route (`/v0/addresses/{mint}/transactions`) and the descending
-    `alchemy_getAssetTransfers` scan have not been called live from this
-    project. The first `/token` + Top Traders on borz is what confirms them;
-    the card names the source it used in its footer, so a fallback is visible
-    rather than silent. Session 37 added a money path on top of the same
-    responses — Solana's quote legs come free with the page, the EVM one costs
-    a venue query — and none of it has been called live either. The card
-    reports how many rows it could price, so an unpriced sample is visible.
-12. **`/connected` has never made a real request either**, and its two
-    numbers most in need of a live calibration are `POOL`-style exclusion and
-    `CONNECTED_HIGH_DEGREE` (40). Run it on a handle with a known second
-    wallet before trusting the bands.
-13. **Cross-chain evidence is identity-based only.** `link_cross_chain` fires
-    when the *same cached identity* is a candidate on two chains. Bridge
-    tracing — following a deposit on one chain to a withdrawal on another —
-    is not implemented, and should not be until a route can prove the pairing
-    rather than infer it from timing.
-14. **`/connected` prices only SOL, native EVM coins and stablecoins.** Every
-    other asset is counted as an unpriced transfer, so a relationship carried
-    entirely in memecoins earns the repetition and longevity signals but never
-    the value one. Pricing historical transfers properly needs a historical
-    price source the project does not have.
+11. **Top Traders is no longer on `/token`** (session 40). `token_traders.py`
+    and `token_traders_diag.py` still work from the command line and are still
+    driven by the `TOKEN_TRADER_*` keys, but neither has ever made a real
+    request: the Helius parsed route (`/v0/addresses/{mint}/transactions`) and
+    the descending `alchemy_getAssetTransfers` scan have not been called live
+    from this project, and neither has the cost-basis path session 37 added on
+    top of them.
+12. **`/connected` has never made a real request either**, and session 40
+    rewrote it. Two things a live run has to settle: whether Helius types a
+    FOMO wallet's own sends as `TRANSFER` (they are gas-sponsored on Solana
+    and ERC-4337 on EVM — if the sponsor wraps them in something typed
+    differently, `is_plain_transfer` is *too* strict and the card comes back
+    empty), and whether `CONNECTED_FUNDING_PAGES` (2000 transactions) reaches
+    the first transaction of a typical FOMO wallet. Run it on a handle with a
+    known second wallet. `CONNECTED_HIGH_DEGREE` (40) still wants calibrating.
+13. **EVM has no swap filter.** `alchemy_getAssetTransfers` carries no
+    transaction type, so pools and routers there are held off by the label
+    list, contract code, the degree probe and the $200 floor alone. A FOMO
+    smart wallet is itself a contract, so contract code is a caution rather
+    than an exclusion, and an unlabelled EVM pool moving $200+ could still
+    surface. Cross-chain linking was dropped with the score bands; bridge
+    tracing was never implemented and should not be until a route can prove a
+    pairing rather than infer it from timing.
+14. **`/connected` prices only SOL, native EVM coins and stablecoins**, and
+    since session 40 it *drops* everything else rather than counting it
+    unpriced — an asset that cannot be priced honestly cannot clear a value
+    bar. So a relationship carried entirely in memecoins is invisible.
+    Pricing historical transfers properly needs a historical price source the
+    project does not have.
 15. **The sponsor index reaches back under an hour** and shrinks as FOMO grows.
     Raising `MAX_SIG_PAGES` buys reach linearly; anchoring
     `getSignaturesForAddress` with a `before` signature taken from the block
@@ -138,6 +153,291 @@ fomo.family egress (section 5). Its first real run is the open item, and
     the card marks it `+`. Covering those properly needs a different route
     than paging from the head — a Helius webhook or a stored index — and is
     not worth building until a real token demands it.
+19. **Hyperliquid holders rank within hl.eco's top 500 candidates.** The API
+    ranks the leading 500 addresses of its transfer-delta index and reads
+    *those* balances on-chain; `page.reachable` says so on every response. For
+    a top 50 that is exact, and `holderCount` (2,523 on the test token) is
+    still the true total — but a query that needed the whole distribution
+    would need a different route.
+20. **`/token` on Hyperliquid has holders and nothing else.** Holder identity
+    there is bare addresses: `NETWORK_IDS` has no Hyperliquid entry
+    because fomo.family does not carry the chain, so the FOMO naming pass is
+    skipped rather than failed. Pump identity is Solana-keyed and does not
+    apply either.
+21. **`hyperliquid_holders_probe.py` was written against live responses read
+    through a browser, not run from the venv.** The parse is unit-tested
+    against the recorded shape; what has not been proven from Python is that
+    hl.eco's CDN answers an `httpx` client — which is exactly why the probe
+    prints the HTTP status of that first call before anything else.
+
+## Session 40 — a swap is not a connection
+
+Three changes to the command surface, all of them subtractive in spirit.
+
+### `/token` — Top Traders removed, Refresh added
+
+Top Traders is gone from the card. `TokenCardView` is now Previous / Next /
+**🔄 Refresh**, and everything that rendered a trader row -- `_trader_rows`,
+`_trader_identity`, `_trader_metrics`, `_trader_flags`, `_entry_column`,
+`_token_traders_embed`, `_token_trader_embeds`, `_token_empty_traders_embed`,
+`_sample_window`, `_token_supply`, `RANK_LABELS`, `_fmt_signed_usd`,
+`_fmt_roi`, `_fmt_compact_usd` -- came out with it. The sample-depth problem
+from sessions 37-38 goes with them.
+
+`token_traders.py`, `token_intelligence.top_traders()` and
+`token_traders_diag.py` are **left in place and still work**; they are simply
+no longer wired to a Discord command. The `TOKEN_TRADER_*` keys still drive the
+diagnostic tool, and `.env.example` now says so.
+
+Refresh re-runs `_render_token_card()`, which is the whole of what `/token`
+does -- Dexscreener, the holder query, the FOMO/Pump identity labelling -- and
+swaps the entire page set for the new one. The reader keeps their page (clamped
+if the new list is shorter). Three guards:
+
+* a **15s cooldown** (`TOKEN_REFRESH_COOLDOWN`), because anybody in the channel
+  can press it and the rebuild costs provider requests
+* a **lock**, so two presses cannot run the query twice
+* a **failed or empty rebuild leaves the card alone** and answers ephemerally.
+  Stale holders beat an error card replacing data that still reads fine.
+
+Identity caches are deliberately *not* bypassed on refresh: a wallet's handle
+does not go stale the way a holder list does, and re-asking Pump for fifty
+profiles is the expensive half.
+
+The footer now carries `embed.timestamp`, so Discord renders "read"/"refreshed"
+at whatever time the reader is in.
+
+### `/connected` — rewritten around what actually counts
+
+The complaint that started this: `/connected` was reporting **Meteora, Jupiter
+and Raydium as connected wallets**. It was not a bug in the filtering. It was
+the input. Helius parsed history was read whole, so every swap contributed a
+"transfer" between the trader and a liquidity pool, and a trader who swaps
+daily produces exactly the pattern the scorer was built to reward: dozens of
+transfers, both directions, spread over months, high value. The pool then
+outranked the trader's real associates.
+
+Pools are not associates. So the parser now reads **only plain transfers**:
+
+```python
+def is_plain_transfer(entry):        # connected_wallets.py
+    entry["type"] == "TRANSFER"      # not SWAP / ADD_LIQUIDITY / NFT_SALE
+    and entry["source"] not in SWAP_SOURCES     # ~40 DEX / AMM sources
+    and not entry["events"]["swap"]             # belt and braces
+    and not entry["transactionError"]
+```
+
+and on top of that a **size bar**, because a 0.001 SOL gas top-up is not a
+relationship either:
+
+| chain | native | stablecoin |
+|---|---|---|
+| Solana | `CONNECTED_MIN_SOL` = **1 SOL** | `CONNECTED_MIN_STABLE` = **50** |
+| EVM | `CONNECTED_MIN_EVM_USD` = **$200** at current price | **50** |
+
+Anything that is neither the native coin nor a known stablecoin is dropped
+rather than counted unpriced — it cannot be priced honestly, so it cannot
+clear a value bar, so it is not evidence. (This is the one real loss: a
+relationship carried entirely in memecoins is now invisible. It was already
+scoring without a value signal before.)
+
+**Scores and bands are gone.** `score_relationship`, `rank_associations`,
+`link_cross_chain`, `BANDS`, `SCORE_*`, `MIN_TRANSFERS`, the Possible/strongest
+toggle and the `strict` flag are all deleted. `Association` became `Connection`
+(relationship + `funder` flag) and `rank_connections()` sorts by value moved,
+then transfer count, with the funder pinned to the top. The bar *is* the
+transfer rule now: one qualifying transfer is a connection, and the card shows
+the numbers so a reader can judge it themselves.
+
+What still excludes structurally, unchanged: the known-address list, Solana
+account type (`getMultipleAccounts` -- executable or non-system-owned is a
+program, a vault, a PDA or a token account), and the degree probe. The degree
+probe deliberately runs on **unfiltered** history (`min_sol=0, min_stable=0,
+skip_swaps=False`): a service is a service because of the swaps and dust it
+handles, not in spite of them.
+
+### The funding wallet
+
+New, and the thing most likely to be the answer somebody came for. It is
+**never value-gated** -- a wallet is usually opened with a fraction of a coin --
+and it is reported only when the lookup genuinely reached the wallet's first
+transaction. Three routes:
+
+1. **Solscan Pro**, when `SOLSCAN_API_KEY` is set. One request:
+   `/v2.0/account/transfer?flow=in&sort_by=block_time&sort_order=asc`. This is
+   the "oldest first" toggle on solscan.io, and it is the only route that
+   answers the question directly. Auth header is sent as both `token:` and
+   `Authorization: Bearer` because the public docs do not say which. A rejected
+   key or an unfamiliar shape returns `None` and falls through rather than
+   raising.
+2. **Helius, paged backwards** until the history runs out.
+   `getSignaturesForAddress` and the parsed-transaction route are both
+   newest-first with no ascending order, so reaching a wallet's first
+   transaction means reading every transaction it has.
+   `CONNECTED_FUNDING_PAGES` (20 = 2000 tx) is the ceiling; **hitting the
+   ceiling means the funder is reported as unknown**, with a note saying how
+   deep it got and to set a Solscan key. It never names the oldest thing it
+   happened to see.
+3. **EVM**: `alchemy_getAssetTransfers` takes `order: "asc"` directly, so the
+   first incoming transfer is one request.
+
+### Card
+
+`💰 Funding wallet` is its own field at the top of page one -- present even
+when nothing else cleared the bar, which is the common case for a pure swapper.
+Then the ranked list: identity, chain, qualifying transfer counts both ways,
+value moved both ways, first/latest/active dates. The evidence drawer stays
+(tx links plus what was counted). `strict` became `fresh`, which is what
+bypasses the cached run.
+
+An empty answer now names the reason rather than shrugging: *"No wallet cleared
+the transfer bar... buying and selling on Jupiter, Raydium or Meteora connects
+them to a pool, not to a person."*
+
+### Cache
+
+`ConnectedReport` changed shape, so cache keys are prefixed `CACHE_SCHEMA`
+(`v2`). Old v1 entries in `connected_cache.json` are never read back; they age
+out on TTL.
+
+### Files changed
+
+`fomo_bot.py`, `connected_wallets.py`, `test_fomo_response.py`,
+`test_connected_wallets.py`, `.env.example`, `HANDOFF.md`, `memory.md`.
+
+138 tests pass (`test_connected_wallets` 45, `test_fomo_response` 90,
+`test_token_intelligence`, `test_token_traders`).
+
+### Open after this session
+
+* **`/connected` has still never made a real request.** Sessions 36 and 39
+  said so and it is still true. The two things a live run has to confirm are
+  that Helius really types FOMO's own transfers `TRANSFER` (FOMO wallets are
+  ERC-4337 on EVM and sponsored on Solana — if the sponsor wraps sends in
+  something Helius types differently, the filter will be *too* strict and the
+  card will come back empty), and whether 2000 pages of walk-back reaches the
+  first transaction of a typical FOMO wallet.
+* **EVM has no swap filter.** There is no transaction type to read, so pools
+  and routers there are held off by the label list, contract code, degree and
+  the $200 floor alone. A FOMO smart wallet is itself a contract, so contract
+  code is a caution, not an exclusion — an unlabelled EVM pool could still
+  surface if it moves $200+ with a trader.
+* **A memecoin-only relationship is invisible.** Pricing historical transfers
+  needs a historical price source the project does not have.
+
+## Session 39 — Hyperliquid holders, and why pump.fun is not the source
+
+`/token` answered for Solana, Ethereum, Base, BSC and Robinhood and returned
+**zero holders** for every Hyperliquid token. The reason is structural rather
+than a bug: holders on EVM come from CMC or a Blockscout instance, and chain
+999 has neither. CMC has no `hyperevm` platform; no Blockscout deployment
+serves it (`hyperliquid.cloud.blockscout.com` is a 404 from an ingress
+default backend).
+
+The obvious lead was pump.fun. It has integrated Hyperliquid, and its coin page
+shows a holders panel with position, PnL and % supply for a HyperEVM token. So
+the panel was traced end to end in a real browser, on
+`0xb75d5ee14708e7efbea939311090061d72265608` (**EGG**, Hyperswap V3, $5.8M).
+
+### What pump.fun actually serves
+
+| route | for a `0x…` on chain 999 |
+|---|---|
+| `frontend-api-v3/coins/top-holders/{mint}` | `400 mint is not a valid base58 public key` |
+| `frontend-api-v3/token-holders/{addr}/count` | `404 Codex has no holder data for this token` |
+| `profile-api/pnl/coin/{addr}/holders` | `400 holders must be an array` — max 20, PnL enrichment only |
+| `frontend-api-v3/followed-holders/{addr}` | the *Following* tab, not the list |
+| `advanced-indexer/in-memory-coin/{addr}` | aggregates only: `numHolders`, `top10HoldersPercent` |
+
+Two findings settle it. First, their EVM holder provider is **Codex**, and
+Codex has no holder data for HyperEVM — that error is pump.fun's own words.
+Second, and more decisive: **a cold load of the coin page makes no holders
+request at all.** The panel labelled `Pump.fun (843)` is populated over
+`wss://multichain-prod.nats.realtime.pump.fun` and recomputed from the trade
+stream; its count moved 843 -> 838 during the session and the positions
+changed while being read. It is a *positions view of pump.fun's own users*,
+derived from trades, not a balance ranking of the token. Nothing there is a
+holder list, and the `/pnl/coin/{addr}/holders` route can only enrich a list
+you already have.
+
+The route strings came out of the page bundles rather than out of guessing —
+139 chunks fetched from page context and grepped for `holders`, which returned
+the four routes above and nothing else. That technique is worth keeping.
+
+### What answers instead
+
+`scan-api.hl.eco` — the API behind hyperscan.com, the HyperEVM explorer.
+
+```
+GET https://scan-api.hl.eco/api/token/{address}/holders?limit=50
+```
+
+```jsonc
+{ "address": "0xb75d…", "decimals": 18, "symbol": "EGG",
+  "totalSupply": "1000000000000000000000000000",
+  "holderCount": 2523,
+  "holderCountNote": "holders with a positive net balance in the transfer-delta index",
+  "holders": [ { "holder": "0x4fe775d1…", "balance": "24568705968933937780679279",
+                 "pct": 2.4568705968, "valueUsd": null,
+                 "holder_label": null, "holder_category": null } ],
+  "page": { "page": 1, "limit": 50, "reachable": 500, "hasMore": true } }
+```
+
+It indexes Transfer events and then **reads the leading candidates' balances
+on-chain**, which is the difference between a holder list and a positions
+guess. `limit` and `page` both work (200 rows in one call were served); an
+address the index has never seen answers `200` with nulls rather than a 404,
+so every field is optional in the parse.
+
+**The cross-check that decided it.** hl.eco's top row for EGG holds 2.4568% of
+supply. Pump.fun's own panel shows `Dior100x` at 2.46%. Same wallet, two
+independent paths — one a balance ranking, one a trade-derived position — so
+the source is not merely plausible, it agrees with the site that motivated the
+question.
+
+### What shipped
+
+| file | change |
+|---|---|
+| `token_intelligence.py` | `hyperevm` / `hyperliquid` -> `Hyperliquid` in `CHAIN_NAMES`; new `_hyperevm_holders()`; one more branch in `_holders()` |
+| `fomo_bot.py` | one line: `Hyperliquid` -> `hyperscan.com/address/` in `_holder_explorer` |
+| `test_token_intelligence.py` | three tests off the recorded payload shape |
+| `hyperliquid_holders_probe.py` | **new** — chain detection, raw payload, what `/token` renders, `--verify` |
+| `.env.example` | `HYPEREVM_HOLDERS_API`, `HYPEREVM_HOLDERS_UA`, `HYPEREVM_RPC` |
+
+Balances are scaled by the **decimals on the payload**, not an assumed 18, and
+`pct` is used as given with the payload's own supply as the fallback for a row
+that lacks it. A row whose `holder` is not a valid address is dropped rather
+than rendered as an unlinkable line. DEX Screener calls the chain `hyperevm`;
+pump.fun calls the same token `eip155:999`; both map to `Hyperliquid`, which is
+what the card says and what `_holder_explorer` keys on.
+
+### Verifying it
+
+```powershell
+python hyperliquid_holders_probe.py 0xb75d5ee14708e7efbea939311090061d72265608 --limit 10 --verify
+```
+
+Four stages, in order of what fails first: DEX Screener's `chainId` (expects
+`hyperevm`), the raw hl.eco payload with its HTTP status printed, the exact
+list `/token` will render through `TokenIntelligenceClient.lookup()`, and then
+`--verify`, which calls `balanceOf` for the top five straight off the HyperEVM
+RPC and flags any row that drifts more than 1% from the API's number. That last
+stage is what turns "the API said so" into "the chain says so"; a `DRIFT` row
+means the holder traded between the two reads or the index is stale, and a
+repeat run tells you which.
+
+Then `/token 0xb75d5ee14708e7efbea939311090061d72265608` in Discord.
+
+### Environment note
+
+Section 5's constraint held again and shaped the whole session: neither the
+Cowork sandbox nor the desktop VM has egress to the Alchemy Hyperliquid RPC or
+to pump.fun (both return `000` at the proxy). Every live read here was made
+**through Johan's own Chrome**, from page context, and every parse was then
+tested offline against the recorded shape. It is a workable pattern for
+discovery — DevTools is a network transport when the sandbox is not — but it
+means the Python path itself is still unproven until the probe runs on borz.
 
 ## Session 38 — the ranking was right, the sample was not
 
