@@ -5,6 +5,33 @@ keeps its own SQLite DB, polls Dexscreener for live peaks, serves a dark web UI.
 
 Full design: see `../DASHBOARD_DESIGN.md`.
 
+## Wallet Groups
+
+`#/wallets` tracks a set of wallets together and shows only the memecoins that
+**two or more of them hold right now** — who is in, how much supply each
+controls, and what each one is up or down. A card appears the moment a second
+tracked wallet is in a token and is removed the moment the count drops below
+two, so the page reads as a live signal feed rather than a table.
+
+- `wallets.py` — providers only: Solana positions over `getTokenAccountsByOwner`,
+  EVM positions over Etherscan's Pro balance endpoint or a free `balanceOf`
+  scan of tokens the dashboard already knows, prices from Dexscreener, and
+  average entry from Solscan swap history.
+- `wgroups.py` — the tables, the two loops and `/api/wgroups/*`. Idle and free
+  until a group exists.
+
+Cost basis is hybrid on purpose. A position opened while the dashboard was
+watching is exact. A position that predates tracking is reconstructed from the
+wallet's swap history when Solscan can answer, and otherwise shows `—` rather
+than a made-up entry — every number on a card says where it came from (hover
+the average-entry cell).
+
+Check the providers on the machine that runs it:
+
+```bash
+python3 tools/diag_wallet_groups.py <wallet> [<token>]
+```
+
 ## One-time VPS setup
 
 ```bash
@@ -38,6 +65,23 @@ python -m uvicorn main:app --port 8080
 - `DASH_PASSWORD` — enables HTTP Basic auth (any username). Unset = open.
 - `HISTORY_FILE` — path to ca_history.json (default `../data/ca_history.json`)
 - `DASH_DB` — path to SQLite DB (default `dashboard/data/dash.db`)
+
+Wallet Groups reads a few more, and finds them on its own: real environment
+variables win, then `dashboard/.env`, then `../fomo/.env`, then `../.env` —
+which is where `SOLANA_RPC`, `SOLSCAN_API_KEY` and `ETHERSCAN_API_KEY` already
+live on the VPS. Nothing is required; without keys the page falls back to
+public RPCs and observed cost basis.
+
+- `SOLANA_RPC`, `SOLANA_RPC_FALLBACKS` — Helius etc. for wallet positions
+- `SOLSCAN_API_KEY` — real average entry from a wallet's swap history
+- `ETHERSCAN_API_KEY` — EVM token balances (Pro plans only) and EVM history
+- `EVM_RPC_ETHEREUM|BASE|BSC|…` — override the public RPCs used for balances
+- `WG_CHAIN_ID_<CHAIN>` — numeric chain id for a chain not built in, e.g.
+  `WG_CHAIN_ID_ROBINHOOD=…` together with `EVM_RPC_ROBINHOOD` adds Robinhood
+  Chain to the scan with no code change
+- `WG_HOLDINGS_INTERVAL` (45), `WG_PRICE_INTERVAL` (15) — seconds
+- `WG_MIN_POSITION_USD` (1) — below this a wallet does not count as holding
+- `WG_EVM_BASIS=1` — reconstruct EVM average entry from Etherscan (approximate)
 
 ## Notes
 

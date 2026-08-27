@@ -22,6 +22,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
+import wallets  # noqa: F401  (loads .env for the wallet providers)
+import wgroups
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -45,7 +47,7 @@ CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
 HIT_CEIL = 1000.0             # winning multiple that maps to 100% Hit Rate
-VERSION = "1.35"              # bump together with VERSION in static/app.js
+VERSION = "1.36"              # bump with app.js VERSION + ?v= in index.html and app.js
 
 # ---------------------------------------------------------------- database
 
@@ -170,10 +172,10 @@ def ingest_history() -> int:
 _subscribers: set = set()  # asyncio.Queues of connected /api/stream clients
 
 
-def _notify_subscribers():
+def _notify_subscribers(msg: str = "new"):
     for q in list(_subscribers):
         if q.qsize() < 2:  # don't pile up events on slow clients
-            q.put_nowait("new")
+            q.put_nowait(msg)
 
 
 async def ingest_loop():
@@ -426,14 +428,18 @@ def leaderboard(rows, key, display=None):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    wgroups.configure(db, lambda: _notify_subscribers("wg"))
+    wgroups.init_schema()
     ingest_history()
-    t1 = asyncio.create_task(ingest_loop())
-    t2 = asyncio.create_task(peak_loop())
+    tasks = [asyncio.create_task(ingest_loop()), asyncio.create_task(peak_loop())]
+    wgroups.start(tasks)   # wallet-group holdings + price loops (no-ops until a group exists)
     yield
-    t1.cancel(); t2.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
+app.include_router(wgroups.router)
 
 
 @app.middleware("http")

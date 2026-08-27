@@ -125,6 +125,125 @@ th.num{text-align:right}
 .hide-btn:hover{color:var(--red);background:var(--bg3)}
 .showall-btn{cursor:pointer;color:var(--accent)}
 .showall-btn:hover{text-decoration:underline}
+
+/* ---------------- Wallet Groups ---------------- */
+.wg-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.wg-primary{background:var(--accent);border:1px solid var(--accent);color:#fff;border-radius:7px;
+  padding:6px 14px;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:600}
+.wg-primary:hover{filter:brightness(1.12)}
+.wg-primary:disabled{opacity:.5;cursor:default}
+.wg-ghost{background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:7px;
+  padding:6px 12px;cursor:pointer;font-family:inherit;font-size:12.5px}
+.wg-ghost:hover{color:var(--text);border-color:var(--border2)}
+.wg-ghost.danger{color:var(--red);border-color:var(--red)}
+.wg-live{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--dim);font-size:11.5px}
+.wg-live .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+.wg-live.busy .dot{background:var(--amber)}
+.wg-summary{font-size:14px;color:var(--muted)}
+.wg-summary b{color:var(--text);font-weight:650}
+.wg-summary .sep,.wg-foot .sep{color:var(--dim);margin:0 3px}
+.wg-summary .muted,.wg-none .muted{color:var(--dim)}
+.wg-notes{color:var(--dim);font-size:11.5px;margin-top:5px}
+.wg-notes .warn{color:var(--amber)}
+.wg-controls{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin:14px 0 16px;
+  padding-bottom:14px;border-bottom:1px solid var(--border)}
+.wg-lab{color:var(--muted);font-size:12px;display:flex;gap:7px;align-items:center}
+.wg-pills{display:flex;gap:4px}
+.wg-pills button{background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:6px;
+  padding:4px 11px;cursor:pointer;font-family:inherit;font-size:12px}
+.wg-pills button:hover{color:var(--text)}
+.wg-pills button.on{color:var(--text);border-color:var(--accent);background:rgba(124,108,255,.14)}
+
+.wg-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:14px;align-items:start}
+@media(max-width:980px){.wg-cards{grid-template-columns:1fr}}
+.wg-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px;
+  transition:opacity .4s ease,transform .4s ease,border-color .3s,box-shadow .3s}
+.wg-card:hover{border-color:var(--border2)}
+/* a token that just crossed two wallets arrives like an alert, not a table row */
+@keyframes wgIn{0%{opacity:0;transform:translateY(16px) scale(.965)}60%{opacity:1}100%{opacity:1;transform:none}}
+.wg-card.wg-in{animation:wgIn .5s cubic-bezier(.2,.8,.25,1);border-color:var(--accent);
+  box-shadow:0 0 0 1px rgba(124,108,255,.35),0 10px 34px rgba(124,108,255,.16)}
+.wg-card.wg-out{opacity:0;transform:scale(.96) translateY(-8px);pointer-events:none}
+@keyframes wgTick{0%{box-shadow:0 0 0 1px rgba(124,108,255,.45)}100%{box-shadow:0 0 0 1px transparent}}
+.wg-card.wg-tick{animation:wgTick .9s}
+
+.wg-head{display:flex;gap:11px;align-items:flex-start}
+.wg-logo{width:40px;height:40px;border-radius:10px;flex-shrink:0;background:var(--bg3);object-fit:cover}
+.wg-logo-x{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:13px;font-weight:700}
+.wg-id{min-width:0;flex:1}
+.wg-title{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+.wg-title a{font-size:16px;font-weight:700}
+.wg-title a:hover{color:var(--accent)}
+.wg-sub{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
+.wg-new{background:rgba(63,221,143,.14);border:1px solid rgba(63,221,143,.5);color:var(--green);
+  border-radius:5px;padding:0 6px;font-size:9.5px;font-weight:700;letter-spacing:.6px;animation:pulse 1.6s infinite}
+.wg-ca{display:flex;align-items:center;gap:6px;margin-top:3px;color:var(--dim);font-size:11.5px}
+.wg-copy,.wg-info{background:none;border:none;color:var(--dim);cursor:pointer;font-size:11.5px;padding:0 2px}
+.wg-copy:hover,.wg-info:hover{color:var(--accent)}
+.wg-count{margin-left:auto;text-align:right;flex-shrink:0;line-height:1.1}
+.wg-count b{font-size:26px;font-weight:750;color:var(--accent);font-variant-numeric:tabular-nums}
+.wg-count span{display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+
+.wg-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:12px 0 10px;padding:9px 0;
+  border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.wg-stats .k{display:block;font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.wg-stats .v{display:block;font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:2px}
+.wg-stats .v small{font-size:10.5px;font-weight:500;opacity:.8}
+.wg-stats .accent{color:var(--accent)}
+@media(max-width:620px){.wg-stats{grid-template-columns:repeat(2,1fr)}}
+
+.wg-tbl{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:12.5px}
+.wg-tbl th{font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;text-align:left;
+  padding:4px 6px;border-bottom:1px solid var(--border);cursor:default;white-space:nowrap}
+.wg-tbl th:hover{color:var(--muted)}
+.wg-tbl th.num,.wg-tbl td.num{text-align:right}
+.wg-tbl td{padding:6px;border-bottom:1px solid rgba(35,39,52,.55);white-space:nowrap;max-width:none}
+.wg-tbl tr:last-child td{border-bottom:none}
+.wg-tbl tr:hover td{background:var(--bg3)}
+.wg-tbl td small{font-size:10.5px;opacity:.75;margin-left:3px}
+.wg-wname{font-weight:600}
+.wg-waddr{color:var(--dim);font-size:10.5px;margin-left:6px}
+.wg-mark{color:var(--dim);font-size:10px;margin-left:3px}
+.wg-unknown{color:var(--dim);cursor:help;border-bottom:1px dotted var(--border2)}
+@keyframes wgRowIn{from{background:rgba(124,108,255,.22)}to{background:transparent}}
+.wg-tbl tr.wg-row-in td{animation:wgRowIn 2.2s}
+
+.wg-foot{margin-top:10px;padding-top:9px;border-top:1px solid var(--border);color:var(--muted);
+  font-size:11.5px;display:flex;gap:3px;align-items:baseline;flex-wrap:wrap}
+.wg-foot b{color:var(--text)}
+.wg-caveat{color:var(--amber);cursor:help}
+.wg-when{margin-left:auto;color:var(--dim);white-space:nowrap}
+
+.wg-empty{text-align:center;padding:46px 26px;max-width:580px;margin:36px auto}
+.wg-empty-mark{font-size:34px;color:var(--accent);opacity:.75}
+.wg-empty h2{font-size:17px;margin:10px 0 8px}
+.wg-empty p{color:var(--muted);font-size:13px;line-height:1.7;margin-bottom:18px}
+.wg-none{grid-column:1/-1;text-align:center;color:var(--muted);padding:40px;
+  border:1px dashed var(--border);border-radius:12px}
+
+.wg-modal{position:fixed;inset:0;z-index:100;background:rgba(6,7,10,.72);display:flex;
+  align-items:center;justify-content:center;padding:20px;animation:wgFade .18s}
+@keyframes wgFade{from{opacity:0}to{opacity:1}}
+.wg-panel{background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:18px;
+  width:min(640px,100%);max-height:86vh;overflow:auto;box-shadow:0 18px 60px rgba(0,0,0,.6)}
+.wg-panel h3{font-size:15px;margin-bottom:14px}
+.wg-field{display:block;margin-bottom:12px}
+.wg-field span{display:block;font-size:11px;color:var(--muted);margin-bottom:5px}
+.wg-field input,.wg-row input{width:100%}
+.wg-row{display:flex;gap:7px;margin-bottom:7px}
+.wg-row .wg-a{flex:2;min-width:0}
+.wg-row .wg-l{flex:1;min-width:0}
+.wg-x{background:var(--bg3);border:1px solid var(--border);color:var(--dim);border-radius:6px;
+  width:32px;flex-shrink:0;cursor:pointer}
+.wg-x:hover{color:var(--red);border-color:var(--red)}
+.wg-err{color:var(--red);font-size:12px;min-height:16px;margin-top:8px}
+.wg-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+
+/* Dexscreener chain ids, alongside the bot's short chain labels above */
+.badge.solana{color:#9d7cff;border-color:#3a2f5e}
+.badge.ethereum{color:#7cb6ff;border-color:#2b3e5e}
+.badge.bsc{color:#ffd45c;border-color:#5e4f1e}
+.badge.robinhood{color:#5cffb8;border-color:#1e5e43}
 </style>
 </head>
 <body>
@@ -137,6 +256,7 @@ th.num{text-align:right}
       <a href="#/groups" data-page="groups">Groups<span class="key">3</span></a>
       <a href="#/calls" data-page="calls">Explorer<span class="key">4</span></a>
       <a href="#/sources" data-page="sources">Sources<span class="key">5</span></a>
+      <a href="#/wallets" data-page="wallets">Wallet Groups<span class="key">6</span></a>
     </nav>
     <div class="health" id="health"><span class="dot"></span>connecting…</div>
   </aside>
@@ -164,6 +284,6 @@ th.num{text-align:right}
     <div id="view"><div class="loading">Loading…</div></div>
   </main>
 </div>
-<script type="module" src="/static/app.js?v=1.35"></script>
+<script type="module" src="/static/app.js?v=1.36"></script>
 </body>
 </html>

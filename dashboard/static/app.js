@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.35"; // bump together with VERSION in main.py
+const VERSION = "1.36"; // bump with VERSION in main.py + the two ?v= (index.html, wgroups.js below)
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -217,8 +217,17 @@ async function ovFeedRefresh() {
   } catch { /* keep last content */ }
 }
 
+/* Helpers handed to lazily-loaded pages. Passing them explicitly keeps the
+   import one-way — app.js imports the page, never the other way round. */
+const MD = { api, esc, ago, fmtMc, fmtPct, fmtMult, chainBadge, tokenIcon, tokenLink,
+             padre, table, get liveES() { return liveES; } };
+
 /* ---------------- pages ---------------- */
 const pages = {
+  async wallets() {
+    const mod = await import("./wgroups.js?v=1.36");
+    await mod.page(view, MD);
+  },
   async overview() {
     const d = await api("overview", { days: state.days, chain: state.chain });
     view.innerHTML = kpis(d) + `
@@ -406,7 +415,9 @@ async function profilePage(kind, name) {
 }
 
 /* ---------------- router ---------------- */
-const titles = { overview: "Overview", callers: "Best callers", groups: "Best groups", calls: "Call explorer", sources: "Scan sources", token: "Token", caller: "Caller profile", group: "Group profile" };
+const titles = { overview: "Overview", callers: "Best callers", groups: "Best groups", calls: "Call explorer", sources: "Scan sources", wallets: "Wallet Groups", token: "Token", caller: "Caller profile", group: "Group profile" };
+/* pages that bring their own controls — the global day/chain/search filters mean nothing there */
+const OWN_FILTERS = new Set(["wallets"]);
 
 async function render() {
   charts.forEach((c) => c.dispose()); charts.length = 0;
@@ -417,6 +428,7 @@ async function render() {
   const fn = pages[name] ?? pages.overview;
   $("title").textContent = titles[name] ?? "Overview";
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.page === name || (name === "overview" && a.dataset.page === "overview")));
+  ["f-days", "f-chain", "f-search"].forEach((id) => { $(id).style.display = OWN_FILTERS.has(name) ? "none" : ""; });
   view.innerHTML = `<div class="loading">Loading…</div>`;
   try { await fn(new URLSearchParams(queryPart ?? ""), arg); }
   catch (e) { view.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`; }
@@ -428,7 +440,7 @@ render();
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
   if (e.key === "/") { e.preventDefault(); $("f-search").focus(); }
-  const map = { 1: "#/", 2: "#/callers", 3: "#/groups", 4: "#/calls", 5: "#/sources" };
+  const map = { 1: "#/", 2: "#/callers", 3: "#/groups", 4: "#/calls", 5: "#/sources", 6: "#/wallets" };
   if (map[e.key]) location.hash = map[e.key];
 });
 
