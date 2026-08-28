@@ -55,7 +55,9 @@ async def main() -> int:
     line("ETHERSCAN_API_KEY", MASK(os.getenv("ETHERSCAN_API_KEY", "").strip()))
     line("EVM chains configured", ", ".join(W.evm_chains()) or "none")
     for chain in W.evm_chains():
-        line(f"  rpc:{chain}", W.rpc_display_name(W.evm_rpc(chain)) or "— none")
+        src = W.evm_rpc_source(chain)
+        line(f"  rpc:{chain}", f"{W.rpc_display_name(W.evm_rpc(chain)) or '— none'} "
+                               f"[{src or 'public default — no key configured'}]")
 
     async with httpx.AsyncClient(headers={"User-Agent": "memedash-diag/1.0"},
                                  follow_redirects=True) as client:
@@ -83,6 +85,20 @@ async def main() -> int:
             except Exception as e:
                 line("watchlist", f"unreadable ({e})")
             line("watchlist size", f"{len(watch)} known EVM tokens")
+
+            # The discovery provider, on its own, before the fallback chain —
+            # this is the line that says whether EVM can ever surface a token
+            # the bot has not already posted.
+            for chain in W.evm_chains():
+                raw = await W.alchemy_balances(client, wallet, chain)
+                if raw is None:
+                    line(f"  discover:{chain}",
+                         "unavailable — falls back to the watchlist, which can only "
+                         "confirm tokens this dashboard already knows")
+                else:
+                    line(f"  discover:{chain}",
+                         f"alchemy_getTokenBalances OK — {len(raw)} ERC-20 positions")
+
             decimals: dict[str, int] = {}
             for chain in W.evm_chains():
                 try:

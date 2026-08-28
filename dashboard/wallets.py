@@ -14,11 +14,16 @@ Providers, in the order they are tried:
                       wallet per chain. It is a Pro-plan action; if the key is
                       not entitled the provider retires itself for the life of
                       the process instead of spending a request per round.
-                   2. Watchlist scan — batched `eth_call balanceOf` over the
+                   2. `alchemy_getTokenBalances` on the chain's own RPC — every
+                      ERC-20 the wallet holds, on the free plan, over the URL
+                      eth_call already uses. This and Etherscan are the only
+                      two that DISCOVER; a plain RPC answers "method not found"
+                      and the chain drops to the watchlist for good.
+                   3. Watchlist scan — batched `eth_call balanceOf` over the
                       EVM tokens this dashboard already knows on that chain.
-                      Free, works on any public RPC, and discovers only tokens
-                      the bot has seen. The UI says so when this is the
-                      provider in use.
+                      Free, works on any public RPC, and CONFIRMS only tokens
+                      the bot has already seen — it can never surface a new
+                      one. The UI says so when this is the provider in use.
 
   Cost basis       Solana: Solscan `account/defi/activities` for that exact
                    (wallet, mint) pair — one request, and only for pairs that
@@ -183,33 +188,33 @@ def solana_rpcs() -> list[str]:
     return out
 
 
-def evm_rpc(chain_id: str) -> str:
-    """EVM RPC URL for a chain. Checks both EVM_RPC_* and fomo/* naming conventions.
-
-    Tries in order:
-      1. EVM_RPC_<CHAIN> (standard format)
-      2. <CHAIN>_RPC or <PREFIX>_RPC (fomo/.env format: ETHEREUM_RPC, ETH_RPC, BASE_RPC, etc.)
-      3. DEFAULT_EVM_RPC fallback (public free RPC)
-    """
-    # Try standard format first: EVM_RPC_ETHEREUM, EVM_RPC_BASE, etc.
-    url = os.getenv(f"EVM_RPC_{chain_id.upper()}", "").strip()
-    if url:
-        return url
-
-    # Try fomo/.env format: ETH_RPC, BASE_RPC, BSC_RPC, ETHEREUM_RPC, ROBINHOOD_RPC, etc.
-    for key in [f"{chain_id.upper()}_RPC", f"{_chain_prefix(chain_id)}_RPC"]:
-        url = os.getenv(key, "").strip()
-        if url:
-            return url
-
-    # Fall back to public RPC
-    return DEFAULT_EVM_RPC.get(chain_id, "")
-
-
 def _chain_prefix(chain_id: str) -> str:
     """Short prefix for a chain name. E.g. 'ethereum' -> 'ETH', 'base' -> 'BASE'."""
     prefixes = {"ethereum": "ETH", "base": "BASE", "bsc": "BSC", "robinhood": "ROBINHOOD"}
     return prefixes.get(chain_id.lower(), chain_id.upper())
+
+
+def evm_rpc_source(chain_id: str) -> str:
+    """Which env var supplies this chain's RPC — '' when nothing does.
+
+    Two naming conventions are in play on the VPS: this module's own
+    EVM_RPC_<CHAIN>, and fomo/.env's <PREFIX>_RPC (ETH_RPC, BASE_RPC, …),
+    which `load_env_files` above pulls into the environment. Returning the key
+    rather than the URL is what lets the diagnostics tool say where a value
+    came from without printing an API key.
+    """
+    for key in (f"EVM_RPC_{chain_id.upper()}",
+                f"{chain_id.upper()}_RPC",
+                f"{_chain_prefix(chain_id)}_RPC"):
+        if os.getenv(key, "").strip():
+            return key
+    return ""
+
+
+def evm_rpc(chain_id: str) -> str:
+    """EVM RPC URL for a chain, or the public default when none is configured."""
+    key = evm_rpc_source(chain_id)
+    return os.getenv(key, "").strip() if key else DEFAULT_EVM_RPC.get(chain_id, "")
 
 
 def evm_chain_ids() -> dict[str, int]:
@@ -375,6 +380,69 @@ async def evm_decimals(client, chain_id: str, tokens: list[str]) -> dict[str, in
     return out
 
 
+# Chains whose RPC does not implement `alchemy_getTokenBalances`. Populated on
+# the first "method not found" and never re-probed — a public endpoint is not
+# going to grow the method halfway through the process.
+_alchemy_retired: set[str] = set()
+
+
+async def alchemy_balances(client, wallet: str, chain_id: str,
+                           max_pages: int = 4) -> dict[str, int] | None:
+    """Every non-zero ERC-20 balance of one wallet: {token address -> raw amount}.
+
+    `alchemy_getTokenBalances` is answered by Alchemy on the very URL this
+    module already posts eth_calls to, on the free plan, in one request per
+    100 tokens. It matters because it is the only EVM provider here that
+    DISCOVERS: the watchlist scan can merely confirm tokens the dashboard has
+    already seen, so a wallet's position in a token the bot never posted is
+    invisible without this — which is exactly how an EVM wallet ends up
+    showing nothing at all while Solana wallets show cards.
+
+    None means "this endpoint cannot answer" — a plain RPC, or a network
+    failure — and the caller falls through to the watchlist scan. An empty
+    dict means the wallet genuinely holds no ERC-20 on this chain.
+    """
+    url = evm_rpc(chain_id)
+    if not url or chain_id in _alchemy_retired:
+        return None
+    out: dict[str, int] = {}
+    page_key = None
+    for _ in range(max(1, max_pages)):
+        params: list = [wallet, "erc20"]
+        if page_key:
+            params.append({"pageKey": page_key})
+        try:
+            r = await client.post(url, timeout=25, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "alchemy_getTokenBalances", "params": params})
+            r.raise_for_status()
+            payload = r.json() or {}
+        except Exception as e:          # transient: try again next round
+            log.debug(f"alchemy_getTokenBalances on {chain_id}: {e}")
+            return None
+        err = payload.get("error")
+        if err:
+            message = str((err or {}).get("message") or err)[:140]
+            if (err or {}).get("code") == -32601 or "not found" in message.lower() \
+                    or "not supported" in message.lower():
+                _alchemy_retired.add(chain_id)
+                log.info(f"alchemy_getTokenBalances unavailable on {chain_id} "
+                         f"({message}) — using the watchlist scan from here on")
+            else:
+                log.debug(f"alchemy_getTokenBalances on {chain_id}: {message}")
+            return None
+        result = payload.get("result") or {}
+        for row in result.get("tokenBalances") or []:
+            address = (row.get("contractAddress") or "").lower()
+            raw = _hex_int(row.get("tokenBalance"))
+            if address.startswith("0x") and raw > 0:
+                out[address] = raw
+        page_key = result.get("pageKey")
+        if not page_key:
+            break
+    return out
+
+
 async def evm_holdings(client, wallet: str, chain_id: str, watchlist: list[str],
                        decimals: dict[str, int]) -> tuple[list[dict], str]:
     """Positions of one EVM wallet on one chain. Returns (holdings, provider).
@@ -409,6 +477,19 @@ async def evm_holdings(client, wallet: str, chain_id: str, watchlist: list[str],
                      f"using the watchlist scan from here on")
         except Exception as e:
             log.debug(f"etherscan balances on {chain_id}: {e}")
+
+    # Full discovery over the chain's own RPC, when it can do it.
+    raw = await alchemy_balances(client, wallet, chain_id)
+    if raw is not None:
+        missing = [t for t in raw if t not in decimals]
+        if missing:
+            decimals.update(await evm_decimals(client, chain_id, missing))
+        out = [{"address": token, "chain_id": chain_id,
+                "amount": amount / (10 ** decimals.get(token, 18)),
+                "decimals": decimals.get(token, 18)}
+               for token, amount in raw.items()]
+        _mark(f"evm_holdings:{chain_id}", True, f"alchemy · {len(out)} positions")
+        return out, "alchemy"
 
     # Watchlist scan: balanceOf over the tokens we already know on this chain.
     tokens = [t for t in watchlist if t.startswith("0x")]
