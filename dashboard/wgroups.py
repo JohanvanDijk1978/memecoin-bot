@@ -256,15 +256,27 @@ async def _scan_wallet(client, wallet: dict, watchlists: dict, decimals: dict) -
     address, kind = wallet["address"], wallet["kind"]
     if kind == "sol":
         return await W.sol_holdings(client, address)
-    found: list[dict] = []
+    # wallet_holdings is keyed (wallet, token) — one contract address is one
+    # position, however many chains answer for it. The same address holding on
+    # several chains is normal, not an anomaly: deterministic deploys put a
+    # token at one address everywhere, and airdrop spam is blasted at the same
+    # address on every chain at once. Concatenating the chains instead of
+    # folding them is a UNIQUE constraint violation that aborts the entire
+    # scan round for every wallet, which is exactly what it did once discovery
+    # started returning real EVM positions. Keep the largest and drop the rest.
+    found: dict[str, dict] = {}
     for chain in watchlists:
         try:
             rows, _provider = await W.evm_holdings(client, address, chain,
                                                    watchlists[chain], decimals)
-            found += rows
         except Exception as e:
             log.debug(f"evm scan {address} on {chain}: {e}")
-    return found
+            continue
+        for h in rows:
+            best = found.get(h["address"])
+            if best is None or float(h["amount"]) > float(best["amount"]):
+                found[h["address"]] = h
+    return list(found.values())
 
 
 def _apply_holdings(wallet: str, found: list[dict], prices: dict, now: float,
@@ -287,6 +299,8 @@ def _apply_holdings(wallet: str, found: list[dict], prices: dict, now: float,
         seen = set()
         for h in found:
             token, amount = h["address"], float(h["amount"])
+            if token in seen:
+                continue          # one position per (wallet, token); never INSERT twice
             seen.add(token)
             prev = float(before[token]["amount"]) if token in before else 0.0
             if token in before:
