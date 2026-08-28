@@ -184,7 +184,32 @@ def solana_rpcs() -> list[str]:
 
 
 def evm_rpc(chain_id: str) -> str:
-    return os.getenv(f"EVM_RPC_{chain_id.upper()}", "").strip() or DEFAULT_EVM_RPC.get(chain_id, "")
+    """EVM RPC URL for a chain. Checks both EVM_RPC_* and fomo/* naming conventions.
+
+    Tries in order:
+      1. EVM_RPC_<CHAIN> (standard format)
+      2. <CHAIN>_RPC or <PREFIX>_RPC (fomo/.env format: ETHEREUM_RPC, ETH_RPC, BASE_RPC, etc.)
+      3. DEFAULT_EVM_RPC fallback (public free RPC)
+    """
+    # Try standard format first: EVM_RPC_ETHEREUM, EVM_RPC_BASE, etc.
+    url = os.getenv(f"EVM_RPC_{chain_id.upper()}", "").strip()
+    if url:
+        return url
+
+    # Try fomo/.env format: ETH_RPC, BASE_RPC, BSC_RPC, ETHEREUM_RPC, ROBINHOOD_RPC, etc.
+    for key in [f"{chain_id.upper()}_RPC", f"{_chain_prefix(chain_id)}_RPC"]:
+        url = os.getenv(key, "").strip()
+        if url:
+            return url
+
+    # Fall back to public RPC
+    return DEFAULT_EVM_RPC.get(chain_id, "")
+
+
+def _chain_prefix(chain_id: str) -> str:
+    """Short prefix for a chain name. E.g. 'ethereum' -> 'ETH', 'base' -> 'BASE'."""
+    prefixes = {"ethereum": "ETH", "base": "BASE", "bsc": "BSC", "robinhood": "ROBINHOOD"}
+    return prefixes.get(chain_id.lower(), chain_id.upper())
 
 
 def evm_chain_ids() -> dict[str, int]:
