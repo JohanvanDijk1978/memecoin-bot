@@ -151,6 +151,7 @@ export async function page(view, helpers) {
         <button class="wg-primary" id="wg-new">+ Create wallet group</button>
         <button class="wg-ghost wg-bell" id="wg-mute" title="Sound when a new convergence appears"></button>
         <button class="wg-ghost wg-hidden-chip" id="wg-hidden" hidden></button>
+        <button class="wg-ghost" id="wg-find" title="Wallets that keep showing up in this group's finds">Find wallets</button>
         <span class="wg-live" id="wg-live"><span class="dot"></span><span id="wg-live-t">connecting…</span></span>
       </div>
       <div class="wg-summary" id="wg-summary"></div>
@@ -187,6 +188,7 @@ export async function page(view, helpers) {
     if (!muted) ping.play().catch(() => {});   // also unlocks audio for later pings
   };
   document.getElementById("wg-hidden").onclick = () => openHidden(view);
+  document.getElementById("wg-find").onclick = () => openDiscover(view);
   document.getElementById("wg-new").onclick = () => openEditor(null, view);
   document.getElementById("wg-edit").onclick = () =>
     openEditor(groups.find((g) => g.id === active), view);
@@ -234,13 +236,14 @@ async function tick() {
 function draw(d, silent) {
   if (!d) return;
   const s = d.summary;
-  const shown = (d.tokens ?? []).filter((t) => t.holders_n >= minWallets);
+  const shown = (d.tokens ?? []).filter((t) => t.cooling || t.holders_n >= minWallets);
 
   /* Ping on a genuinely new convergence. Judged against d.tokens rather than
      the filtered list, so moving the "held by at least" pill never makes a
      noise — only the wallets buying something new does. */
-  const arrivals = (d.tokens ?? []).filter((t) => !announced.has(t.address));
-  (d.tokens ?? []).forEach((t) => announced.add(t.address));
+  const liveTokens = (d.tokens ?? []).filter((t) => !t.cooling);
+  const arrivals = liveTokens.filter((t) => !announced.has(t.address));
+  liveTokens.forEach((t) => announced.add(t.address));
   if (primed && !silent && arrivals.length && !muted) ping.play().catch(() => {});
   primed = true;
 
@@ -255,6 +258,7 @@ function draw(d, silent) {
     <b>${s.wallets}</b> wallet${s.wallets === 1 ? "" : "s"} tracked
     <span class="sep">·</span> <b>${d.tokens.length}</b> shared memecoin${d.tokens.length === 1 ? "" : "s"} detected
     <span class="sep">·</span> <b class="${s.new_1h ? "pos" : ""}">${s.new_1h}</b> new in the last hour
+    ${s.cooling_n ? `<span class="sep">·</span> <span class="wg-cool-n">${s.cooling_n} cooling</span>` : ""}
     ${minWallets > 2 ? `<span class="sep">·</span> <span class="muted">${shown.length} shown at ${minWallets}+ wallets</span>` : ""}
     ${s.min_position_usd ? `<span class="sep">·</span> <span class="muted" title="A wallet only counts as holding a token above this value — set WG_MIN_POSITION_USD to change it">positions under ${money(s.min_position_usd)} ignored</span>` : ""}`;
 
@@ -305,6 +309,7 @@ function draw(d, silent) {
 
 function applyOrder() {
   const ranked = [...cards.values()].sort((a, b) => {
+    if (!!a.data.cooling !== !!b.data.cooling) return a.data.cooling ? 1 : -1;
     const va = sortValue(a.data), vb = sortValue(b.data);
     for (let i = 0; i < Math.max(va.length, vb.length); i++) {
       const x = (vb[i] ?? 0) - (va[i] ?? 0);
@@ -330,6 +335,22 @@ function paint(el, t, prev) {
   el.classList.toggle("has-art", !!art);
   el.classList.toggle("art-logo", !t.banner && !!t.image);
 
+  el.classList.toggle("wg-cooling", !!t.cooling);
+  const exits = t.exits ?? [];
+  /* An exit is the other half of the signal. A live card that lost a holder
+     says so inline; a card that fell below two wallets stops being a signal and
+     becomes a report of who left, for as long as the cooling window lasts. */
+  const exitLines = exits.length ? `
+    <div class="wg-exits">
+      ${exits.map((x) => `<div class="wg-exit">
+         <span class="wg-exit-mark">↘</span>
+         <b>${esc(x.label)}</b> sold out
+         <span class="mono wg-waddr">${esc(x.short)}</span>
+         <span class="wg-exit-when">${MD.ago(x.exited_at)}${
+           x.last_value ? ` · was ${money(x.last_value)}` : ""}</span>
+       </div>`).join("")}
+    </div>` : "";
+
   el.innerHTML = `
     <button class="wg-dismiss" title="Dismiss — hide this token from the group for good">✕</button>
     <header class="wg-head">
@@ -339,7 +360,8 @@ function paint(el, t, prev) {
         <div class="wg-title">
           <a href="${MD.padre(t.address, t.chain_id)}" target="_blank" rel="noopener">$${esc(t.symbol || "?")}</a>
           <span class="wg-sub">${esc(t.name || "")}</span>
-          ${fresh ? `<span class="wg-new">NEW</span>` : ""}
+          ${t.cooling ? `<span class="wg-cool">COOLING</span>`
+            : fresh ? `<span class="wg-new">NEW</span>` : ""}
         </div>
         <div class="wg-ca">
           <span class="mono" title="${esc(t.address)}">${esc(shortCa(t.address))}</span>
@@ -353,6 +375,11 @@ function paint(el, t, prev) {
       </div>
     </header>
 
+    ${t.cooling ? `<div class="wg-cool-note">
+        Dropped below ${t.wallets_total > 1 ? "two" : "one"} tracked wallets ${MD.ago(t.ended_at)}
+        — leaving the page shortly.</div>` : ""}
+    ${exitLines}
+
     <div class="wg-stats">
       <div><span class="k">Price</span><span class="v">${fmtPrice(t.price)}</span></div>
       <div><span class="k">Market cap</span><span class="v">${MD.fmtMc(t.mc)}</span></div>
@@ -362,6 +389,11 @@ function paint(el, t, prev) {
         known ? `${signed(t.pnl_usd)} <small>${signedPct(t.pnl_pct)}</small>` : "—"}</span></div>
     </div>
 
+    ${t.cooling ? (t.wallets.length ? `
+      <div class="wg-still">Still in: ${t.wallets.map((w) =>
+        `<b>${esc(w.label)}</b> <span class="muted">${money(w.value_usd)}</span>`).join(", ")}
+        <span class="muted">(last seen values)</span></div>`
+      : `<div class="wg-still muted">No tracked wallet holds this any more.</div>`) : `
     <table class="wg-tbl">
       <thead><tr>
         <th>Wallet</th><th class="num">Supply held</th><th class="num">Amount</th>
@@ -380,7 +412,7 @@ function paint(el, t, prev) {
             ? `${signed(w.pnl_usd)} <small>${signedPct(w.pnl_pct)}</small>`
             : `<span class="wg-unknown" title="${esc(BASIS_NOTE[w.basis] ?? "")}">—</span>`}</td>
         </tr>`).join("")}</tbody>
-    </table>
+    </table>`}
 
     <footer class="wg-foot">
       Combined: <b>${pctText(t.supply_pct)}</b> of supply held
@@ -411,6 +443,103 @@ function paint(el, t, prev) {
     el.classList.add("wg-tick");
     setTimeout(() => el.classList.remove("wg-tick"), 900);
   }
+}
+
+/* ---------------- wallet discovery ---------------- */
+function openDiscover(view) {
+  const overlay = document.createElement("div");
+  overlay.className = "wg-modal";
+  overlay.innerHTML = `
+    <div class="wg-panel wg-wide" role="dialog" aria-label="Suggested wallets">
+      <h3>Wallets worth adding</h3>
+      <p class="wg-note">Addresses that keep turning up in the tokens this group converges on,
+         but are not tracked yet. <b>Recurrence is the signal</b> — one shared trade is a
+         coincidence, the same stranger in three of your finds is not.</p>
+      <div id="wg-dbody"><div class="loading">Loading candidates…</div></div>
+      <div class="wg-actions">
+        <button class="wg-ghost" id="wg-rescan">Scan again</button>
+        <button class="wg-primary" id="wg-dclose">Done</button>
+      </div>
+    </div>`;
+  document.body.append(overlay);
+
+  const close = () => { clearInterval(poll); overlay.remove(); };
+  overlay.querySelector("#wg-dclose").onclick = close;
+  overlay.onclick = (e) => { if (e.target === overlay) close(); };
+  overlay.querySelector("#wg-rescan").onclick = async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "Scanning…";
+    await fetch(`/api/wgroups/${active}/discover`, { method: "POST" });
+    setTimeout(() => load(), 1500);
+  };
+
+  const body = overlay.querySelector("#wg-dbody");
+  const poll = setInterval(() => { if (overlay.isConnected) load(); }, 6000);
+
+  async function load() {
+    let d;
+    try { d = await MD.api(`wgroups/${active}/candidates`); }
+    catch { body.innerHTML = `<div class="wg-none">Could not load candidates.</div>`; return; }
+
+    const rescan = overlay.querySelector("#wg-rescan");
+    rescan.disabled = d.scanning;
+    rescan.textContent = d.scanning ? "Scanning…" : "Scan again";
+
+    /* Say where the numbers came from. Holder-list mode has no PnL and no
+       entry time, and a blank column with no explanation reads as a bug. */
+    const note = d.provider?.source === "holders"
+      ? `<div class="wg-dnote">ⓘ ${esc(d.provider.note)} — candidates are ranked by how often
+           they appear, without profit or entry-time evidence.</div>`
+      : d.provider?.ok === false
+        ? `<div class="wg-dnote warn">ⓘ ${esc(d.provider.note ?? "discovery unavailable")}</div>` : "";
+
+    if (!d.candidates.length) {
+      body.innerHTML = note + `<div class="wg-none">
+        ${d.scanning ? "Scanning your convergences…"
+          : d.scanned_at ? `Nothing recurs across ${d.min_convergences}+ of this group's convergences yet.`
+            : "No scan has run yet — press Scan again."}
+        <div class="muted">A wallet has to show up in ${d.min_convergences} different finds to be suggested.</div>
+      </div>`;
+      return;
+    }
+
+    body.innerHTML = note + `<table class="wg-dtbl">
+      <thead><tr><th>Wallet</th><th class="num">In</th><th>Convergences</th>
+        <th class="num">PnL</th><th class="num">Early</th><th></th></tr></thead>
+      <tbody>${d.candidates.map((c) => `
+        <tr data-w="${esc(c.wallet)}">
+          <td><span class="mono" title="${esc(c.wallet)}">${esc(shortCa(c.wallet))}</span></td>
+          <td class="num"><b class="accent">${c.convergences}</b></td>
+          <td class="wg-dtok">${c.tokens.map((t) =>
+            `<span class="wg-dtag ${t.early ? "early" : ""}" title="${
+              t.early ? "Among the first buyers" : "Traded this token"}">$${esc(t.symbol)}</span>`).join("")}</td>
+          <td class="num ${cls(c.pnl_usd)}">${c.pnl_usd == null ? "—" : signed(c.pnl_usd)}</td>
+          <td class="num">${c.early_n ? `${c.early_n}×` : "—"}</td>
+          <td class="num"><button class="wg-ghost wg-add-cand">Add</button></td>
+        </tr>`).join("")}</tbody></table>`;
+
+    body.querySelectorAll(".wg-add-cand").forEach((b) => b.onclick = async () => {
+      const row = b.closest("tr");
+      const label = prompt("Label for this wallet", shortCa(row.dataset.w));
+      if (label === null) return;         // cancelled
+      b.disabled = true; b.textContent = "…";
+      try {
+        const r = await fetch(`/api/wgroups/${active}/wallets`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address: row.dataset.w, label }),
+        });
+        if (!r.ok) throw new Error((await r.json()).detail ?? "could not add");
+        row.remove();
+        await loadGroups();               // the group grew: refresh the picker
+        tick();
+      } catch (e) {
+        b.disabled = false; b.textContent = "Add";
+        body.querySelector(".wg-dnote-err")?.remove();
+        body.insertAdjacentHTML("afterbegin", `<div class="wg-dnote warn wg-dnote-err">${esc(e.message)}</div>`);
+      }
+    });
+  }
+  load();
 }
 
 /* ---------------- dismissed tokens ---------------- */

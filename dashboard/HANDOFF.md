@@ -1,5 +1,101 @@
 # memedash — handoff (2026-08-28)
 
+## v1.38 — alerts, exits, and wallet discovery
+
+Three features, all interviewed rather than assumed. The decisions and their
+reasons are in project memory (`project_wg_v138.md`); this is what shipped.
+
+### 1. Telegram DM on a new convergence
+
+`dashboard/alerts.py` is `src/send_ping.py` rewritten on httpx — the dashboard
+sends its own DMs rather than routing through the bot, because both processes
+already read the same `../.env` and inventing IPC between them would buy
+nothing. Alerts go to `YOUR_TELEGRAM_USER_ID` only, never to
+`TELEGRAM_ALERT_GROUP`: a convergence should not compete with the CA firehose.
+Override the destination with `WG_ALERT_CHAT`, or turn the whole thing off with
+`WG_ALERTS=0`.
+
+**Dedupe is by milestone, not by clock.** `wgroup_alerts` stores the highest
+wallet count already announced per token, so 2 wallets alerts once, 3 alerts
+once, and a wallet that sells and rebuys back to the same count is silent
+forever — while a genuine 2→3→4 climb in ten minutes still sends all three. A
+dismissed token never alerts. The message is the bot's Markdown ping shape plus
+a line per wallet, sent as a photo using the v1.37 banner with a text fallback,
+because a dead banner URL must not cost the alert.
+
+If the DMs are silent the page says why, in its notes line — that check is
+`A.status()`, and it beats reading the journal.
+
+### 2. Cooling cards
+
+A card no longer vanishes when the count drops below two. `wgroup_seen` gained
+`ended_at`, and the token lingers for `WG_COOL_SECONDS` (900) as a dimmed card
+that names who sold, when, and what they were holding. **Exits are page-only —
+no DM.** Arrivals ping; departures do not.
+
+Membership is tracked in `wgroup_members` and diffed every round; a wallet that
+leaves is written to `wgroup_exits` and appears on the card. Live cards carry
+their recent exits too, so a token at 3 wallets that just lost its 4th says so
+without waiting to break.
+
+**Full exits only, by choice**: a wallet is "out" when it falls below the $50
+floor. No partial-sell flagging.
+
+**The bug this feature exposed, and the rule it leaves behind:** the membership
+diff originally read `_convergences`, which applies the 2-wallet threshold. When
+a token fell to one holder it left that list entirely, and the diff concluded
+the *remaining* holder had sold — a card would have announced "Whale A sold
+out" while Whale A was still in it. `_holdings_by_token()` is now the
+threshold-free view, and `_convergences()` is the thin filter on top.
+**Anything that diffs membership must use `_holdings_by_token`, never
+`_convergences`.**
+
+### 3. Wallet discovery
+
+`dashboard/discover.py` suggests untracked wallets that recur across the tokens
+a group converges on. It imports `fomo/token_traders.py` — Johan's call — which
+is cheaper than it sounds: `fomo/` is tracked in git so it is already on the
+VPS, and `token_traders` is pure stdlib, so there is nothing new to install.
+The import is still guarded; if it ever fails, discovery falls back to holder
+lists and the rest of the page is untouched.
+
+A wallet needs **2+ different convergences** to be suggested. Ranking is
+recurrence first, then PnL and early-buyer count as tie-breakers within a tier —
+a wallet in three of your finds should not be outranked by one that got lucky
+once. Each row names the tokens, marks the ones it was early in, and has an
+"Add to group" button.
+
+**Infrastructure is detected across the whole scan, not per token.** This is the
+subtle part and the same trap `/connected` hit in the FOMO work: a pool sits on
+one side of one token's swaps, but a router like Jupiter sits on one side of
+*everything* — and recurrence across tokens is exactly what this feature ranks
+by, so an unfiltered router would top every list forever. The per-token check
+cannot see that, and it skips small samples entirely. So pass 1 reads every
+token's history, `infrastructure_addresses()` runs once over the union, and
+pass 2 ranks against what is left.
+
+Discovery runs on its own slow loop (`WG_DISCOVER_INTERVAL`, 6h) and on the
+"Find wallets" button. It never runs inside a holdings round — one history
+request per convergence is the expensive call pattern on this page.
+
+### Verified, and not
+
+Offline as always (no crypto-API egress): **77 assertions green** — 37 on the
+alert milestones and the exit/cooling lifecycle, 19 on discovery against the
+real `token_traders` parser and aggregator with seeded Helius payloads, and 21
+driving the real UI in Playwright with zero JS errors. That covers the photo
+fallback, the cooling purge, scan-wide infrastructure filtering, and one-click
+add end to end.
+
+**Unverified, and the first things to watch on the VPS:** whether
+`api.helius.xyz/v0/addresses/{mint}/transactions` answers for your key and
+returns the shape the parser expects (the seeded payloads are my construction,
+not a capture), and whether Telegram accepts the Markdown for a token whose
+name has punctuation — `_escape()` strips the characters that open a style run,
+but real memecoin names are inventive. Run one convergence through and look at
+the DM before trusting it.
+
+
 ## v1.37 — four changes to Wallet Groups
 
 1. **Dismiss a card.** An ✕ in the card's top-right corner hides that token from
@@ -82,8 +178,8 @@ run — not the logs.
 3. **EVM cost basis is off** (`WG_EVM_BASIS=1` to enable). It reconstructs the
    USD side from native value in the same transaction at *today's* price, so it
    is always flagged `partial`. Solana is the accurate path.
-4. **No alerting off the page.** v1.37 added a sound in the browser, but the
-   page still does not ping Telegram or Discord
+4. **Discord still gets nothing.** v1.38 sends Telegram DMs, but the page does
+   not ping Discord
    when a convergence appears. The SSE event (`"wg"`) is the hook if you want
    that — `_notify_subscribers("wg")` already fires on every appear/disappear.
 5. **Groups are global, not per-user.** There is one Basic-auth password, so
@@ -235,14 +331,22 @@ WG_CHAIN_ID_<CHAIN>                add a chain that is not built in
 WG_HOLDINGS_INTERVAL   45          seconds between wallet scans
 WG_PRICE_INTERVAL      15          seconds between price refreshes
 WG_MIN_POSITION_USD    50          below this, a wallet does not count as holding
+WG_ALERTS              1           0 disables Telegram alerts entirely
+WG_ALERT_CHAT          unset       override the DM destination
+WG_COOL_SECONDS        900         how long a broken card lingers as "cooling"
+WG_DISCOVER_INTERVAL   21600       background wallet-discovery refresh
+WG_DISCOVER_TOKENS     12          convergences read per discovery scan
+WG_DISCOVER_MIN        2           convergences a wallet needs to be suggested
+WG_DISCOVER_EARLY_N    10          how many first buyers count as "early"
 WG_BASIS_PER_ROUND     8           chain cost-basis lookups per round
 WG_EVM_BASIS           unset       1 = reconstruct EVM entry from Etherscan
 SOLSCAN_PREFIXES       playground,v2.0
 ```
 
 New tables live in the same `dash.db`: `wgroups`, `wgroup_wallets`,
-`wallet_holdings`, `wallet_lots`, `wgroup_tokens`, `wgroup_seen`, and — from
-v1.37 — `wgroup_hidden`. They are
+`wallet_holdings`, `wallet_lots`, `wgroup_tokens`, `wgroup_seen`, `wgroup_hidden`
+(v1.37) and, from v1.38, `wgroup_members`, `wgroup_exits`, `wgroup_alerts` and
+`wgroup_candidates`. They are
 created on startup and are **not** rebuildable from `ca_history.json` — the
 group definitions are the only thing in that database that is real state rather
 than a read model. Deleting `dash.db` now loses your groups. Everything else in

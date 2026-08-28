@@ -16,11 +16,21 @@ backed by the token's own banner art, a new convergence rings a bell you can
 mute, and the ✕ in a card's corner dismisses that token from the group for good
 (an "N hidden" chip in the bar brings it back).
 
+A new convergence also reaches your Telegram DM — once per wallet-count
+milestone, so a 2→3→4 climb sends three alerts and a sell-and-rebuy sends none.
+When a wallet sells out the card does not vanish: it dims into a *cooling*
+state naming who left and what they were holding, then goes. "Find wallets"
+suggests untracked addresses that keep turning up in the tokens this group
+converges on, ranked by how often they recur, with a one-click add.
+
 - `wallets.py` — providers only: Solana positions over `getTokenAccountsByOwner`,
   EVM positions over Etherscan's Pro balance endpoint or a free `balanceOf`
   scan of tokens the dashboard already knows, prices from Dexscreener, and
   average entry from Solscan swap history.
-- `wgroups.py` — the tables, the two loops and `/api/wgroups/*`. Idle and free
+- `alerts.py` — Telegram DMs for convergences. Nothing here raises into a scan.
+- `discover.py` — suggested wallets: co-holders plus early buyers, via
+  `fomo/token_traders.py` (guarded import, falls back to holder lists).
+- `wgroups.py` — the tables, the three loops and `/api/wgroups/*`. Idle and free
   until a group exists.
 
 Cost basis is hybrid on purpose. A position opened while the dashboard was

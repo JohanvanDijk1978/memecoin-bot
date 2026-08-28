@@ -1,5 +1,5 @@
 /* memedash frontend — no build step, ES modules + ECharts (CDN) */
-const VERSION = "1.37"; // bump with VERSION in main.py + the two ?v= (index.html, wgroups.js below)
+const VERSION = "1.38"; // bump with VERSION in main.py + the two ?v= (index.html, wgroups.js below)
 
 const view = document.getElementById("view");
 const $ = (id) => document.getElementById(id);
@@ -225,7 +225,7 @@ const MD = { api, esc, ago, fmtMc, fmtPct, fmtMult, chainBadge, tokenIcon, token
 /* ---------------- pages ---------------- */
 const pages = {
   async wallets() {
-    const mod = await import("./wgroups.js?v=1.37");
+    const mod = await import("./wgroups.js?v=1.38");
     await mod.page(view, MD);
   },
   async overview() {

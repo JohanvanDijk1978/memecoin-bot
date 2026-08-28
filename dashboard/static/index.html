@@ -179,10 +179,45 @@ th.num{text-align:right}
 .wg-dismiss:hover{color:var(--red);border-color:var(--red);background:rgba(10,12,18,.85)}
 @media(hover:none){.wg-dismiss{opacity:.75}}
 
+/* a card on its way out: desaturated, quieter, and clearly not a live signal */
+.wg-card.wg-cooling{opacity:.72;border-color:var(--border);background:var(--bg2)}
+.wg-card.wg-cooling:hover{opacity:.92}
+.wg-card.wg-cooling.has-art::before{opacity:.10;filter:grayscale(.85)}
+.wg-card.wg-cooling .wg-count b{color:var(--muted)}
+.wg-cool{background:rgba(255,176,64,.12);border:1px solid rgba(255,176,64,.45);color:var(--amber);
+  border-radius:5px;padding:0 6px;font-size:9.5px;font-weight:700;letter-spacing:.6px}
+.wg-cool-n{color:var(--amber)}
+.wg-cool-note{margin-top:10px;color:var(--amber);font-size:11.5px;line-height:1.5}
+.wg-exits{margin-top:9px;display:flex;flex-direction:column;gap:4px}
+.wg-exit{display:flex;align-items:baseline;gap:6px;font-size:12px;color:var(--text);
+  background:rgba(255,90,110,.08);border-left:2px solid var(--red);border-radius:0 6px 6px 0;
+  padding:5px 8px}
+.wg-exit-mark{color:var(--red);font-weight:700}
+.wg-exit-when{margin-left:auto;color:var(--dim);font-size:10.5px;white-space:nowrap}
+.wg-still{margin:10px 0 0;font-size:12px;color:var(--muted);line-height:1.6}
+.wg-still b{color:var(--text)}
+
 .wg-bell{padding:5px 8px;line-height:1}
 .wg-bell.off{opacity:.5}
 .wg-hidden-chip{color:var(--muted)}
 .wg-note{color:var(--muted);font-size:12px;line-height:1.6;margin:-6px 0 14px}
+.wg-panel.wg-wide{width:min(920px,100%)}
+.wg-dnote{color:var(--muted);font-size:11.5px;margin-bottom:10px;line-height:1.5}
+.wg-dnote.warn{color:var(--amber)}
+.wg-dtbl{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+.wg-dtbl th{font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;
+  text-align:left;padding:5px 6px;border-bottom:1px solid var(--border);white-space:nowrap}
+.wg-dtbl th.num,.wg-dtbl td.num{text-align:right}
+.wg-dtbl td{padding:7px 6px;border-bottom:1px solid rgba(35,39,52,.55);vertical-align:middle}
+.wg-dtbl tr:last-child td{border-bottom:none}
+.wg-dtbl tr:hover td{background:var(--bg3)}
+.wg-dtbl .accent{color:var(--accent);font-size:14px}
+.wg-dtok{display:flex;flex-wrap:wrap;gap:4px;max-width:340px}
+.wg-dtag{background:var(--bg3);border:1px solid var(--border);border-radius:5px;
+  padding:1px 6px;font-size:10.5px;color:var(--muted);white-space:nowrap}
+/* an early buyer is the evidence that separates an edge from a follower */
+.wg-dtag.early{border-color:rgba(63,221,143,.55);color:var(--green);background:rgba(63,221,143,.10)}
+.wg-add-cand{padding:3px 12px}
 .wg-hrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
 .wg-hrow:last-child{border-bottom:none}
 .wg-hlogo{width:28px;height:28px;border-radius:7px;background:var(--bg3);object-fit:cover;flex-shrink:0}
@@ -314,6 +349,6 @@ th.num{text-align:right}
     <div id="view"><div class="loading">Loading…</div></div>
   </main>
 </div>
-<script type="module" src="/static/app.js?v=1.37"></script>
+<script type="module" src="/static/app.js?v=1.38"></script>
 </body>
 </html>

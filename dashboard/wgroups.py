@@ -37,6 +37,8 @@ import time
 import httpx
 from fastapi import APIRouter, Body, HTTPException
 
+import alerts as A
+import discover as D
 import wallets as W
 
 log = logging.getLogger("memedash.wgroups")
@@ -48,6 +50,8 @@ MIN_POSITION_USD = float(os.getenv("WG_MIN_POSITION_USD", "50"))  # below this a
 BASIS_PER_ROUND = int(os.getenv("WG_BASIS_PER_ROUND", "8"))       # chain cost-basis lookups per round
 BASIS_RETRY = 6 * 3600            # how long before a failed basis lookup is retried
 MIN_WALLETS = 2                   # a card exists at two wallets — the whole point of the page
+COOL_SECONDS = float(os.getenv("WG_COOL_SECONDS", "900"))   # how long a card lingers after it breaks
+DISCOVER_INTERVAL = float(os.getenv("WG_DISCOVER_INTERVAL", "21600"))   # 6h background refresh
 
 _db = None                        # set by configure()
 _notify = None
@@ -132,7 +136,58 @@ def init_schema() -> None:
           hidden_at REAL NOT NULL,
           PRIMARY KEY (group_id, token)
         );
+        -- who is currently counted in a convergence. Diffing this between
+        -- rounds is what turns "the number went down" into "Whale B sold out",
+        -- and it gives entry order for free.
+        CREATE TABLE IF NOT EXISTS wgroup_members (
+          group_id INTEGER NOT NULL,
+          token TEXT NOT NULL,
+          wallet TEXT NOT NULL,
+          joined_at REAL NOT NULL,
+          last_value REAL DEFAULT 0,
+          PRIMARY KEY (group_id, token, wallet)
+        );
+        -- a wallet that fully left a carded token. Kept for the cooling window
+        -- and purged with the card, because an exit is only news while the
+        -- token is still on screen.
+        CREATE TABLE IF NOT EXISTS wgroup_exits (
+          group_id INTEGER NOT NULL,
+          token TEXT NOT NULL,
+          wallet TEXT NOT NULL,
+          label TEXT DEFAULT '',
+          exited_at REAL NOT NULL,
+          last_value REAL DEFAULT 0,
+          PRIMARY KEY (group_id, token, wallet)
+        );
+        -- the highest wallet count already announced for a token. Johan asked
+        -- for one DM per milestone, so a sell-and-rebuy back to the same count
+        -- is silent forever while a real 2->3->4 climb sends all three.
+        -- suggested wallets, rebuilt wholesale by each scan. A read model:
+        -- deleting it costs nothing but the next scan.
+        CREATE TABLE IF NOT EXISTS wgroup_candidates (
+          group_id INTEGER NOT NULL,
+          wallet TEXT NOT NULL,
+          convergences INTEGER NOT NULL DEFAULT 0,
+          tokens_json TEXT DEFAULT '[]',
+          pnl_usd REAL,
+          early_n INTEGER DEFAULT 0,
+          score REAL DEFAULT 0,
+          source TEXT DEFAULT '',
+          scanned_at REAL NOT NULL DEFAULT 0,
+          PRIMARY KEY (group_id, wallet)
+        );
+        CREATE TABLE IF NOT EXISTS wgroup_alerts (
+          group_id INTEGER NOT NULL,
+          token TEXT NOT NULL,
+          max_count INTEGER NOT NULL DEFAULT 0,
+          sent_at REAL NOT NULL DEFAULT 0,
+          PRIMARY KEY (group_id, token)
+        );
         """)
+        try:   # v1.38: a card lingers after it breaks instead of vanishing
+            c.execute("ALTER TABLE wgroup_seen ADD COLUMN ended_at REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass                          # column already exists
         try:   # v1.37: banner art for the card background
             c.execute("ALTER TABLE wgroup_tokens ADD COLUMN banner TEXT DEFAULT ''")
         except sqlite3.OperationalError:
@@ -381,31 +436,127 @@ async def holdings_round(client) -> None:
                 continue
             _apply_holdings(address, rows, prices, now, first_scan=address not in known)
 
-        changed_groups = _refresh_seen(list(by_group))
+        changed_groups, convergences = _refresh_seen(list(by_group))
         _state["scanned_at"] = now
         if changed_groups and _notify:
             _notify()                    # a card appeared or disappeared — push it now
+        await _alert_round(client, convergences)
         await _resolve_basis(client)
     finally:
         _state["scanning"] = False
         _state["round_ms"] = int((time.time() - started) * 1000)
 
 
-def _refresh_seen(group_ids: list[int]) -> bool:
-    """Keep wgroup_seen equal to what actually qualifies. Returns True on change."""
+def _refresh_seen(group_ids: list[int]) -> tuple[bool, dict[int, list[dict]]]:
+    """Keep wgroup_seen in step with what qualifies, and record who came and went.
+
+    Returns (something changed, convergences per group) — the caller reuses the
+    convergence lists for alerting rather than recomputing them.
+
+    A token that stops qualifying is NOT deleted any more. It gets `ended_at`
+    stamped and lingers for COOL_SECONDS as a cooling card, because "three
+    wallets sold out of this" is a signal, and deleting the row threw it away.
+    """
     changed = False
     now = time.time()
+    out: dict[int, list[dict]] = {}
     for gid in group_ids:
-        live = {t["address"] for t in _convergences(gid)}
+        conv = _convergences(gid)
+        out[gid] = conv
+        live = {t["address"] for t in conv}
+        # membership is tracked against every position above the floor, not
+        # against the convergence set — see _holdings_by_token
+        grouped, _tokens, _members = _holdings_by_token(gid)
+        holders = {token: {w["address"]: w for w in ws} for token, ws in grouped.items()}
+        labels = {m["address"]: m["label"] for m in _group_wallets(gid)}
         with _db() as c:
-            old = {r["token"] for r in
-                   c.execute("SELECT token FROM wgroup_seen WHERE group_id=?", (gid,)).fetchall()}
+            rows = c.execute("SELECT token, ended_at FROM wgroup_seen WHERE group_id=?",
+                             (gid,)).fetchall()
+            old = {r["token"] for r in rows}
+            active = {r["token"] for r in rows if not r["ended_at"]}
+
             for token in live - old:
-                c.execute("INSERT OR IGNORE INTO wgroup_seen VALUES (?,?,?)", (gid, token, now))
-            for token in old - live:
-                c.execute("DELETE FROM wgroup_seen WHERE group_id=? AND token=?", (gid, token))
-        changed = changed or bool(live ^ old)
-    return changed
+                c.execute("INSERT OR IGNORE INTO wgroup_seen (group_id, token, detected_at, ended_at)"
+                          " VALUES (?,?,?,0)", (gid, token, now))
+            # a cooling token that qualifies again is live again, not a new find
+            for token in live & old:
+                c.execute("UPDATE wgroup_seen SET ended_at=0 WHERE group_id=? AND token=? AND ended_at!=0",
+                          (gid, token))
+            for token in active - live:
+                c.execute("UPDATE wgroup_seen SET ended_at=? WHERE group_id=? AND token=?",
+                          (now, gid, token))
+
+            # --- membership diff: this is what names the wallet that left
+            for token in old | live:
+                was = {r["wallet"]: r["last_value"] for r in
+                       c.execute("SELECT wallet, last_value FROM wgroup_members"
+                                 " WHERE group_id=? AND token=?", (gid, token)).fetchall()}
+                nowin = holders.get(token, {})
+                for wallet, w in nowin.items():
+                    if wallet in was:
+                        c.execute("UPDATE wgroup_members SET last_value=? "
+                                  "WHERE group_id=? AND token=? AND wallet=?",
+                                  (w["value_usd"], gid, token, wallet))
+                    else:
+                        c.execute("INSERT OR IGNORE INTO wgroup_members VALUES (?,?,?,?,?)",
+                                  (gid, token, wallet, now, w["value_usd"]))
+                        # rejoining clears the old exit, or the card would claim
+                        # a wallet is gone while it is sitting in the table
+                        c.execute("DELETE FROM wgroup_exits WHERE group_id=? AND token=? AND wallet=?",
+                                  (gid, token, wallet))
+                for wallet, last in was.items():
+                    if wallet in nowin:
+                        continue
+                    # Full exits only, by Johan's choice: the wallet is under the
+                    # $50 floor or out entirely. Partial trims are not reported.
+                    c.execute("""INSERT INTO wgroup_exits VALUES (?,?,?,?,?,?)
+                                 ON CONFLICT(group_id, token, wallet) DO UPDATE SET
+                                   exited_at=excluded.exited_at, last_value=excluded.last_value""",
+                              (gid, token, wallet, labels.get(wallet, ""), now, last))
+                    c.execute("DELETE FROM wgroup_members WHERE group_id=? AND token=? AND wallet=?",
+                              (gid, token, wallet))
+                    changed = True
+
+            # --- purge whatever has finished cooling
+            gone = [r["token"] for r in
+                    c.execute("SELECT token FROM wgroup_seen WHERE group_id=? AND ended_at!=0"
+                              " AND ended_at < ?", (gid, now - COOL_SECONDS)).fetchall()]
+            for token in gone:
+                for table in ("wgroup_seen", "wgroup_members", "wgroup_exits", "wgroup_alerts"):
+                    c.execute(f"DELETE FROM {table} WHERE group_id=? AND token=?", (gid, token))
+        changed = changed or bool(live ^ active) or bool(gone)
+    return changed, out
+
+
+async def _alert_round(client, convergences: dict[int, list[dict]]) -> None:
+    """DM Johan when a token reaches a wallet count it has never reached before.
+
+    Milestone-based, not time-based: 2 wallets alerts once, 3 alerts once, and
+    a wallet that sells and rebuys back to the same count is silent forever.
+    Dismissed tokens never alert — hiding a card is a statement about the token,
+    not about the page.
+    """
+    if not A.enabled():
+        return
+    names = {r["id"]: r["name"] for r in _rows("SELECT id, name FROM wgroups")}
+    for gid, tokens in convergences.items():
+        hidden = {r["token"] for r in
+                  _rows("SELECT token FROM wgroup_hidden WHERE group_id=?", (gid,))}
+        sent = {r["token"]: r["max_count"] for r in
+                _rows("SELECT token, max_count FROM wgroup_alerts WHERE group_id=?", (gid,))}
+        for t in tokens:
+            count = t["holders_n"]
+            if t["address"] in hidden or count <= sent.get(t["address"], 0):
+                continue
+            text = A.convergence_text(t, names.get(gid, "Wallet group"), count)
+            ok = await A.send(client, text, t.get("banner") or t.get("image") or "")
+            if not ok:
+                continue          # retry on the next round rather than lose it
+            with _db() as c:
+                c.execute("""INSERT INTO wgroup_alerts VALUES (?,?,?,?)
+                             ON CONFLICT(group_id, token) DO UPDATE SET
+                               max_count=excluded.max_count, sent_at=excluded.sent_at""",
+                          (gid, t["address"], count, time.time()))
 
 
 def _basis_provider_ok(chain_id: str) -> bool:
@@ -428,6 +579,7 @@ async def _resolve_basis(client) -> None:
         JOIN wallet_holdings h ON h.wallet = g.address AND h.token = s.token
         LEFT JOIN wallet_lots l ON l.wallet = h.wallet AND l.token = h.token
        WHERE h.amount > 0
+         AND s.ended_at = 0
          AND NOT EXISTS (SELECT 1 FROM wgroup_hidden x
                           WHERE x.group_id = s.group_id AND x.token = s.token)
          AND IFNULL(l.source,'pre-existing') IN ('pre-existing','unknown')
@@ -460,25 +612,30 @@ async def _resolve_basis(client) -> None:
 
 # --------------------------------------------------------------- convergences
 
-def _convergences(group_id: int) -> list[dict]:
-    """Tokens at least MIN_WALLETS wallets of this group hold right now."""
+def _holdings_by_token(group_id: int) -> tuple[dict[str, list[dict]], dict[str, dict], list[dict]]:
+    """Every position this group holds above the floor, keyed by token.
+
+    Deliberately has NO wallet-count threshold. `_convergences` applies that;
+    the membership diff must not, because a token that falls to one holder
+    leaves the convergence list entirely — and diffing against a list it is
+    absent from reports the remaining holder as having sold, which is both
+    wrong and alarming.
+    """
     members = _group_wallets(group_id)
-    if len(members) < MIN_WALLETS:
-        return []
+    if not members:
+        return {}, {}, []
     by_address = {m["address"]: m for m in members}
     marks = ",".join("?" * len(by_address))
     holdings = _rows(f"""SELECT * FROM wallet_holdings
                           WHERE wallet IN ({marks}) AND amount > 0""", tuple(by_address))
     if not holdings:
-        return []
+        return {}, {}, members
     held_tokens = tuple({h["token"] for h in holdings})
     tokens = {r["address"]: r for r in
               _rows("SELECT * FROM wgroup_tokens WHERE address IN (%s)"
                     % ",".join("?" * len(held_tokens)), held_tokens)}
     lots = {(r["wallet"], r["token"]): r for r in
             _rows(f"SELECT * FROM wallet_lots WHERE wallet IN ({marks})", tuple(by_address))}
-    seen = {r["token"]: r["detected_at"] for r in
-            _rows("SELECT token, detected_at FROM wgroup_seen WHERE group_id=?", (group_id,))}
 
     grouped: dict[str, list[dict]] = {}
     for h in holdings:
@@ -513,6 +670,17 @@ def _convergences(group_id: int) -> list[dict]:
             "basis": lot.get("source") or "pre-existing",
             "since": h["first_seen"],
         })
+    return grouped, tokens, members
+
+
+def _convergences(group_id: int) -> list[dict]:
+    """Tokens at least MIN_WALLETS wallets of this group hold right now."""
+    members = _group_wallets(group_id)
+    if len(members) < MIN_WALLETS:
+        return []
+    grouped, tokens, members = _holdings_by_token(group_id)
+    seen = {r["token"]: r["detected_at"] for r in
+            _rows("SELECT token, detected_at FROM wgroup_seen WHERE group_id=?", (group_id,))}
 
     out = []
     for token, holders in grouped.items():
@@ -549,6 +717,76 @@ def _convergences(group_id: int) -> list[dict]:
             "wallets": holders,
         })
     out.sort(key=lambda t: (t["holders_n"], t["position_usd"]), reverse=True)
+    return out
+
+
+def _exits(group_id: int) -> dict[str, list[dict]]:
+    """Recent full exits per token, newest first."""
+    out: dict[str, list[dict]] = {}
+    for r in _rows("""SELECT token, wallet, label, exited_at, last_value
+                        FROM wgroup_exits WHERE group_id=? AND exited_at > ?
+                       ORDER BY exited_at DESC""",
+                   (group_id, time.time() - COOL_SECONDS)):
+        out.setdefault(r["token"], []).append({
+            "wallet": r["wallet"], "short": short(r["wallet"]),
+            "label": r["label"] or short(r["wallet"]),
+            "exited_at": r["exited_at"], "last_value": r["last_value"],
+        })
+    return out
+
+
+def _cooling(group_id: int, exits: dict[str, list[dict]]) -> list[dict]:
+    """Cards for tokens that stopped qualifying inside the cooling window.
+
+    These are deliberately cheap: last known market data and the membership
+    table, no pricing and no PnL. The card is dimmed and on its way out — its
+    job is to tell you *who sold*, which is the part the old code deleted.
+    """
+    rows = _rows("""SELECT s.token, s.detected_at, s.ended_at, t.*
+                      FROM wgroup_seen s
+                      LEFT JOIN wgroup_tokens t ON t.address = s.token
+                     WHERE s.group_id=? AND s.ended_at != 0""", (group_id,))
+    members = {}
+    for r in _rows("SELECT token, wallet, last_value FROM wgroup_members WHERE group_id=?",
+                   (group_id,)):
+        members.setdefault(r["token"], []).append(r)
+    labels = {m["address"]: m["label"] for m in _group_wallets(group_id)}
+    total = len(labels)
+
+    out = []
+    for r in rows:
+        token = r["token"]
+        left = exits.get(token, [])
+        held = [{"wallet_id": 0, "label": labels.get(m["wallet"], short(m["wallet"])),
+                 "address": m["wallet"], "short": short(m["wallet"]),
+                 "amount": None, "supply_pct": None, "value_usd": m["last_value"],
+                 "avg_entry": None, "cost_usd": None, "pnl_usd": None, "pnl_pct": None,
+                 "realized_usd": 0, "basis": "unknown", "since": 0}
+                for m in members.get(token, [])]
+        out.append({
+            "address": token,
+            "chain_id": r["chain_id"] or "",
+            "name": r["name"] or "",
+            "symbol": r["symbol"] or "",
+            "image": r["image"] or "",
+            "banner": r["banner"] or "",
+            "price": r["price"] or 0,
+            "mc": r["mc"] or 0,
+            "supply": r["supply"] or 0,
+            "liq": r["liq"] or 0,
+            "updated_at": r["updated_at"] or 0,
+            "holders_n": len(held),
+            "wallets_total": total,
+            "supply_pct": None,
+            "position_usd": sum(h["value_usd"] or 0 for h in held),
+            "cost_usd": None, "pnl_usd": None, "pnl_pct": None, "priced_n": 0,
+            "detected_at": r["detected_at"] or 0,
+            "wallets": held,
+            "exits": left,
+            "cooling": True,
+            "ended_at": r["ended_at"],
+        })
+    out.sort(key=lambda t: t["ended_at"], reverse=True)
     return out
 
 
@@ -592,10 +830,63 @@ async def price_loop():
         await asyncio.sleep(PRICE_INTERVAL)
 
 
+_discover_now = asyncio.Event()
+_discover_state = {"scanning": False, "at": 0.0, "error": ""}
+
+
+async def discover_group(client, gid: int) -> int:
+    """Rebuild one group's candidate list. Returns how many survived the cut."""
+    tracked = {m["address"] for m in _group_wallets(gid)}
+    tokens = [t for t in _convergences(gid)]
+    # newest convergences first: what a wallet did last week says more about it
+    # than what it did in the group's first week
+    tokens.sort(key=lambda t: t.get("detected_at") or 0, reverse=True)
+    found = await D.scan(client, gid, tokens, tracked)
+    now = time.time()
+    with _db() as c:
+        c.execute("DELETE FROM wgroup_candidates WHERE group_id=?", (gid,))
+        for e in found:
+            c.execute("INSERT INTO wgroup_candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                      D.to_row(gid, e, now))
+    return len(found)
+
+
+async def discover_loop() -> None:
+    """Slow background refresh, plus whatever the button asks for.
+
+    Discovery is the expensive call pattern on this page — one history request
+    per convergence per group — so it runs on its own clock, far slower than
+    the scanners, and never inside a holdings round.
+    """
+    while True:
+        try:
+            await asyncio.wait_for(_discover_now.wait(), timeout=DISCOVER_INTERVAL)
+            _discover_now.clear()
+        except asyncio.TimeoutError:
+            pass
+        groups = [r["id"] for r in _rows("SELECT id FROM wgroups ORDER BY id")]
+        if not groups:
+            continue
+        _discover_state.update(scanning=True, error="")
+        try:
+            async with _client() as client:
+                for gid in groups:
+                    await discover_group(client, gid)
+            _discover_state["at"] = time.time()
+            if _notify:
+                _notify()          # zero-arg by contract: main.py binds the message
+        except Exception as e:
+            log.warning("wallet discovery round failed: %s", e)
+            _discover_state["error"] = str(e)[:200]
+        finally:
+            _discover_state["scanning"] = False
+
+
 def start(loop_tasks: list) -> None:
     """Called from main.py's lifespan; returns the tasks it created."""
     loop_tasks.append(asyncio.create_task(holdings_loop()))
     loop_tasks.append(asyncio.create_task(price_loop()))
+    loop_tasks.append(asyncio.create_task(discover_loop()))
 
 
 # --------------------------------------------------------------- api
@@ -694,6 +985,11 @@ def rescan(gid: int):
 def live(gid: int):
     row = _group_row(gid)
     found = _convergences(gid)
+    exits = _exits(gid)
+    for t in found:
+        t["exits"] = exits.get(t["address"], [])
+        t["cooling"] = False
+    found += _cooling(gid, exits)
     hidden_at = {r["token"]: r["hidden_at"] for r in
                  _rows("SELECT token, hidden_at FROM wgroup_hidden WHERE group_id=?", (gid,))}
     # A dismissed token is dropped from the feed, not from the scan: it still
@@ -716,6 +1012,11 @@ def live(gid: int):
         if watchlist_chains:
             notes.append("EVM wallets are scanned against tokens this dashboard already knows "
                          f"({', '.join(watchlist_chains)}) — set a Pro Etherscan key for full discovery")
+    alerts = A.status()
+    if not alerts["ok"]:
+        # a silent phone should be explainable from the page, not from the logs
+        notes.append(f"Telegram alerts are off ({alerts['note']}) — convergences "
+                     "appear here but will not reach your DMs")
     solscan = W.PROVIDER_STATUS.get("solscan")
     if not os.getenv("SOLSCAN_API_KEY", "").strip():
         notes.append("No Solscan key: average entry comes from what the dashboard has watched, "
@@ -729,10 +1030,14 @@ def live(gid: int):
         "group": _group_json(row),
         "summary": {
             "wallets": len(members),
-            "tokens": len(tokens),
+            "tokens": sum(1 for t in tokens if not t["cooling"]),
+            "cooling_n": sum(1 for t in tokens if t["cooling"]),
             "hidden_n": len(hidden),
+            "cool_seconds": COOL_SECONDS,
+            "alerts": A.status(),
             "min_position_usd": MIN_POSITION_USD,
-            "new_1h": sum(1 for t in tokens if t["detected_at"] and now - t["detected_at"] < 3600),
+            "new_1h": sum(1 for t in tokens
+                          if not t["cooling"] and t["detected_at"] and now - t["detected_at"] < 3600),
             "scanned_at": _state["scanned_at"],
             "scanning": _state["scanning"],
             "round_ms": _state["round_ms"],
@@ -763,6 +1068,59 @@ def unhide_token(gid: int, address: str):
     with _db() as c:
         c.execute("DELETE FROM wgroup_hidden WHERE group_id=? AND token=?", (gid, address))
     return {"shown": address}
+
+
+# --------------------------------------------------------------- discovery
+
+@router.get("/api/wgroups/{gid}/candidates")
+def candidates(gid: int):
+    """Wallets worth adding, most recurrent first."""
+    _group_row(gid)
+    rows = _rows("""SELECT * FROM wgroup_candidates WHERE group_id=?
+                     ORDER BY convergences DESC, score DESC LIMIT 50""", (gid,))
+    return {
+        "candidates": [D.from_row(r) for r in rows],
+        "scanning": _discover_state["scanning"],
+        "scanned_at": _discover_state["at"],
+        "error": _discover_state["error"],
+        "provider": D.STATUS,
+        "min_convergences": D.MIN_CONVERGENCES,
+    }
+
+
+@router.post("/api/wgroups/{gid}/discover")
+def rediscover(gid: int):
+    """Ask for a fresh scan now. The loop owns the work; this only wakes it."""
+    _group_row(gid)
+    _discover_now.set()
+    return {"queued": True, "scanning": _discover_state["scanning"]}
+
+
+@router.post("/api/wgroups/{gid}/wallets")
+def add_wallet(gid: int, payload: dict = Body(...)):
+    """Add one wallet to a group — the candidate list's 'Add to group' button.
+
+    Separate from PUT /api/wgroups/{gid} on purpose: that replaces the whole
+    membership, so using it from a modal would race with any other edit.
+    """
+    _group_row(gid)
+    members = _clean_wallets([{"address": payload.get("address") or "",
+                               "label": payload.get("label") or ""}])
+    if not members:
+        raise HTTPException(400, "not a Solana or EVM address")
+    m = members[0]
+    with _db() as c:
+        if c.execute("SELECT 1 FROM wgroup_wallets WHERE group_id=? AND address=?",
+                     (gid, m["address"])).fetchone():
+            raise HTTPException(409, "that wallet is already in this group")
+        c.execute("""INSERT INTO wgroup_wallets (group_id, address, label, kind, added_at)
+                     VALUES (?,?,?,?,?)""",
+                  (gid, m["address"], m["label"], m["kind"], time.time()))
+        # it is a member now, so it can no longer be its own suggestion
+        c.execute("DELETE FROM wgroup_candidates WHERE group_id=? AND wallet=?",
+                  (gid, m["address"]))
+    _scan_now.set()
+    return _group_json(_group_row(gid))
 
 
 @router.delete("/api/wgroups/{gid}/hide")
