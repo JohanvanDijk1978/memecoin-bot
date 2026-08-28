@@ -386,6 +386,19 @@ async def evm_decimals(client, chain_id: str, tokens: list[str]) -> dict[str, in
 _alchemy_retired: set[str] = set()
 
 
+def _discover_failed(chain_id: str, reason: str) -> None:
+    """Record why discovery did not answer, and return None for the caller.
+
+    The reason has to reach PROVIDER_STATUS. When it only went to log.debug,
+    a rate-limited round was indistinguishable from "this RPC cannot do it",
+    and the page and the diagnostics tool both said the same useless word:
+    unavailable.
+    """
+    _mark(f"evm_discover:{chain_id}", False, reason)
+    log.warning(f"alchemy_getTokenBalances on {chain_id}: {reason}")
+    return None
+
+
 async def alchemy_balances(client, wallet: str, chain_id: str,
                            max_pages: int = 4) -> dict[str, int] | None:
     """Every non-zero ERC-20 balance of one wallet: {token address -> raw amount}.
@@ -415,11 +428,23 @@ async def alchemy_balances(client, wallet: str, chain_id: str,
             r = await client.post(url, timeout=25, json={
                 "jsonrpc": "2.0", "id": 1,
                 "method": "alchemy_getTokenBalances", "params": params})
-            r.raise_for_status()
-            payload = r.json() or {}
         except Exception as e:          # transient: try again next round
-            log.debug(f"alchemy_getTokenBalances on {chain_id}: {e}")
-            return None
+            return _discover_failed(chain_id, f"{type(e).__name__}: {str(e)[:110]}")
+        if getattr(r, "status_code", 200) != 200:
+            # 429 is the one that actually happens: Alchemy's free tier is
+            # throughput-limited, and a first scan's decimals() batches will
+            # sit on that limit. Say so out loud — a silent debug line here is
+            # what made this look like "discovery does not work" once already.
+            body = ""
+            try:
+                body = (r.text or "")[:130].replace("\n", " ")
+            except Exception:
+                pass
+            return _discover_failed(chain_id, f"HTTP {r.status_code} {body}".strip())
+        try:
+            payload = r.json() or {}
+        except Exception as e:
+            return _discover_failed(chain_id, f"unreadable response: {str(e)[:100]}")
         err = payload.get("error")
         if err:
             message = str((err or {}).get("message") or err)[:140]
@@ -428,9 +453,8 @@ async def alchemy_balances(client, wallet: str, chain_id: str,
                 _alchemy_retired.add(chain_id)
                 log.info(f"alchemy_getTokenBalances unavailable on {chain_id} "
                          f"({message}) — using the watchlist scan from here on")
-            else:
-                log.debug(f"alchemy_getTokenBalances on {chain_id}: {message}")
-            return None
+                return _discover_failed(chain_id, f"not implemented here: {message}")
+            return _discover_failed(chain_id, message)
         result = payload.get("result") or {}
         for row in result.get("tokenBalances") or []:
             address = (row.get("contractAddress") or "").lower()
@@ -440,6 +464,7 @@ async def alchemy_balances(client, wallet: str, chain_id: str,
         page_key = result.get("pageKey")
         if not page_key:
             break
+    _mark(f"evm_discover:{chain_id}", True, f"{len(out)} ERC-20 positions")
     return out
 
 

@@ -92,9 +92,9 @@ async def main() -> int:
             for chain in W.evm_chains():
                 raw = await W.alchemy_balances(client, wallet, chain)
                 if raw is None:
+                    why = W.PROVIDER_STATUS.get(f"evm_discover:{chain}", {}).get("note", "")
                     line(f"  discover:{chain}",
-                         "unavailable — falls back to the watchlist, which can only "
-                         "confirm tokens this dashboard already knows")
+                         f"UNAVAILABLE — {why or 'no reason recorded'}")
                 else:
                     line(f"  discover:{chain}",
                          f"alchemy_getTokenBalances OK — {len(raw)} ERC-20 positions")
