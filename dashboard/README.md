@@ -11,7 +11,10 @@ Full design: see `../DASHBOARD_DESIGN.md`.
 **two or more of them hold right now** — who is in, how much supply each
 controls, and what each one is up or down. A card appears the moment a second
 tracked wallet is in a token and is removed the moment the count drops below
-two, so the page reads as a live signal feed rather than a table.
+two, so the page reads as a live signal feed rather than a table. Each card is
+backed by the token's own banner art, a new convergence rings a bell you can
+mute, and the ✕ in a card's corner dismisses that token from the group for good
+(an "N hidden" chip in the bar brings it back).
 
 - `wallets.py` — providers only: Solana positions over `getTokenAccountsByOwner`,
   EVM positions over Etherscan's Pro balance endpoint or a free `balanceOf`
@@ -80,7 +83,7 @@ public RPCs and observed cost basis.
   `WG_CHAIN_ID_ROBINHOOD=…` together with `EVM_RPC_ROBINHOOD` adds Robinhood
   Chain to the scan with no code change
 - `WG_HOLDINGS_INTERVAL` (45), `WG_PRICE_INTERVAL` (15) — seconds
-- `WG_MIN_POSITION_USD` (1) — below this a wallet does not count as holding
+- `WG_MIN_POSITION_USD` (50) — below this a wallet does not count as holding
 - `WG_EVM_BASIS=1` — reconstruct EVM average entry from Etherscan (approximate)
 
 ## Notes

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 import time
 
 import httpx
@@ -43,7 +44,7 @@ router = APIRouter()
 
 HOLDINGS_INTERVAL = float(os.getenv("WG_HOLDINGS_INTERVAL", "45"))
 PRICE_INTERVAL = float(os.getenv("WG_PRICE_INTERVAL", "15"))
-MIN_POSITION_USD = float(os.getenv("WG_MIN_POSITION_USD", "1"))   # dust does not count as holding
+MIN_POSITION_USD = float(os.getenv("WG_MIN_POSITION_USD", "50"))  # below this a wallet is not "in"
 BASIS_PER_ROUND = int(os.getenv("WG_BASIS_PER_ROUND", "8"))       # chain cost-basis lookups per round
 BASIS_RETRY = 6 * 3600            # how long before a failed basis lookup is retried
 MIN_WALLETS = 2                   # a card exists at two wallets — the whole point of the page
@@ -121,7 +122,21 @@ def init_schema() -> None:
           detected_at REAL NOT NULL,
           PRIMARY KEY (group_id, token)
         );
+        -- tokens dismissed from the page with the card's X. Real state, like the
+        -- group definitions: it does not re-derive from a scan. A hidden token is
+        -- still scanned and still counted in the group's totals -- it just never
+        -- gets a card again, which is the point of dismissing it.
+        CREATE TABLE IF NOT EXISTS wgroup_hidden (
+          group_id INTEGER NOT NULL,
+          token TEXT NOT NULL,
+          hidden_at REAL NOT NULL,
+          PRIMARY KEY (group_id, token)
+        );
         """)
+        try:   # v1.37: banner art for the card background
+            c.execute("ALTER TABLE wgroup_tokens ADD COLUMN banner TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass                          # column already exists
 
 
 # --------------------------------------------------------------- small helpers
@@ -277,17 +292,19 @@ def _store_markets(markets: dict, now: float) -> None:
     with _db() as c:
         for address, m in markets.items():
             c.execute("""INSERT INTO wgroup_tokens
-                (address, chain_id, name, symbol, image, price, mc, supply, liq, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                (address, chain_id, name, symbol, image, banner, price, mc, supply, liq, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(address) DO UPDATE SET chain_id=excluded.chain_id,
                   name=CASE WHEN excluded.name!='' THEN excluded.name ELSE wgroup_tokens.name END,
                   symbol=CASE WHEN excluded.symbol!='' THEN excluded.symbol ELSE wgroup_tokens.symbol END,
                   image=CASE WHEN excluded.image!='' THEN excluded.image ELSE wgroup_tokens.image END,
+                  banner=CASE WHEN excluded.banner!='' THEN excluded.banner ELSE wgroup_tokens.banner END,
                   price=excluded.price, mc=excluded.mc,
                   supply=CASE WHEN excluded.supply>0 THEN excluded.supply ELSE wgroup_tokens.supply END,
                   liq=excluded.liq, updated_at=excluded.updated_at""",
                       (address, m.get("chain_id", ""), m.get("name", ""), m.get("symbol", ""),
-                       m.get("image", ""), m.get("price", 0), m.get("mc", 0),
+                       m.get("image", ""), m.get("banner", ""),
+                       m.get("price", 0), m.get("mc", 0),
                        m.get("supply", 0), m.get("liq", 0), now))
 
 
@@ -411,6 +428,8 @@ async def _resolve_basis(client) -> None:
         JOIN wallet_holdings h ON h.wallet = g.address AND h.token = s.token
         LEFT JOIN wallet_lots l ON l.wallet = h.wallet AND l.token = h.token
        WHERE h.amount > 0
+         AND NOT EXISTS (SELECT 1 FROM wgroup_hidden x
+                          WHERE x.group_id = s.group_id AND x.token = s.token)
          AND IFNULL(l.source,'pre-existing') IN ('pre-existing','unknown')
          AND IFNULL(l.checked_at,0) < ?
        GROUP BY h.wallet, h.token
@@ -512,6 +531,7 @@ def _convergences(group_id: int) -> list[dict]:
             "name": market.get("name") or "",
             "symbol": market.get("symbol") or "",
             "image": market.get("image") or "",
+            "banner": market.get("banner") or "",
             "price": market.get("price") or 0,
             "mc": market.get("mc") or 0,
             "supply": market.get("supply") or 0,
@@ -598,7 +618,10 @@ def _group_json(row: dict) -> dict:
 def list_groups():
     groups = [_group_json(r) for r in _rows("SELECT * FROM wgroups ORDER BY id")]
     counts = {r["group_id"]: r["n"] for r in
-              _rows("SELECT group_id, COUNT(*) AS n FROM wgroup_seen GROUP BY group_id")}
+              _rows("""SELECT s.group_id, COUNT(*) AS n FROM wgroup_seen s
+                        WHERE NOT EXISTS (SELECT 1 FROM wgroup_hidden x
+                                           WHERE x.group_id = s.group_id AND x.token = s.token)
+                        GROUP BY s.group_id""")}
     for g in groups:
         g["tokens_n"] = counts.get(g["id"], 0)
     return {"groups": groups, "scanned_at": _state["scanned_at"]}
@@ -655,6 +678,7 @@ def delete_group(gid: int):
         c.execute("DELETE FROM wgroups WHERE id=?", (gid,))
         c.execute("DELETE FROM wgroup_wallets WHERE group_id=?", (gid,))
         c.execute("DELETE FROM wgroup_seen WHERE group_id=?", (gid,))
+        c.execute("DELETE FROM wgroup_hidden WHERE group_id=?", (gid,))
     _scan_now.set()
     return {"deleted": gid}
 
@@ -669,7 +693,18 @@ def rescan(gid: int):
 @router.get("/api/wgroups/{gid}/live")
 def live(gid: int):
     row = _group_row(gid)
-    tokens = _convergences(gid)
+    found = _convergences(gid)
+    hidden_at = {r["token"]: r["hidden_at"] for r in
+                 _rows("SELECT token, hidden_at FROM wgroup_hidden WHERE group_id=?", (gid,))}
+    # A dismissed token is dropped from the feed, not from the scan: it still
+    # holds its place in the wallets' positions, it just never shows a card
+    # again. The list of what is hidden goes down with the payload so the page
+    # can offer them back without a second request.
+    tokens = [t for t in found if t["address"] not in hidden_at]
+    hidden = [{"address": t["address"], "symbol": t["symbol"], "name": t["name"],
+               "image": t["image"], "chain_id": t["chain_id"], "holders_n": t["holders_n"],
+               "position_usd": t["position_usd"], "hidden_at": hidden_at[t["address"]]}
+              for t in found if t["address"] in hidden_at]
     now = time.time()
     members = _group_wallets(gid)
     evm = [m for m in members if m["kind"] == "evm"]
@@ -681,14 +716,22 @@ def live(gid: int):
         if watchlist_chains:
             notes.append("EVM wallets are scanned against tokens this dashboard already knows "
                          f"({', '.join(watchlist_chains)}) — set a Pro Etherscan key for full discovery")
+    solscan = W.PROVIDER_STATUS.get("solscan")
     if not os.getenv("SOLSCAN_API_KEY", "").strip():
         notes.append("No Solscan key: average entry comes from what the dashboard has watched, "
                      "not from full swap history")
+    elif solscan and not solscan.get("ok"):
+        # a free key reaches /playground but not /v2.0, and some paths are on
+        # neither — say which, rather than leaving blank entry columns unexplained
+        notes.append(f"Solscan is not answering ({solscan.get('note', 'no route')}): positions that "
+                     "predate tracking will show no average entry")
     return {
         "group": _group_json(row),
         "summary": {
             "wallets": len(members),
             "tokens": len(tokens),
+            "hidden_n": len(hidden),
+            "min_position_usd": MIN_POSITION_USD,
             "new_1h": sum(1 for t in tokens if t["detected_at"] and now - t["detected_at"] < 3600),
             "scanned_at": _state["scanned_at"],
             "scanning": _state["scanning"],
@@ -699,4 +742,32 @@ def live(gid: int):
         },
         "providers": W.PROVIDER_STATUS,
         "tokens": tokens,
+        "hidden": hidden,
     }
+
+
+# --------------------------------------------------------------- dismissals
+
+@router.post("/api/wgroups/{gid}/hide/{address}")
+def hide_token(gid: int, address: str):
+    """Dismiss a token from this group's feed. Permanent until un-hidden."""
+    _group_row(gid)
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO wgroup_hidden VALUES (?,?,?)", (gid, address, time.time()))
+    return {"hidden": address}
+
+
+@router.delete("/api/wgroups/{gid}/hide/{address}")
+def unhide_token(gid: int, address: str):
+    _group_row(gid)
+    with _db() as c:
+        c.execute("DELETE FROM wgroup_hidden WHERE group_id=? AND token=?", (gid, address))
+    return {"shown": address}
+
+
+@router.delete("/api/wgroups/{gid}/hide")
+def unhide_all(gid: int):
+    _group_row(gid)
+    with _db() as c:
+        n = c.execute("DELETE FROM wgroup_hidden WHERE group_id=?", (gid,)).rowcount
+    return {"shown": n}

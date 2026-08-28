@@ -445,6 +445,10 @@ def _market_from_pair(address: str, pair: dict) -> dict:
         "name": base.get("name") or "",
         "symbol": base.get("symbol") or "",
         "image": info.get("imageUrl") or "",
+        # banner art, used as the card background on the Wallet Groups page.
+        # Dexscreener calls it "header"; openGraph is the social preview and is
+        # the better-than-nothing fallback when a token never uploaded a banner.
+        "banner": info.get("header") or info.get("openGraph") or "",
         "price": price,
         "mc": mc,
         "liq": liq,
@@ -569,6 +573,13 @@ def fold_trades(trades: list[dict], actual_amount: float) -> dict | None:
 # and remembered, exactly as fomo/solscan_api.py does it.
 
 SOLSCAN_HOST = os.getenv("SOLSCAN_HOST", "https://pro-api.solscan.io").rstrip("/")
+
+# Playground first, deliberately. Johan's Solscan key is a FREE one: every
+# `/v2.0` path answers 401 for it, and `/playground` serves the same engine to
+# any account. A paid key can reach playground too, so trying it first costs a
+# paid plan nothing and saves a free plan a doomed request on every new path.
+# Pin with SOLSCAN_PREFIXES="v2.0" if the plan is ever upgraded.
+SOLSCAN_PREFIXES = os.getenv("SOLSCAN_PREFIXES", "playground,v2.0")
 _solscan_route: tuple[str, str] | None = None
 _solscan_dead_until = 0.0
 
@@ -580,7 +591,7 @@ async def solscan_get(client, path: str, params: dict):
         return None
     routes = [_solscan_route] if _solscan_route else [
         (prefix, style)
-        for prefix in (os.getenv("SOLSCAN_PREFIXES", "v2.0,playground").split(","))
+        for prefix in SOLSCAN_PREFIXES.split(",")
         for style in ("token", "bearer")
     ]
     for prefix, style in routes:

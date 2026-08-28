@@ -19,9 +19,21 @@ let groups = [];
 let active = +(localStorage.getItem("wg_group") || 0);
 let sortKey = localStorage.getItem("wg_sort") || "wallets";
 let minWallets = +(localStorage.getItem("wg_min") || 2);
+let muted = localStorage.getItem("wg_mute") === "1";
 let timer = null;
 const cards = new Map();       // token address -> {el, data}
 let lastPayload = null;
+
+/* Convergence pings are a different signal from the live CA feed's, so they get
+   their own bell and their own mute — silencing one must not silence the other.
+   `announced` is what we have already made a noise about; `primed` stops the
+   first payload of a group from firing a burst for tokens that were already
+   there. Browsers reject audio until the page has been clicked once, which is
+   why the play() rejection is swallowed rather than reported. */
+const ping = new Audio("/static/ping.mp3");
+ping.volume = 0.6;
+let announced = new Set();
+let primed = false;
 
 const SORTS = [
   ["wallets", "Most wallets holding"],
@@ -88,6 +100,13 @@ async function loadGroups() {
   return groups;
 }
 
+async function hideToken(address) {
+  await fetch(`/api/wgroups/${active}/hide/${encodeURIComponent(address)}`, { method: "POST" });
+}
+async function unhideToken(address) {
+  await fetch(`/api/wgroups/${active}/hide/${encodeURIComponent(address)}`, { method: "DELETE" });
+}
+
 const sortValue = (t) => ({
   wallets: [t.holders_n, t.position_usd],
   wallets_asc: [-t.holders_n, -t.position_usd],
@@ -104,6 +123,8 @@ const sortValue = (t) => ({
 export async function page(view, helpers) {
   MD = helpers;
   cards.clear();
+  announced = new Set();
+  primed = false;
   await loadGroups();
 
   if (!groups.length) {
@@ -128,6 +149,8 @@ export async function page(view, helpers) {
         <button class="wg-ghost" id="wg-edit" title="Edit this group">Edit</button>
         <button class="wg-ghost" id="wg-del" title="Delete this group">Delete</button>
         <button class="wg-primary" id="wg-new">+ Create wallet group</button>
+        <button class="wg-ghost wg-bell" id="wg-mute" title="Sound when a new convergence appears"></button>
+        <button class="wg-ghost wg-hidden-chip" id="wg-hidden" hidden></button>
         <span class="wg-live" id="wg-live"><span class="dot"></span><span id="wg-live-t">connecting…</span></span>
       </div>
       <div class="wg-summary" id="wg-summary"></div>
@@ -146,9 +169,24 @@ export async function page(view, helpers) {
 
   document.getElementById("wg-pick").onchange = (e) => {
     active = +e.target.value; localStorage.setItem("wg_group", active);
-    cards.clear(); document.getElementById("wg-cards").innerHTML = `<div class="loading">Scanning wallets…</div>`;
+    cards.clear();
+    announced = new Set(); primed = false;     // a different group is not "new"
+    document.getElementById("wg-cards").innerHTML = `<div class="loading">Scanning wallets…</div>`;
     tick();
   };
+  const bell = document.getElementById("wg-mute");
+  const drawBell = () => {
+    bell.textContent = muted ? "🔕" : "🔔";
+    bell.classList.toggle("off", muted);
+  };
+  drawBell();
+  bell.onclick = () => {
+    muted = !muted;
+    localStorage.setItem("wg_mute", muted ? "1" : "0");
+    drawBell();
+    if (!muted) ping.play().catch(() => {});   // also unlocks audio for later pings
+  };
+  document.getElementById("wg-hidden").onclick = () => openHidden(view);
   document.getElementById("wg-new").onclick = () => openEditor(null, view);
   document.getElementById("wg-edit").onclick = () =>
     openEditor(groups.find((g) => g.id === active), view);
@@ -161,7 +199,7 @@ export async function page(view, helpers) {
     minWallets = +b.dataset.n; localStorage.setItem("wg_min", minWallets);
     document.querySelectorAll("#wg-min button").forEach((x) =>
       x.classList.toggle("on", +x.dataset.n === minWallets));
-    draw(lastPayload);
+    draw(lastPayload, true);          // a filter change is not a new detection
   };
 
   clearInterval(timer);
@@ -193,16 +231,32 @@ async function tick() {
 }
 
 /* ---------------- rendering ---------------- */
-function draw(d) {
+function draw(d, silent) {
   if (!d) return;
   const s = d.summary;
   const shown = (d.tokens ?? []).filter((t) => t.holders_n >= minWallets);
+
+  /* Ping on a genuinely new convergence. Judged against d.tokens rather than
+     the filtered list, so moving the "held by at least" pill never makes a
+     noise — only the wallets buying something new does. */
+  const arrivals = (d.tokens ?? []).filter((t) => !announced.has(t.address));
+  (d.tokens ?? []).forEach((t) => announced.add(t.address));
+  if (primed && !silent && arrivals.length && !muted) ping.play().catch(() => {});
+  primed = true;
+
+  const chip = document.getElementById("wg-hidden");
+  if (chip) {
+    chip.hidden = !s.hidden_n;
+    chip.textContent = `${s.hidden_n} hidden`;
+    chip.title = "Tokens you dismissed from this group — click to bring them back";
+  }
 
   document.getElementById("wg-summary").innerHTML = `
     <b>${s.wallets}</b> wallet${s.wallets === 1 ? "" : "s"} tracked
     <span class="sep">·</span> <b>${d.tokens.length}</b> shared memecoin${d.tokens.length === 1 ? "" : "s"} detected
     <span class="sep">·</span> <b class="${s.new_1h ? "pos" : ""}">${s.new_1h}</b> new in the last hour
-    ${minWallets > 2 ? `<span class="sep">·</span> <span class="muted">${shown.length} shown at ${minWallets}+ wallets</span>` : ""}`;
+    ${minWallets > 2 ? `<span class="sep">·</span> <span class="muted">${shown.length} shown at ${minWallets}+ wallets</span>` : ""}
+    ${s.min_position_usd ? `<span class="sep">·</span> <span class="muted" title="A wallet only counts as holding a token above this value — set WG_MIN_POSITION_USD to change it">positions under ${money(s.min_position_usd)} ignored</span>` : ""}`;
 
   const notes = document.getElementById("wg-notes");
   notes.innerHTML = (s.notes ?? []).map((n) => `<div>ⓘ ${esc(n)}</div>`).join("")
@@ -267,7 +321,17 @@ function paint(el, t, prev) {
   const partial = t.priced_n < t.holders_n;
   const seenIds = new Set((prev?.wallets ?? []).map((w) => w.wallet_id));
 
+  /* The card wears the token's own banner, faded behind the content. Set as a
+     custom property rather than a background shorthand so the CSS keeps control
+     of the gradient scrim that keeps the text readable over any artwork. The
+     profile picture stands in when a token never uploaded a banner. */
+  const art = t.banner || t.image || "";
+  el.style.setProperty("--wg-art", art ? `url("${encodeURI(art).replace(/"/g, "%22")}")` : "none");
+  el.classList.toggle("has-art", !!art);
+  el.classList.toggle("art-logo", !t.banner && !!t.image);
+
   el.innerHTML = `
+    <button class="wg-dismiss" title="Dismiss — hide this token from the group for good">✕</button>
     <header class="wg-head">
       ${t.image ? `<img class="wg-logo" loading="lazy" src="${esc(t.image)}" onerror="this.remove()">`
         : `<div class="wg-logo wg-logo-x">${esc((t.symbol || "?").slice(0, 2))}</div>`}
@@ -328,6 +392,16 @@ function paint(el, t, prev) {
       <span class="wg-when">${t.detected_at ? `detected ${MD.ago(t.detected_at)}` : ""}</span>
     </footer>`;
 
+  el.querySelector(".wg-dismiss").onclick = async () => {
+    // Leave immediately, then persist. The card is gone either way on the next
+    // tick, and waiting on the round-trip makes the click feel broken.
+    cards.delete(t.address);
+    announced.add(t.address);
+    el.classList.add("wg-out");
+    setTimeout(() => el.remove(), 420);
+    try { await hideToken(t.address); } catch { /* next tick brings it back */ }
+    tick();
+  };
   el.querySelector(".wg-copy").onclick = (e) => {
     navigator.clipboard?.writeText(e.target.dataset.ca);
     e.target.textContent = "✓";
@@ -337,6 +411,52 @@ function paint(el, t, prev) {
     el.classList.add("wg-tick");
     setTimeout(() => el.classList.remove("wg-tick"), 900);
   }
+}
+
+/* ---------------- dismissed tokens ---------------- */
+function openHidden(view) {
+  const list = lastPayload?.hidden ?? [];
+  const overlay = document.createElement("div");
+  overlay.className = "wg-modal";
+  overlay.innerHTML = `
+    <div class="wg-panel" role="dialog" aria-label="Dismissed tokens">
+      <h3>Dismissed tokens</h3>
+      <p class="wg-note">These are still held by ${minWallets}+ of this group's wallets — they
+         just do not get a card. Bring one back and it reappears on the next scan.</p>
+      <div id="wg-hlist">${list.length ? list.map((t) => `
+        <div class="wg-hrow" data-a="${esc(t.address)}">
+          ${t.image ? `<img class="wg-hlogo" loading="lazy" src="${esc(t.image)}" onerror="this.remove()">`
+            : `<div class="wg-hlogo"></div>`}
+          <div class="wg-hid">
+            <b>$${esc(t.symbol || "?")}</b>
+            <span class="mono">${esc(shortCa(t.address))}</span>
+          </div>
+          <span class="wg-hmeta">${t.holders_n} wallets · ${money(t.position_usd)}</span>
+          <button class="wg-ghost wg-unhide">Bring back</button>
+        </div>`).join("") : `<div class="wg-none">Nothing dismissed in this group.</div>`}</div>
+      <div class="wg-actions">
+        ${list.length ? `<button class="wg-ghost" id="wg-unhide-all">Bring back all ${list.length}</button>` : ""}
+        <button class="wg-primary" id="wg-hclose">Done</button>
+      </div>
+    </div>`;
+  document.body.append(overlay);
+
+  const close = () => { overlay.remove(); tick(); };
+  overlay.querySelector("#wg-hclose").onclick = close;
+  overlay.onclick = (e) => { if (e.target === overlay) close(); };
+  overlay.querySelectorAll(".wg-unhide").forEach((b) => b.onclick = async () => {
+    const row = b.closest(".wg-hrow");
+    b.disabled = true;
+    await unhideToken(row.dataset.a);
+    announced.add(row.dataset.a);        // returning is not a new detection
+    row.remove();
+    if (!overlay.querySelector(".wg-hrow")) close();
+  });
+  overlay.querySelector("#wg-unhide-all")?.addEventListener("click", async () => {
+    list.forEach((t) => announced.add(t.address));
+    await fetch(`/api/wgroups/${active}/hide`, { method: "DELETE" });
+    close();
+  });
 }
 
 /* ---------------- group editor ---------------- */

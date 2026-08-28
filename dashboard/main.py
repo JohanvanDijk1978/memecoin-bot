@@ -47,7 +47,7 @@ CACHE_TTL = 30                # s for aggregate cache
 
 WIN_X = 2.0                   # "win" = peak >= 2x first_mc
 HIT_CEIL = 1000.0             # winning multiple that maps to 100% Hit Rate
-VERSION = "1.36"              # bump with app.js VERSION + ?v= in index.html and app.js
+VERSION = "1.37"              # bump with app.js VERSION + ?v= in index.html and app.js
 
 # ---------------------------------------------------------------- database
 

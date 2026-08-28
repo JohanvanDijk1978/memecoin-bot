@@ -157,8 +157,38 @@ th.num{text-align:right}
 .wg-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:14px;align-items:start}
 @media(max-width:980px){.wg-cards{grid-template-columns:1fr}}
 .wg-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px;
+  position:relative;overflow:hidden;isolation:isolate;
   transition:opacity .4s ease,transform .4s ease,border-color .3s,box-shadow .3s}
 .wg-card:hover{border-color:var(--border2)}
+/* the token's own banner behind the card. Two layers: the art, and a scrim that
+   fades it into the card background so text stays readable over any artwork. */
+.wg-card.has-art::before{content:"";position:absolute;inset:0;z-index:-2;
+  background-image:var(--wg-art);background-size:cover;background-position:center top;
+  opacity:.30;transition:opacity .3s}
+/* a profile picture is square, so it tiles badly stretched — blur it into a wash */
+.wg-card.art-logo::before{background-size:130% auto;filter:blur(22px) saturate(1.4);opacity:.34}
+.wg-card.has-art::after{content:"";position:absolute;inset:0;z-index:-1;
+  background:linear-gradient(180deg,rgba(14,16,22,.34) 0%,rgba(14,16,22,.80) 42%,var(--bg2) 88%)}
+.wg-card.has-art:hover::before{opacity:.42}
+
+/* dismiss — sits in the corner gutter the header leaves for it */
+.wg-dismiss{position:absolute;top:7px;right:7px;z-index:2;width:22px;height:22px;line-height:1;
+  border:1px solid transparent;border-radius:6px;background:rgba(10,12,18,.5);color:var(--dim);
+  cursor:pointer;font-family:inherit;font-size:11px;opacity:0;transition:opacity .18s,color .18s,border-color .18s}
+.wg-card:hover .wg-dismiss,.wg-dismiss:focus-visible{opacity:1}
+.wg-dismiss:hover{color:var(--red);border-color:var(--red);background:rgba(10,12,18,.85)}
+@media(hover:none){.wg-dismiss{opacity:.75}}
+
+.wg-bell{padding:5px 8px;line-height:1}
+.wg-bell.off{opacity:.5}
+.wg-hidden-chip{color:var(--muted)}
+.wg-note{color:var(--muted);font-size:12px;line-height:1.6;margin:-6px 0 14px}
+.wg-hrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
+.wg-hrow:last-child{border-bottom:none}
+.wg-hlogo{width:28px;height:28px;border-radius:7px;background:var(--bg3);object-fit:cover;flex-shrink:0}
+.wg-hid{display:flex;flex-direction:column;min-width:0}
+.wg-hid .mono{color:var(--dim);font-size:10.5px}
+.wg-hmeta{margin-left:auto;color:var(--muted);font-size:11.5px;white-space:nowrap}
 /* a token that just crossed two wallets arrives like an alert, not a table row */
 @keyframes wgIn{0%{opacity:0;transform:translateY(16px) scale(.965)}60%{opacity:1}100%{opacity:1;transform:none}}
 .wg-card.wg-in{animation:wgIn .5s cubic-bezier(.2,.8,.25,1);border-color:var(--accent);
@@ -167,7 +197,7 @@ th.num{text-align:right}
 @keyframes wgTick{0%{box-shadow:0 0 0 1px rgba(124,108,255,.45)}100%{box-shadow:0 0 0 1px transparent}}
 .wg-card.wg-tick{animation:wgTick .9s}
 
-.wg-head{display:flex;gap:11px;align-items:flex-start}
+.wg-head{display:flex;gap:11px;align-items:flex-start;padding-right:20px}
 .wg-logo{width:40px;height:40px;border-radius:10px;flex-shrink:0;background:var(--bg3);object-fit:cover}
 .wg-logo-x{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:13px;font-weight:700}
 .wg-id{min-width:0;flex:1}
@@ -284,6 +314,6 @@ th.num{text-align:right}
     <div id="view"><div class="loading">Loading…</div></div>
   </main>
 </div>
-<script type="module" src="/static/app.js?v=1.36"></script>
+<script type="module" src="/static/app.js?v=1.37"></script>
 </body>
 </html>
