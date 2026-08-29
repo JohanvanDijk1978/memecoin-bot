@@ -150,3 +150,118 @@
 - Can run commands, read/write files on VPS, push to GitHub
 - Updates memory.md after completing tasks
 - Rate limit: avoid reading large files in one request
+
+### fomo Discord research bot
+
+- Local path: `C:\Users\mzshu\Downloads\memebot\fomo`; standalone real
+  `discord.py` bot, separate from the main Discord self-bot and memebot service.
+- Must run on borz/residential internet. FOMO Cloudflare blocks the Vultr VPS;
+  browser/Playwright transport is the default.
+- `/fomo <handle>` now presents a requester-only Compact/Wide layout selector.
+  Compact shows only the profile image, identity, Social, Strategy, Portfolio,
+  linked X account and linked wallets. Wide preserves the complete existing
+  profile including Best trade, activity, ranked PnL and links. Both layouts use
+  the same fetch/enrichment pipeline, and wallet edits preserve the selection.
+  Compact displays `Querying ⏳` while wallet enrichment is pending, then edits
+  to the discovered wallets or the final no-wallet state.
+- `/wallet` reverse-searches both FOMO and Pump across Solana and EVM. `/untrack`
+  and `/tracksettings` use Discord selection menus across both services; filter
+  changes preserve the existing baseline and never replay hidden activity.
+- `/token` returns DexScreener/Pump token metadata, image and top 5/10 holders
+  across Solana, Ethereum, BSC, Base and Robinhood. Holder wallets are annotated
+  with verified cached FOMO/Pump identities, and Pump Solana profiles are
+  resolved live even when they are not tracked.
+- Pump profile links are wallet-address based everywhere. When a Pump username
+  and wallet are displayed together, both `@username` and the shortened wallet
+  link to `https://pump.fun/profile/{FULL_SOLANA_WALLET}`. Never build a Pump
+  profile URL from a username.
+- Tracking JSON uses unique atomic temporary files with Windows lock retries and
+  skips unchanged writes. `/token` splits top-ten rows across Discord-safe
+  1,024-character fields. Pump RPC reads coalesce duplicate wallet subscriptions
+  and both Solana paths use circuit breakers during an all-provider outage.
+- Removed by request: trade/swap counts, win rate, generated image/PnL card and
+  Solscan/BaseScan/BscScan links.
+- FOMO's published `address` and `evmAddress` fields may be synthetic. Real
+  Solana wallets are derived from sponsored transactions. EVM discovery first
+  uses indexed identities, then transaction-backed evidence: older/lower-volume
+  trades are matched by chain, direction, timestamp and token amount, the same
+  wallet must explain multiple independent transactions, deployed code is
+  verified, and the confirmed mapping is cached. Manual stale-index fallback:
+  `evm_resolve.py --handle HANDLE --wallet 0x...`.
+- Every FOMO API request must send
+  `x-supported-chains: 1,56,143,4663,8453,1399811149`. Without it FOMO defaults
+  to Solana-only data, so EVM wallets and activity cannot be recovered later by
+  Helius, Alchemy or explorer fallbacks. The shared value is in
+  `fomo_chains.py` and is used by both direct HTTP and browser transports.
+- Live `0xOuroboros` proof (2026-08-19): profile user ID
+  `d5b00d6a-3881-5ba0-805b-25bfa0371932` resolves to EVM smart wallet
+  `0xb089d6ac26e0fe26e1a3a5076e4feaaf4d797180`. With the supported-chain header,
+  its supplied Ethereum, BSC and Robinhood contracts appear in the FOMO feed;
+  without the header the same API path contains zero EVM evidence.
+- Known mappings: onmycheck EVM `0xb6e00e...e7ac` and Collectible EVM
+  `0xfa2b3e...3111`; both remain cached in `wallet_cache.json`.
+- The FomoScan/Railway identity service was completely removed on 2026-08-19:
+  there is no endpoint, retry loop, cooldown or configuration dependency.
+  FOMO EVM discovery now uses only cached mappings, corroborated historical
+  transactions, exact current-balance fingerprints, or explicit manual mapping.
+- FrankDeGods Solana is
+  `498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ`, verified by one sell and two
+  buys signed with FOMO sponsor `AgmL...N51`. Discovery is buy/sell-aware for
+  all handles, uses 50 recent swaps, and preserves an existing EVM cache entry.
+- FOMO `/swaps` is not a complete EVM history. `fomo_evm_activity.py` reads the
+  verified wallet on Robinhood Chain Blockscout (chain 4663), rejects airdrops
+  without a priced input, calculates buy size/entry MC and merges with FOMO buys.
+- Solana discovery filters mixed-chain feeds to valid base58 Solana mints and
+  network ID `1399811149` before calling Solana RPCs. JSON-RPC `-32602` is a
+  caller/input error, not an all-provider outage, so it neither fails over nor
+  starts the circuit breaker. EVM transfer candidate sorting uses scalar keys so
+  equal-time matches cannot compare `EvmTransfer` objects.
+- Collectible live proof (2026-08-18): WALL3 buys $5,688.55 at $3.83M and
+  $2,370.34 at $3.65M from wallet `0xfa2b3e...3111`.
+- `/fomotrack handle` and `/fomountrack handle` persist channel subscriptions in
+  ignored `fomo_tracks.json`. FOMO polling is configured at 5s and Pump at 1s;
+  loops are independent and non-overlapping. Robinhood buys are not yet
+  included in FOMO tracking alerts.
+- Slash commands are global-only. `setup_hook()` syncs the global tree;
+  `on_ready()` syncs an empty tree to every connected guild once to delete
+  server-specific registrations left by older releases. Never call
+  `copy_global_to()` or restore `DISCORD_GUILD_ID`, because either recreates the
+  duplicate command list.
+- Current workspace changes remain uncommitted/not deployed; preserve the dirty
+  worktree and inspect it before making unrelated edits.
+- The project `.venv` is usable and points to Python 3.12. A non-escalated Codex
+  shell can still report an inaccessible/missing interpreter because the base
+  Python installation is outside the workspace sandbox; that is not evidence
+  that the environment itself is broken.
+- Verification: 78 conventional unit tests plus every `test_offline.py` Solana
+  wallet regression pass. The current Discord tree imports and live modified
+  FOMO client smoke tests return the expected multi-chain data.
+- Remaining performance work: `/fomo` fetches 50 swaps in
+  `profile_panels()` and the background Solana resolver fetches the identical
+  uncached endpoint again. Pass `TraderStats.raw_swaps` into the resolver and
+  only refetch when absent. This should reduce enrichment time and API pressure,
+  but has not been implemented yet.
+- Security: a Helius key was pasted into chat during debugging and should be rotated.
+
+## Multi-wallet buy alerts (memebot, this session)
+
+- New feature: several monitored wallets buying the same token inside a window
+  posts to its own Telegram channel (`MULTIWALLET_CHANNEL_ID`, falls back to
+  the owner DM). Default rule ≥3 wallets in 120 min, changeable at runtime with
+  `/multirule 3 120`.
+- Files: `src/multiwallet_store.py` (SQLite at `data/multiwallet.db`),
+  `src/multiwallet_sources.py` (Solana `logsSubscribe` per wallet + EVM
+  `eth_subscribe` logs per chain, both backed by a reconcile sweep),
+  `src/multiwallet.py` (rule, message, loop). Commands `/add /remove /list
+  /buys /multirule` live in `src/bot.py`; `main.py` runs the watcher in its
+  gather.
+- A buy = tokens in AND native/wrapped/stable out of the same wallet in the same
+  tx, so airdrops and transfers never count. Market cap per buy line comes from
+  the transaction (USD spent ÷ tokens × supply), not from a later quote.
+- One post per wallet-count milestone (`mw_alerts.max_count`), ceiling 6, then
+  24h quiet per token — this is also what keeps a restart or a sweep silent.
+- Chain endpoints are read from `fomo/.env` as a fallback. That file is not in
+  git and was missing on the VPS as of 2026-08-28 — without it Solana has no
+  websocket and the EVM chains have no endpoint at all.
+- Verify: `python3 tools/test_multiwallet.py` (offline, no keys) and
+  `python3 tools/diag_multiwallet.py [wallet]` (live, on the box).

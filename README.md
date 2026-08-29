@@ -181,3 +181,103 @@ mkdir -p data
 3. Add multiple IDs comma-separated: `DISCORD_CHANNEL_IDS=123456789,987654321`
 
 ---
+
+---
+
+# 🚨 Multi-wallet buy alerts
+
+Several wallets you track buying the same coin inside a window is the signal.
+When it happens the bot posts to its own Telegram channel:
+
+```
+🚨 3 wallets bought feesh
+📋 List: ALL · Rule: ≥3 wallets in 120 min
+
+🪙 feesh (feesh) · Solana
+💰 Market cap: $129.46k · Price: $0.0001294
+📄 CA: B7q2X2uMrft6VaVJMcRy7Zoia9tpxHgWC3qgiak8pump
+
+🛍 Buys:
+• rowdy · 12.74M feesh · $88.20k MC · TX (20:39 UTC)
+• ProfitPUMP · 15.69M feesh · $102.00k MC · TX (21:03 UTC)
+• RowdyFOMO · 15.12M feesh · $110.40k MC · TX (21:12 UTC)
+
+🔗 DexScreener | GMGN | Birdeye | Explorer | Website | Twitter
+```
+
+The market cap on each buy line is the market cap **at the moment of that buy**,
+worked out from the transaction itself (USD spent ÷ tokens received × supply),
+not from a later quote.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/add <wallet> <name>` | monitor a wallet — `/add 7abc...xyz rowdy` |
+| `/remove <wallet-or-name>` | stop monitoring it |
+| `/list` | monitored wallets, the active rule, which chains are live |
+| `/buys` | the last 15 detected buys — how you tell "nothing is happening" from "detection is broken" |
+| `/multirule 3 120` | set the rule: ≥3 wallets in 120 minutes. Optional 3rd/4th argument set the milestone ceiling and the per-token cooldown in hours. |
+
+Solana and EVM addresses are both accepted; an EVM address is watched on every
+configured EVM chain at once.
+
+## Setup
+
+1. Create a Telegram channel, add the bot as an **admin** with permission to
+   post, then forward any message from it to
+   [@username_to_id_bot](https://t.me/username_to_id_bot) to get its `-100…` id.
+2. Put it in `.env` on the VPS:
+
+   ```
+   MULTIWALLET_CHANNEL_ID=-1001234567890
+   ```
+
+   Without it the alerts go to `YOUR_TELEGRAM_USER_ID` (your DM), so the feature
+   works before the channel exists.
+3. The chain endpoints come from `fomo/.env` (`SOLANA_RPC`, `ETH_RPC`,
+   `BASE_RPC`, `BSC_RPC`, `ROBINHOOD_RPC` and the matching `*_WSS`), which the
+   watcher reads without overriding anything already set in the bot's own
+   `.env`. **That file is not deployed by git** — copy it once:
+
+   ```
+   scp C:\Users\mzshu\Downloads\memebot\fomo\.env root@209.250.245.16:/root/memecoin-bot-new/fomo/.env
+   ```
+
+   Without it Solana falls back to the public RPC (sweep only, no websocket)
+   and the EVM chains have no endpoint at all.
+
+## How detection works
+
+* **Solana** — one websocket, one `logsSubscribe {mentions:[wallet]}` per
+  monitored wallet. Sub-second, and adding a wallet is one more subscribe on
+  the same connection.
+* **EVM** — one `eth_subscribe("logs")` per chain, filtered on the ERC-20
+  Transfer topic with every monitored wallet in the `to` slot. One subscription
+  covers the whole list, so cost does not grow with the number of wallets.
+* **Both** are backed by a reconcile sweep (`getSignaturesForAddress` per
+  wallet, `eth_getLogs` per chain) on a slow timer, so a gap during a reconnect
+  is filled rather than lost. A chain with no websocket URL degrades to that
+  sweep alone instead of going dark.
+* **A buy** is tokens going up while SOL/ETH/BNB, wrapped native or a stablecoin
+  goes out of the same wallet in the same transaction — so airdrops, transfers
+  in and failed swaps never count.
+* **One post per milestone.** 3→4→5→6 wallets each post once (`mw_alerts`
+  remembers the highest count already announced, which is also what keeps a
+  restart silent), then the token is muted for 24h.
+
+State lives in `data/multiwallet.db` (SQLite, gitignored). Deleting it loses
+the wallet list.
+
+## Checking it on the box
+
+```bash
+python3 tools/diag_multiwallet.py                    # endpoints, websockets, channel
+python3 tools/diag_multiwallet.py <wallet> 50        # replay a wallet's recent txs
+python3 tools/test_multiwallet.py                    # offline test, no network needed
+```
+
+Env vars, all optional: `MULTIWALLET_CHANNEL_ID`, `MULTIWALLET_EVM_CHAINS`
+(default `ethereum,base,bsc,robinhood`), `MULTIWALLET_RECONCILE_SEC` (300),
+`MULTIWALLET_POLL_SEC` (30, used when a chain has no websocket),
+`MULTIWALLET_SYNC_SEC` (20), `MULTIWALLET_DB`.

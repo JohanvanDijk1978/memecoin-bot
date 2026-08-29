@@ -9,6 +9,8 @@ Entrypoint — runs all the bot's async loops concurrently:
   5. Dexscreener paid-boost + CTO watcher (Solana)
   6. Dexscreener paid-boost + CTO watcher (EVM: Ethereum, BSC, Robinhood)
   7. Milestone tracker replying to dex-update posts at 2x/3x/5x/10x/+5x
+  8. Multi-wallet buy watcher — alerts when several monitored wallets buy the
+     same token inside the configured window (Solana + EVM, own channel)
 """
 
 import asyncio
@@ -57,6 +59,12 @@ async def run_discord_scraper():
     
 
 
+async def run_multiwallet():
+    """Start the multi-wallet buy watcher (idle until wallets are /add-ed)."""
+    from src.multiwallet import run_multiwallet_watcher
+    await run_multiwallet_watcher()
+
+
 async def run_bot():
     """Start the Telegram bot that handles /status, /leaderboard, /pump."""
     from src.bot import build_bot_app, register_commands
@@ -67,7 +75,8 @@ async def run_bot():
     await register_commands(app)
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    logger.info("✅ Telegram bot started — /status /leaderboard /pump /wallet /credits")
+    logger.info("✅ Telegram bot started — /status /leaderboard /pump /wallet "
+                "/credits /add /remove /list /buys /multirule")
 
     # Keep running until cancelled
     try:
@@ -102,11 +111,13 @@ async def main():
         run_dex_watcher(),
         run_dex_watcher_evm(),
         run_milestone_tracker(),
+        run_multiwallet(),
         return_exceptions=True,
     )
 
     for name, result in zip(
-        ["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher", "dex_watcher_evm", "milestone_tracker"],
+        ["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher",
+         "dex_watcher_evm", "milestone_tracker", "multiwallet"],
         results,
     ):
         if isinstance(result, Exception):

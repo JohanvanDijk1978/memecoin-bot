@@ -582,6 +582,165 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
 
 
+# ── Multi-wallet watcher commands ─────────────────────────────────────────
+# The wallet list, the rule and the detected buys all live in
+# src/multiwallet_store.py; these handlers are a thin Telegram surface over it
+# so the watcher owns its own state and nothing here has to know about chains.
+
+def _mw_short(address: str) -> str:
+    return f"{address[:4]}…{address[-4:]}" if len(address) > 10 else address
+
+
+async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/add <wallet> <name> — monitor a wallet for multi-wallet buy alerts."""
+    if not is_allowed(update):
+        return
+    from src import multiwallet as mw
+    from src import multiwallet_store as mw_store
+
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: `/add <wallet> <name>`\n"
+            "Example: `/add 7abc...xyz rowdy`",
+            parse_mode="Markdown")
+        return
+
+    address, name = args[0], " ".join(args[1:])
+    result = mw_store.add_wallet(address, name)
+    if result["status"] == "invalid":
+        await update.message.reply_text(
+            "❌ That doesn't look like a Solana or EVM address.")
+        return
+
+    wallet = result["wallet"]
+    chain = "Solana" if wallet["kind"] == "sol" else "EVM (ETH/Base/BSC/Robinhood)"
+    verb = {"added": "Now watching", "renamed": "Renamed",
+            "exists": "Already watching"}[result["status"]]
+    total = len(mw_store.list_wallets())
+    await update.message.reply_text(
+        f"🪙 *{verb}* {mw.strip_md(wallet['name'])} — `{wallet['address']}`\n"
+        f"{chain} · {total} wallet(s) monitored",
+        parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/remove <wallet-or-name> — stop monitoring a wallet."""
+    if not is_allowed(update):
+        return
+    from src import multiwallet as mw
+    from src import multiwallet_store as mw_store
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("Usage: `/remove <wallet-or-name>`",
+                                        parse_mode="Markdown")
+        return
+    removed = mw_store.remove_wallet(" ".join(args))
+    if not removed:
+        await update.message.reply_text("🤷 No monitored wallet matched that.")
+        return
+    names = ", ".join(mw.strip_md(r["name"] or _mw_short(r["address"])) for r in removed)
+    await update.message.reply_text(
+        f"🗑 Removed *{names}* — {len(mw_store.list_wallets())} wallet(s) left",
+        parse_mode="Markdown")
+
+
+async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/list — the monitored wallets, the active rule and the live chains."""
+    if not is_allowed(update):
+        return
+    from src import multiwallet as mw
+    from src import multiwallet_store as mw_store
+
+    wallets = mw_store.list_wallets()
+    if not wallets:
+        await update.message.reply_text(
+            "No wallets monitored yet.\nAdd one with `/add <wallet> <name>`.",
+            parse_mode="Markdown")
+        return
+
+    lines = [f"🪙 *Monitored wallets* ({len(wallets)})", ""]
+    for kind, label in (("sol", "Solana"), ("evm", "EVM")):
+        group = [w for w in wallets if w["kind"] == kind]
+        if not group:
+            continue
+        lines.append(f"*{label}*")
+        for w in group:
+            lines.append(f"• *{mw.strip_md(w['name'] or '?')}* — `{w['address']}`")
+        lines.append("")
+    lines += mw.status_lines()
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3950].rsplit("\n", 1)[0] + "\n\n_…truncated_"
+    await update.message.reply_text(text, parse_mode="Markdown",
+                                    disable_web_page_preview=True)
+
+
+async def cmd_buys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/buys — the last detected buys, so silence is explainable."""
+    if not is_allowed(update):
+        return
+    from src import multiwallet as mw
+    from src import multiwallet_store as mw_store
+
+    buys = mw_store.recent_buys(limit=15)
+    if not buys:
+        lines = ["🛍 No buys detected yet.", ""] + mw.status_lines()
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    names = mw_store.wallet_names()
+    lines = [f"🛍 *Last {len(buys)} detected buys*", ""]
+    for b in buys:
+        who = mw.strip_md(names.get(b["wallet"], _mw_short(b["wallet"])))
+        symbol = mw.strip_md(b["symbol"] or b["token"][:6])
+        link = mw.explorer_tx(b["chain"], b["tx"])
+        stamp = mw.utc_time(b["ts"])
+        tx = f"[TX]({link})" if link else "tx"
+        spent = f" · {mw.fmt_mcap(b['spent_usd'])}" if b["spent_usd"] else ""
+        lines.append(f"• *{who}* · {mw.fmt_amount(b['amount'])} {symbol}"
+                     f"{spent} · {tx} ({stamp})")
+    lines += [""] + mw.status_lines()
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown",
+                                    disable_web_page_preview=True)
+
+
+async def cmd_multirule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/multirule [min] [window_min] [ceiling] [cooldown_h] — read or set the rule."""
+    if not is_allowed(update):
+        return
+    from src import multiwallet_store as mw_store
+
+    args = context.args or []
+    if args:
+        fields = ["min_wallets", "window_min", "max_wallets", "cooldown_h"]
+        changes = {}
+        for field, raw in zip(fields, args):
+            try:
+                value = int(raw)
+            except ValueError:
+                await update.message.reply_text(
+                    "Usage: `/multirule <min wallets> <window min> [ceiling] [cooldown h]`\n"
+                    "Example: `/multirule 3 120`", parse_mode="Markdown")
+                return
+            if value <= 0:
+                await update.message.reply_text("Every value has to be at least 1.")
+                return
+            changes[field] = value
+        rule = mw_store.set_rule(**changes)
+    else:
+        rule = mw_store.get_rule()
+
+    await update.message.reply_text(
+        f"📋 *Multi-wallet rule*\n\n"
+        f"≥*{rule['min_wallets']}* wallets in *{rule['window_min']}* min\n"
+        f"Milestones post up to *{rule['max_wallets']}* wallets, "
+        f"then *{rule['cooldown_h']}h* quiet per token\n\n"
+        f"_Change with_ `/multirule 3 120`",
+        parse_mode="Markdown")
+
+
 def build_bot_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("status", cmd_status))
@@ -591,6 +750,11 @@ def build_bot_app() -> Application:
     app.add_handler(CommandHandler("walletall", cmd_wallet_all))
     app.add_handler(CommandHandler("walletmentions", cmd_wallet_mentioned))
     app.add_handler(CommandHandler("credits", cmd_credits))
+    app.add_handler(CommandHandler("add", cmd_add))
+    app.add_handler(CommandHandler("remove", cmd_remove))
+    app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("buys", cmd_buys))
+    app.add_handler(CommandHandler("multirule", cmd_multirule))
     app.add_handler(CallbackQueryHandler(pump_callback, pattern="^pump_"))
 
     # post_init is ONLY invoked by run_polling()/run_webhook(). main.py starts
@@ -610,6 +774,11 @@ BOT_COMMANDS = [
     ("walletall",      "All wallets linked to an X handle"),
     ("walletmentions", "Wallets an X account tweeted about"),
     ("credits",        "Frontrun API credits remaining"),
+    ("add",            "🪙 Monitor a wallet: /add <wallet> <name>"),
+    ("remove",         "Stop monitoring a wallet"),
+    ("list",           "Monitored wallets and the multi-wallet rule"),
+    ("buys",           "Last detected buys from monitored wallets"),
+    ("multirule",      "Read or set the multi-wallet rule"),
 ]
 
 
