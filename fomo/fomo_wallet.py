@@ -908,6 +908,71 @@ def find_cached_wallets(address: str, cache_path: str | Path = CACHE) -> list[Ca
     return sorted(matches, key=lambda match: match.handle.casefold())
 
 
+# --------------------------------------------------- unverified candidates
+
+@dataclass(frozen=True)
+class WalletCandidate:
+    """A wallet a route pinned down on chain but could not verify.
+
+    The routes below only ever *return* a wallet they have corroborated, and
+    that stays true. But a route that reaches "exactly one on-chain owner
+    holds the position FOMO publishes for this trader" and then fails to
+    corroborate it used to drop that owner on the floor, which is how a
+    handle with a perfectly good single candidate ended up showing nothing at
+    all.
+
+    A candidate is never cached and never returned as a wallet. It travels
+    beside the (absent) answer so the caller can offer it *as unverified*,
+    clearly marked, instead of offering nothing.
+
+    `sources` names the routes that produced it and `evidence` the mints
+    behind it -- both are unioned when two routes land on the same address,
+    which is exactly what makes that address stronger than a lone hit.
+    """
+
+    address: str
+    sources: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
+
+    @property
+    def strength(self) -> tuple[int, int]:
+        """Rank key: independent routes first, then independent tokens."""
+        return len(self.sources), len(self.evidence)
+
+    def merged_with(self, other: "WalletCandidate") -> "WalletCandidate":
+        return WalletCandidate(
+            address=self.address,
+            sources=tuple(dict.fromkeys(self.sources + other.sources)),
+            evidence=tuple(dict.fromkeys(self.evidence + other.evidence)),
+        )
+
+
+def choose_unverified_wallets(
+    candidates: Sequence[WalletCandidate],
+) -> list[WalletCandidate]:
+    """The strongest unverified candidate(s), or all of them when tied.
+
+    Candidates arrive from independent routes, so the same address seen twice
+    is stronger than either sighting alone: merge first, rank after. If one
+    address then stands above the rest it is the fallback and the only thing
+    worth showing. If several tie at the top there is no honest way to prefer
+    one, so every candidate is returned and the caller says so.
+    """
+    merged: dict[str, WalletCandidate] = {}
+    for candidate in candidates:
+        address = (candidate.address or "").strip()
+        if not address:
+            continue
+        seen = merged.get(address)
+        merged[address] = candidate if seen is None else seen.merged_with(candidate)
+    if not merged:
+        return []
+    ranked = sorted(merged.values(), key=lambda item: item.strength, reverse=True)
+    best = ranked[0].strength
+    leaders = [item for item in ranked if item.strength == best]
+    return leaders if len(leaders) == 1 else ranked
+
+
 # -------------------------------------------------------------- resolver
 
 class WalletResolver:
@@ -1085,6 +1150,7 @@ class WalletResolver:
     async def resolve_from_holders(
         self, fomo: Any, user: Any, balances: Any,
         swaps: Sequence[dict] = (), use_cache: bool = True,
+        candidates: list[WalletCandidate] | None = None,
     ) -> str | None:
         """FOMO's own holder list, asked about this trader's own positions.
 
@@ -1102,6 +1168,12 @@ class WalletResolver:
         `humanAmount` and demands uniqueness in both directions: the amount
         must identify exactly one wallet AND that wallet must match exactly one
         trader.
+
+        `candidates` is an optional sink. Pass a list and any unambiguous
+        owner this route finds but cannot corroborate is appended to it as a
+        `WalletCandidate`. The return value is unchanged -- an uncorroborated
+        owner is still not a wallet -- but the caller keeps the option of
+        showing it, clearly marked as unverified, rather than nothing.
         """
         handle = (getattr(user, "handle", "") or "").lower()
         if not handle:
@@ -1113,7 +1185,9 @@ class WalletResolver:
             if use_cache and (hit := cached_wallet(handle, self.cache_path)):
                 return hit
             try:
-                return await self._resolve_from_holders(handle, fomo, balances, swaps)
+                return await self._resolve_from_holders(
+                    handle, fomo, balances, swaps, candidates
+                )
             except Exception as exc:
                 log.warning("Solana holder discovery failed for %s: %s", handle, exc)
                 return None
@@ -1171,7 +1245,8 @@ class WalletResolver:
         return [(owner, raw / scale) for owner, raw in totals.items()]
 
     async def _resolve_from_holders(
-        self, handle: str, fomo: Any, balances: Any, swaps: Sequence[dict]
+        self, handle: str, fomo: Any, balances: Any, swaps: Sequence[dict],
+        candidates: list[WalletCandidate] | None = None,
     ) -> str | None:
         positions = solana_balance_positions(balances)[:HODLER_TOKENS]
         if not positions:
@@ -1231,6 +1306,7 @@ class WalletResolver:
 
         singles = [(owner, tokens) for owner, tokens in evidence.items()
                    if len(tokens) == 1]
+        refuted: set[str] = set()
         if len(singles) == 1:
             owner, tokens = singles[0]
             ok, how, confirmed = await self._corroborate(handle, owner, swaps)
@@ -1242,23 +1318,32 @@ class WalletResolver:
                     detail=f"a published holder position on {tokens[0][:12]}",
                     extra={"hodlerToken": tokens[0]},
                 )
+            if how == "verify0":
+                refuted.add(owner)
 
         log.info(
             "no Solana wallet match for %s: %d published position(s), "
             "%d unambiguous owner(s), no verified owner",
             handle, len(named), len(evidence),
         )
+        self._offer_candidates(handle, candidates, evidence, refuted,
+                               source="hodlers+amount")
         return None
 
     async def resolve_from_balances(
         self, user: Any, balances: Any, swaps: Sequence[dict] = (),
         use_cache: bool = True,
+        candidates: list[WalletCandidate] | None = None,
     ) -> str | None:
         """Fallback: map exact FOMO SPL balances to their on-chain owner.
 
         `swaps` is optional and only reaches the corroboration gate, where it
         upgrades the check from "this wallet has touched FOMO" to "this wallet
         made these trades".
+
+        `candidates` is the same optional sink `resolve_from_holders` takes:
+        an unambiguous owner that fails the gate is recorded there instead of
+        being discarded, and is still not returned as a wallet.
         """
         handle = (getattr(user, "handle", "") or "").lower()
         if not handle:
@@ -1270,13 +1355,16 @@ class WalletResolver:
             if use_cache and (hit := cached_wallet(handle, self.cache_path)):
                 return hit
             try:
-                return await self._resolve_from_balances(handle, balances, swaps)
+                return await self._resolve_from_balances(
+                    handle, balances, swaps, candidates
+                )
             except Exception as exc:
                 log.warning("Solana balance discovery failed for %s: %s", handle, exc)
                 return None
 
     async def _resolve_from_balances(
-        self, handle: str, balances: Any, swaps: Sequence[dict] = ()
+        self, handle: str, balances: Any, swaps: Sequence[dict] = (),
+        candidates: list[WalletCandidate] | None = None,
     ) -> str | None:
         positions = solana_balance_positions(balances)[:6]
         if not positions:
@@ -1305,18 +1393,59 @@ class WalletResolver:
         # really is this trader before caching it -- against their own swaps
         # where the caller supplied them, against the sponsor otherwise.
         singles = [(owner, mints) for owner, mints in evidence.items() if len(mints) == 1]
+        refuted: set[str] = set()
         if len(singles) == 1:
             owner, mints = singles[0]
             ok, how, confirmed = await self._corroborate(handle, owner, swaps)
             if ok:
                 return self._save_balance_match(handle, owner, mints, how, confirmed)
+            if how == "verify0":
+                refuted.add(owner)
 
         log.info(
             "no Solana wallet match for %s: %d balance fingerprint(s), "
             "%d unambiguous owner(s), no verified owner",
             handle, len(positions), len(evidence),
         )
+        self._offer_candidates(handle, candidates, evidence, refuted,
+                               source="balance+helius")
         return None
+
+    def _offer_candidates(
+        self, handle: str, sink: list[WalletCandidate] | None,
+        evidence: dict[str, list[str]], refuted: set[str], *, source: str,
+    ) -> None:
+        """Hand the route's unambiguous-but-unverified owners to the caller.
+
+        The route still returns None and still caches nothing: none of this is
+        a verified wallet. It only stops an owner the route already pinned
+        down from being thrown away, so a caller that would otherwise print
+        "no wallet" can offer it under a warning instead.
+
+        An owner `_corroborate` *refuted* is not offered. `verify_wallet`
+        looked at that wallet's own history and this trader's swaps were not
+        in it -- that is an answer, not a gap, and re-offering it as "likely"
+        would be worse than saying nothing.
+        """
+        if sink is None:
+            return
+        offered: list[str] = []
+        for owner, tokens in evidence.items():
+            if owner in refuted:
+                log.info(
+                    "not offering %s as an unverified wallet for %s: its own "
+                    "history refutes this trader's swaps", owner, handle,
+                )
+                continue
+            sink.append(WalletCandidate(
+                address=owner, sources=(source,), evidence=tuple(tokens),
+            ))
+            offered.append(owner)
+        if offered:
+            log.info(
+                "%s route: keeping %d unverified candidate(s) for %s: %s",
+                source, len(offered), handle, ", ".join(offered),
+            )
 
     async def _helius_token_balances(self, mint: str) -> dict[str, int]:
         """Return raw token totals by owner using Helius DAS getTokenAccounts."""

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import unittest
+from collections.abc import Sequence
 from unittest.mock import patch
 
 from fomo_api import FomoUser
 from fomo_bot import (
+    UNVERIFIED_WALLET_NOTE,
+    UNVERIFIED_WALLETS_NOTE,
     FomoLayoutSelectionView,
     _clear_guild_commands,
     _enrich_fomo_message,
@@ -14,12 +18,17 @@ from fomo_bot import (
     build_embed,
     build_profile_embed,
 )
+from fomo_wallet import WalletCandidate
 from fomo_features import LatestActivity, OpenPosition, TraderStats
 from fomo_tracking import TrackEvent
 
 
 SOLANA_WALLET = "GxpWcYRz2nLcNxshch7yAhseZGtdgQz1nG8p5XxwQVdD"
 EVM_WALLET = "0x0232b9afb9160fe479f25dade62fa60ef657bdc5"
+LIKELY_WALLET = "Likely11111111111111111111111111111111111111"
+OTHER_LIKELY_WALLET = "Likely22222222222222222222222222222222222222"
+SOL_MINT_1 = "MintA111111111111111111111111111111111111111"
+SOL_MINT_2 = "MintB111111111111111111111111111111111111111"
 
 
 def user(handle: str = "latencytest") -> FomoUser:
@@ -1502,6 +1511,191 @@ class SolanaRouteOrderTests(unittest.IsolatedAsyncioTestCase):
         resolver = self.Recorder({"transactions": SOLANA_WALLET})
         await self._run(resolver, TraderStats())
         self.assertEqual(resolver.calls, ["transactions"])
+
+
+class UnverifiedWalletCardTests(unittest.IsolatedAsyncioTestCase):
+    """What `/fomo` shows when no route could corroborate a wallet.
+
+    The pudgypenguins case: FOMO publishes the trader as a top holder, the
+    chain names exactly one owner of that position, and no swap ties the two
+    together. Showing "No verified wallets found." threw that owner away.
+    """
+
+    class CandidateResolver(BaseWalletResolver):
+        """Answers nothing and offers `count` uncorroborated owners.
+
+        `resolve()` returning None is the "FOMO returned no swaps" leg of the
+        real log; the candidates arrive through the sink the derived routes
+        take.
+        """
+
+        def __init__(self, addresses: Sequence[str] = (LIKELY_WALLET,)) -> None:
+            self.addresses = tuple(addresses)
+            self.calls: list[str] = []
+
+        async def resolve_from_holders(self, _fomo, _user, _balances, **kwargs):
+            self.calls.append("holders")
+            sink = kwargs.get("candidates")
+            if sink is not None:
+                for index, address in enumerate(self.addresses):
+                    sink.append(WalletCandidate(
+                        address, ("hodlers+amount",),
+                        ((SOL_MINT_1,) if index == 0 else (SOL_MINT_2,)),
+                    ))
+            return None
+
+        async def resolve(self, _fomo, _user):
+            self.calls.append("transactions")
+            return None
+
+        async def resolve_from_balances(self, _user, _balances, **kwargs):
+            self.calls.append("balances")
+            return None
+
+    def _stats(self) -> TraderStats:
+        return TraderStats(
+            raw_balances={"balances": []},
+            raw_swaps={"swaps": [{"createdAt": "2026-08-18T13:05:59.531Z"}]},
+        )
+
+    async def _card(self, resolver: object, layout: str = "compact") -> Message:
+        message = Message()
+        await _enrich_fomo_message(
+            Client(resolver), message, user("pudgypenguins"), self._stats(),
+            None, None, timeout=1, layout=layout, wallets_pending=True,
+        )
+        return message
+
+    # ---------------------------------------------------------- rendering
+
+    def test_a_verified_wallet_is_never_downgraded_or_warned_about(self) -> None:
+        embed = build_compact_embed(
+            user(), SOLANA_WALLET, EVM_WALLET, TraderStats(),
+            unverified_wallets=(WalletCandidate(LIKELY_WALLET),),
+        )
+        wallets = {field.name: field.value for field in embed.fields}["Linked wallets"]
+        self.assertIn(SOLANA_WALLET, wallets)
+        self.assertNotIn(LIKELY_WALLET, wallets)
+        self.assertNotIn("⚠️", wallets)
+
+    def test_one_candidate_is_shown_copyable_with_the_singular_warning(self) -> None:
+        embed = build_compact_embed(
+            user(), None, None, TraderStats(),
+            unverified_wallets=(WalletCandidate(LIKELY_WALLET, ("hodlers+amount",)),),
+        )
+        wallets = {field.name: field.value for field in embed.fields}["Linked wallets"]
+        # Same inline-code row a linked wallet gets, so it stays selectable.
+        self.assertIn(f"◎ **Solana** · `{LIKELY_WALLET}`", wallets)
+        self.assertIn(UNVERIFIED_WALLET_NOTE, wallets)
+        self.assertNotIn("No verified wallets found.", wallets)
+
+    def test_several_candidates_are_all_shown_under_the_plural_warning(self) -> None:
+        embed = build_compact_embed(
+            user(), None, None, TraderStats(),
+            unverified_wallets=(
+                WalletCandidate(LIKELY_WALLET),
+                WalletCandidate(OTHER_LIKELY_WALLET),
+            ),
+        )
+        wallets = {field.name: field.value for field in embed.fields}["Linked wallets"]
+        self.assertIn(LIKELY_WALLET, wallets)
+        self.assertIn(OTHER_LIKELY_WALLET, wallets)
+        self.assertIn(UNVERIFIED_WALLETS_NOTE, wallets)
+
+    def test_a_verified_evm_wallet_keeps_its_row_beside_a_candidate(self) -> None:
+        embed = build_compact_embed(
+            user(), None, EVM_WALLET, TraderStats(),
+            unverified_wallets=(WalletCandidate(LIKELY_WALLET),),
+        )
+        wallets = {field.name: field.value for field in embed.fields}["Linked wallets"]
+        self.assertIn(f"Ξ **EVM** · `{EVM_WALLET}`", wallets)
+        self.assertIn(LIKELY_WALLET, wallets)
+        self.assertIn(UNVERIFIED_WALLET_NOTE, wallets)
+
+    def test_no_candidate_keeps_the_existing_empty_state(self) -> None:
+        embed = build_compact_embed(user(), None, None, TraderStats())
+        wallets = {field.name: field.value for field in embed.fields}["Linked wallets"]
+        self.assertEqual(wallets, "No verified wallets found.")
+
+    def test_the_wide_layout_gets_its_own_clearly_named_field(self) -> None:
+        embed = build_embed(
+            user(), None, None, TraderStats(),
+            unverified_wallets=(WalletCandidate(LIKELY_WALLET),),
+        )
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertNotIn("Solana wallet", fields)
+        self.assertIn(LIKELY_WALLET, fields["Solana wallet · unverified"])
+        self.assertIn(UNVERIFIED_WALLET_NOTE, fields["Solana wallet · unverified"])
+
+    def test_the_wide_layout_leaves_a_verified_wallet_exactly_as_it_was(self) -> None:
+        embed = build_embed(
+            user(), SOLANA_WALLET, None, TraderStats(),
+            unverified_wallets=(WalletCandidate(LIKELY_WALLET),),
+        )
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertEqual(fields["Solana wallet"], f"◎ `{SOLANA_WALLET}`")
+        self.assertNotIn("Solana wallet · unverified", fields)
+
+    # ------------------------------------------------------ the decision
+
+    async def test_the_pudgypenguins_path_shows_the_single_likely_wallet(self) -> None:
+        resolver = self.CandidateResolver()
+        message = await self._card(resolver)
+        # Every route still ran, and none of them returned a wallet.
+        self.assertEqual(resolver.calls, ["holders", "transactions", "balances"])
+        wallets = {f.name: f.value for f in message.embeds[0].fields}["Linked wallets"]
+        self.assertIn(LIKELY_WALLET, wallets)
+        self.assertIn(UNVERIFIED_WALLET_NOTE, wallets)
+
+    async def test_two_tied_candidates_are_both_offered_rather_than_guessed(self) -> None:
+        message = await self._card(
+            self.CandidateResolver((LIKELY_WALLET, OTHER_LIKELY_WALLET))
+        )
+        wallets = {f.name: f.value for f in message.embeds[0].fields}["Linked wallets"]
+        self.assertIn(LIKELY_WALLET, wallets)
+        self.assertIn(OTHER_LIKELY_WALLET, wallets)
+        self.assertIn(UNVERIFIED_WALLETS_NOTE, wallets)
+
+    async def test_a_verified_wallet_suppresses_the_candidates_entirely(self) -> None:
+        class Verified(self.CandidateResolver):
+            async def resolve(self, _fomo, _user):
+                self.calls.append("transactions")
+                return SOLANA_WALLET
+
+        message = await self._card(Verified())
+        wallets = {f.name: f.value for f in message.embeds[0].fields}["Linked wallets"]
+        self.assertIn(SOLANA_WALLET, wallets)
+        self.assertNotIn(LIKELY_WALLET, wallets)
+        self.assertNotIn("⚠️", wallets)
+
+    async def test_no_candidate_anywhere_still_says_no_verified_wallets(self) -> None:
+        message = await self._card(self.CandidateResolver(()))
+        wallets = {f.name: f.value for f in message.embeds[0].fields}["Linked wallets"]
+        self.assertEqual(wallets, "No verified wallets found.")
+
+    async def test_the_fallback_says_so_in_the_log(self) -> None:
+        # The one line that separates "we found nothing" from "we found
+        # something we cannot prove" when reading a live log.
+        with self.assertLogs("fomobot", level="INFO") as captured:
+            await self._card(self.CandidateResolver())
+        self.assertTrue(
+            any(f"using unverified fallback wallet for pudgypenguins: "
+                f"{LIKELY_WALLET}" in line for line in captured.output),
+            captured.output,
+        )
+
+    async def test_a_verified_wallet_logs_no_fallback(self) -> None:
+        class Verified(self.CandidateResolver):
+            async def resolve(self, _fomo, _user):
+                self.calls.append("transactions")
+                return SOLANA_WALLET
+
+        with self.assertLogs("fomobot", level="INFO") as captured:
+            logging.getLogger("fomobot").info("probe")
+            await self._card(Verified())
+        self.assertFalse(any("unverified fallback" in line
+                             for line in captured.output), captured.output)
+
 
 
 if __name__ == "__main__":

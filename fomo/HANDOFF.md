@@ -170,6 +170,290 @@ fomo.family egress (section 5). Its first real run is the open item, and
     hl.eco's CDN answers an `httpx` client — which is exactly why the probe
     prints the HTTP status of that first call before anything else.
 
+## Session 42 — `/pump` has two wallets, and only one of them is published
+
+`/pump eth` shows a Solana wallet and no EVM one. That is not a bug in the
+card, and it is not usually a bug at all — it is the shape of the two
+platforms showing through, and there was no way to see which.
+
+**A Pump profile IS a Solana address.** `GET /users/{name}` returns it, so
+naming it costs one request and cannot fail for interesting reasons. The EVM
+account is returned by no Pump route at all. `pump_evm.py` has to *discover*
+it, from a fingerprint: take the exact `(chain, token, amountHeld)` balance of
+a position Pump publishes, find the one address in that token's public holder
+index holding exactly that much, then confirm it independently with `balanceOf`
+through the chain's own RPC.
+
+Four things must be true at once for that to produce an address, and until now
+all four failures looked identical from Discord — the EVM field simply was not
+there. `pump_resolve_diag.py` now walks and names every one of them:
+
+| stage | means |
+|---|---|
+| `evm-cache` | already discovered and confirmed; costs no requests |
+| `evm-portfolio` | Pump publishes no **open** position on Ethereum, BSC, Base or Robinhood. **This is the common answer and it is not a failure** — a Solana-only trader has nothing to fingerprint, and a sold position leaves nothing behind |
+| `evm-holders` | no holder index answered for any candidate token (CMC's keyless route, or Blockscout for Robinhood) |
+| `evm-fingerprint` | the index has no address at that exact balance (outside the indexed page, or the balance moved), or it has more than one — refused rather than guessed |
+| `evm-verify` | a unique candidate the chain RPC would not confirm. A missing or broken `ETH_RPC` / `BSC_RPC` / `BASE_RPC` / `ROBINHOOD_RPC` fails this gate exactly like a wrong candidate does |
+
+That the cache holds 7 mappings against 4009 known profiles is the measurement
+this makes readable rather than mysterious: discovery is precise, not broken,
+and it only fires for the minority of Pump traders holding an open EVM
+position large enough to sit inside a public holder index.
+
+```powershell
+python pump_resolve_diag.py eth                     # both wallets, one card
+python pump_resolve_diag.py eth --fresh -v          # re-discover, with HTTP statuses
+python pump_resolve_diag.py eth --no-evm            # profile only, as before
+python pump_resolve_diag.py a b c --csv hunt_out/pump_wallets.csv
+```
+
+The rule the FOMO diagnostic set is kept: **the tool never reimplements the
+resolver.** It walks `PumpEvmResolver`'s own candidate ordering through
+`PumpEvmResolver`'s own helpers, and when a candidate survives every gate it
+hands the decision back to `PumpEvmResolver.resolve()` — which is what writes
+`pump_evm_cache.json` and therefore what `/pump` will show from then on. The
+walk explains; the resolver decides. `--no-write` reports the candidate and
+persists nothing.
+
+Two supporting changes in `pump_evm.py`, both additive: `portfolio_rows()` is
+now public (the diagnostic needs the rows discovery discards — a Solana-only
+portfolio and an unsupported-chain portfolio are the same empty candidate list
+to `/pump` and a very different answer to the user), and the position ordering
+and the 8-position budget are named (`order_positions`, `EXAMINED_POSITIONS`)
+so the diagnostic examines exactly the slice `/pump` examines.
+
+Every HTTP call the run makes is logged under `-v`, with path-based API keys
+reduced to their host — several RPC providers carry the key in the URL path.
+
+Verification: `python -m unittest test_pump_resolve_diag` (23 offline tests
+covering the gate ladder, the Solana-only portfolio, ambiguity refusal, the
+RPC-confirmation gate, the request-log redaction and the CSV export),
+`test_pump_profiles` unchanged, and `py_compile` on both touched modules.
+
+### The answer for `eth` — and the bug it exposed
+
+`/pump eth` reported no EVM wallet. It has one:
+**`0x6a4aab5657f10d44d27e8ff06e3dfba7e1d3c7b3`**.
+
+Pump's fingerprint for that profile was never missing. `/user-portfolio?
+filter=open` publishes three Robinhood positions — 372.5228803259225, 50 and
+25 tokens, worth about eight cents in total. The owner of 372.5228803259225 is
+that address, and its live `balanceOf` matches all three exactly. COPPERINU
+(`0x5317c0…4b63b`, the +$61.6k closed trade) confirms it from the other side:
+the address sold 6.4M COPPERINU and now holds zero, exactly as `isExited: true`
+says.
+
+**The bug was depth.** Holder indexes come back ranked by balance, and this is
+a *dust* fingerprint — the wallet sits at holder rank ~1211 of 2493.
+`_blockscout_holders` paged 5 pages, 250 rows, and stopped. Worse, a throttled
+page and an exhausted list were both reported as an empty list, so a truncation
+was indistinguishable from "this token has no holders" — which is why the
+diagnostic said `evm-holders` rather than something actionable.
+
+Four changes:
+
+1. **Depth.** `PUMP_EVM_HOLDER_PAGES` (default 40 = ~2000 holders), with
+   retry-and-backoff on 429/5xx and a small inter-page delay, because a tight
+   loop on a public explorer *creates* the empty index it then believes.
+2. **Truncated is not absent.** `HolderIndex` carries `complete`, `pages`,
+   `status`. The diagnostic gained an `evm-truncated` gate that outranks
+   `evm-fingerprint`: "no holder at that balance **in the rows read**" now
+   names its own fix instead of looking like a definitive miss.
+3. **Corroboration.** A profile publishes several balances, so one exact match
+   can be checked against the others. Ambiguity no longer just ends a position:
+   two candidates at the same balance are separated by testing each against the
+   profile's other positions, and the winning match records how many others it
+   also satisfied (`corroborations`). This is precisely the reasoning that
+   settled `eth` by hand — 372.5228803259225, 50 and 25, all on one address.
+4. **Depth belongs to the tool that can afford it.** Blockscout answers in
+   ~2s/page; 40 pages x 8 positions is 80 seconds, which a Discord card cannot
+   spend. `resolve()` takes `pages`; `/pump` passes `HOLDER_PAGES_CARD`
+   (default 6) and otherwise reads what the deep tools cached, while
+   `pump_resolve_diag.py` and `pump_map_top.py` page the full depth and write
+   the result.
+
+Run `python pump_resolve_diag.py eth --fresh` to discover and cache it; `/pump
+eth` shows it from then on. `--evm-holder-pages N` overrides the depth per run.
+
+### The second cause: Cloudflare, and a 403 that looked like an empty list
+
+The depth fix was necessary and not sufficient — `/pump eth` still reported
+`evm-holders` afterwards, because the holder requests were never reaching
+Blockscout at all.
+
+Blockscout is behind Cloudflare (`server: cloudflare`, `x-ratelimit-limit:
+180`), and it refuses httpx's default `python-httpx/x.y` User-Agent. Every
+holder call in `pump_evm.py` sent `{"Accept": "application/json"}` and nothing
+else. `_positions` sends `pump_api.HEADERS`, which carry a UA — so the
+portfolio call succeeded and the positions were found, while every holder call
+that followed was refused. The refusal arrived as an empty list, which is
+exactly what "this token has no holders" looks like.
+
+`token_intelligence.py` had already learned this on HyperEVM in session 39 and
+set a `HYPEREVM_USER_AGENT`; the lesson never reached the other explorer calls.
+`pump_evm.py` now has one `EXPLORER_HEADERS` (overridable with
+`EXPLORER_USER_AGENT`) on every holder, decimals and index request, and a test
+asserts no explorer call sends a bare `Accept` again.
+
+**The same latent bug is still in `token_intelligence._blockscout_holders` and
+`fomo_evm.py`'s Blockscout routes** — both send `Accept` alone, so `/token`'s
+Robinhood holder rows are probably empty for the same reason. Not touched here;
+it is a one-line change per call site when someone wants it.
+
+### `--adopt-evm`: a shortcut past the search, not past the evidence
+
+Discovery's expensive half is *searching* a holder index for the address
+holding Pump's exact balance. When the address is already known, that search is
+skippable — the proof is not.
+
+```powershell
+python pump_resolve_diag.py eth --adopt-evm 0x6a4aab5657f10d44d27e8ff06e3dfba7e1d3c7b3
+```
+
+`PumpEvmResolver.adopt()` asks the chain, with `balanceOf`, whether the
+supplied address holds the exact balances Pump publishes for that profile. It
+caches only on agreement and records how many balances matched. A wrong address
+matches none and is refused, so this cannot be used to plant a wallet.
+
+One reporting change came out of this too: the summary's `evm_status` column
+now carries the *status* rather than the stage. `evm-truncated` and
+`evm-no-index` share the `evm-holders` stage and need completely different
+fixes, and collapsing them is what made two very different runs look identical.
+
+### The third cause: it found the wallet, then looked for it again
+
+With the User-Agent fixed, the search worked on the first try — the log line
+was there, four minutes in:
+
+```
+OK  candidate Robinhood · 0x352f02…8797a8 · 372.52288 ·
+    Blockscout 2000 holder(s) over 40 page(s) (truncated) ·
+    1 exact · 0x6a4aab…d3c7b3 confirmed on chain
+```
+
+And then the tool hung, because of a design decision made two sessions ago.
+The walk *explains*; the resolver *decides* — so on success the diagnostic
+called `resolve()` to get the authoritative, cache-writing answer. `resolve()`
+re-pages the entire holder index. Four more minutes, in silence, after the
+answer was already on screen.
+
+The principle was right and the implementation was lazy. The expensive half of
+discovery is *searching* for the address; once the walk has it, the resolver
+does not need to search again to decide — `adopt()` reaches the same verdict
+from the same authority, with `balanceOf`, for the cost of a few RPC calls.
+The diagnostic now hands the winner to `adopt()`. One search, ever.
+
+Measured, so the numbers are on the record: Blockscout answers a holder page in
+**about 6.5 seconds**. Forty pages is four minutes for one token. Depth without
+a clock is how a working tool becomes indistinguishable from a hung one, so:
+
+* `PUMP_EVM_HOLDER_SECONDS` (300) and `PUMP_EVM_CARD_SECONDS` (8) bound the
+  search in wall-clock as well as pages, and `/pump` now passes both;
+* `HolderIndex.stopped` records *why* paging ended — `budget`, `rate-limit`,
+  or neither — and the candidate line prints it;
+* `x-ratelimit-remaining` is read from every response and the search stops with
+  `PUMP_EVM_HOLDER_RATE_FLOOR` (8) requests to spare, because Cloudflare's
+  window is 180 and the lockout is ~40 minutes: burning the last request costs
+  the *next* run, not this one;
+* the resolver logs progress at INFO every 5 pages and the diagnostic prints it
+  live.
+
+`--adopt-evm` remains the instant path when the address is already known.
+
+### Also learned: Pump publishes closed-trade amounts
+
+The profile page's "Top trades" panel is
+`GET /user-positions/{solana}?mints=…`, and `GET /user-portfolio/{solana}
+?filter=closed` lists them in bulk — 79 closed positions for `eth`, 25 of them
+on supported EVM chains. Each carries `isExited`, `pnlUsd`, `realizedPnlUsd`
+and, decisively, **`amountBought`** — an exact token quantity
+(`6738458.703678472` for COPPERINU).
+
+That is a second, independent fingerprint that works on positions the trader no
+longer holds, which the current balance route can never see. It is not wired up
+yet; it is the obvious next lever for the profiles whose EVM wallet is still
+missing because their EVM trading is all in the past. Note the practical
+constraint found while testing it: matching it needs the token's full transfer
+history, and the *public* Robinhood RPC times out on `eth_getLogs` over the
+busy ranges — this route wants the private `ROBINHOOD_RPC` from `.env`.
+
+## Session 41 — a wallet we cannot prove beats no wallet at all
+
+`/fomo pudgypenguins` printed `Linked wallets: No verified wallets found.`
+while its own log said otherwise:
+
+```
+holder route: pudgypenguins is a published top holder of 2 of its 5 position(s)
+no Solana wallet match: 2 published position(s), 1 unambiguous owner(s), no verified owner
+no Solana wallet match: FOMO returned no swaps
+no Solana wallet match: 5 balance fingerprint(s), 1 unambiguous owner(s), no verified owner
+```
+
+Both derived routes reached exactly one on-chain owner. Neither could
+corroborate it -- FOMO publishes no swap for this handle, so `verify_wallet`
+had nothing to check against and the weaker sponsor peek came back false --
+and `_resolve_from_holders` / `_resolve_from_balances` each dropped their
+`evidence` dict on the floor at the `return None`. The candidate existed, was
+unambiguous, and was thrown away between two log lines.
+
+### What changed
+
+The corroboration gate is untouched. A wallet is still returned, still cached
+and still called *linked* only if `verify_wallet` or the sponsor check passes,
+so `/wallet`, `/connected`, `/token` adoption and every later `/fomo` read
+exactly the same cache they did before. What is new is a third state between
+"verified" and "nothing":
+
+- `WalletCandidate` (`fomo_wallet.py`) -- address, the routes that produced it,
+  the mints behind it. Never cached, never returned as a wallet.
+- Both derived routes take an optional `candidates=` sink. Given a list, every
+  unambiguous owner they could not corroborate is appended to it; given
+  nothing, they behave exactly as before. The route's return value is
+  unchanged in both cases.
+- An owner `_corroborate` *refuted* (`verify0`: it looked at that wallet's own
+  history and this trader's swaps are not in it) is never offered. That is an
+  answer, not a gap.
+- `choose_unverified_wallets()` merges by address first -- the same address
+  from two independent routes is stronger than either sighting, which is the
+  pudgypenguins shape exactly -- then ranks by (routes, tokens). One address
+  on top is the fallback; a tie is not broken by guessing, so every candidate
+  is shown and the card says why.
+- `_resolve_fomo_enrichment` computes the fallback only after all three routes
+  return nothing, and logs
+  `using unverified fallback wallet for <handle>: <wallet>`.
+
+### On the card
+
+A verified wallet renders exactly as it always did, with no warning. In its
+absence the candidates take the same inline-code rows -- selectable and
+copyable like any linked wallet -- under a field that names the state:
+Compact keeps `Linked wallets`, Wide gets `Solana wallet · unverified`. The
+note under them says the two things that matter, and no more:
+
+> ⚠️ **Unverified wallet** — FOMO published no swap or transaction that
+> confirms this address. It is the only wallet on chain holding the positions
+> FOMO lists for this trader, so it is very likely theirs — but it is not
+> proven, and it has not been saved as a linked wallet.
+
+The plural form says instead that no single address explains every position,
+so one of them is likely theirs and which one is a guess.
+
+`/connected` deliberately drops the fallback: it spends a real analysis budget
+on whatever it is handed and reports the result as this trader's cluster,
+which is not a claim an uncorroborated candidate can carry.
+`fomo_resolve_diag.py` does the opposite and prints the candidates it found,
+since "why did this handle fail" is exactly the question they answer.
+
+Regression coverage: 12 tests in `test_fomo_wallet.py` (candidate merging and
+ranking, the pudgypenguins holder shape, a refuted owner staying out, two
+owners offering both, the balance route's own candidate, the sink-free caller
+unchanged) and 13 in `test_fomo_response.py` (verified never downgraded,
+singular and plural warnings, the copyable row, both layouts, the empty state
+preserved, the end-to-end pudgypenguins path, the fallback log line).
+Verification: 484 unit tests; the 10 pre-existing `FakeInteraction` errors in
+`test_fomo_response.py` are unchanged by this work.
+
 ## Session 40 — a swap is not a connection
 
 Three changes to the command surface, all of them subtractive in spirit.
@@ -2449,3 +2733,53 @@ python wallet_resolve.py --handle X --fresh    # ignore the cache
 
 python fomo_bot.py
 ```
+
+---
+
+### `/token` Robinhood holders — FIXED (Session 43)
+
+**Symptom:** `/token address: 0xcacb0e9caccee63ec4d82952e561a291c68bcb68` ($GG)
+and `0x5317c0d077d2eeb639448939b930d49c4984b63b` ($COPPERINU) both rendered
+market cap and price fine and then `Top holders of 0 — Holder data is
+currently unavailable.` Blockscout says those tokens have 3,129 and ~4k
+holders.
+
+**Cause 1 (the one that emptied the card):** the exact latent bug session 42
+flagged and did not fix. `token_intelligence._blockscout_holders` sent
+`headers={"Accept": "application/json"}` and nothing else. Blockscout is
+behind Cloudflare, which refuses httpx's default User-Agent with a 403 — and
+`_blockscout_holders` returns `[]` on any status >= 400, so a 403 and an
+empty index are the same answer to `/token`. Verified live in Chrome: the
+same URL with a browser UA answers 200 with 50 rows.
+
+**Cause 2 (would have survived the UA fix, silently):** the parser read
+decimals and total supply out of `raw["token"]`. This Blockscout version's
+holders response has exactly two top-level keys, `items` and
+`next_page_params` — no `token` object. So decimals fell back to 18 and
+`supply` stayed `None`, which makes every `percentage` `None` and drops the
+`%` off every holder row. Decimals and `total_supply` come from
+`GET /api/v2/tokens/{address}` instead (`"18"` / `"1000000000000000000000000000"`
+for GG). The `raw["token"]` read is kept as a fallback for Blockscout
+versions that do inline it.
+
+**Cause 3 (latent, not yet observed):** one page is 50 rows, which is exactly
+`MAX_HOLDERS`, with no headroom — a short page would have truncated the card.
+The reader now follows `next_page_params` until it has the limit, capped at
+`BLOCKSCOUT_HOLDER_PAGES` (3).
+
+**Shipped:**
+- `EXPLORER_USER_AGENT` / `EXPLORER_HEADERS` in `token_intelligence.py`, on
+  `_blockscout_holders` and `_blockscout_trader_flows`
+- New `_blockscout_token_meta()`; `_blockscout_holders` rewritten to page
+- The same `EXPLORER_HEADERS` in `fomo_evm.py`, on all three Blockscout calls
+  (`_blockscout_token_transfers`, `_blockscout_quote_values`, the EVM holder
+  index) — the same 403 was latent there
+- `EXPLORER_USER_AGENT` in `.env.example`
+- 4 new tests (`RobinhoodHolderTests` in `test_token_intelligence.py`): the UA
+  is sent, percentages survive the missing `token` object, a short page pages
+  on, and a genuine 403 still shortens the card rather than raising
+
+**Verified:** live payloads for both CAs pulled through Chrome, then replayed
+through the real parser — 5/5 rows, top holder 81,632,653.06 GG = 8.1633% of
+the 1B supply, which matches the explorer. Not yet run through Discord.
+

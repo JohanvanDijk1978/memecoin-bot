@@ -67,8 +67,10 @@ from fomo_wallet import (  # noqa: E402
     QUOTES,
     SOLANA_ADDRESS_RE,
     SOLANA_NETWORK_ID,
+    WalletCandidate,
     _load_cache,
     cached_wallet,
+    choose_unverified_wallets,
     pick_swaps,
     solana_balance_positions,
     swap_search_leg,
@@ -357,6 +359,11 @@ class ChainReport:
     hint: str = ""
     lines: list[str] = field(default_factory=list)
     facts: dict[str, Any] = field(default_factory=dict)
+    # Wallets the routes pinned down but could not corroborate. Not a
+    # resolution -- `resolved` stays False -- but the single most useful thing
+    # to see when asking why a handle failed, and what `/fomo` now offers
+    # under a warning instead of showing nothing.
+    unverified: list[str] = field(default_factory=list)
 
     @property
     def resolved(self) -> bool:
@@ -448,19 +455,30 @@ async def diagnose_solana(
     # next, the exact-balance fingerprint last.
     swaps = stats.raw_swaps or ()
     route = "hodlers"
+    candidates: list[WalletCandidate] = []
     if stats.raw_balances is not None:
         report.wallet = await resolver.resolve_from_holders(
             fomo, user, stats.raw_balances, swaps=swaps,
-            use_cache=not args.fresh,
+            use_cache=not args.fresh, candidates=candidates,
         )
     if not report.wallet:
         report.wallet = await resolver.resolve(fomo, user, use_cache=not args.fresh)
         route = "transactions"
     if not report.wallet and stats.raw_balances is not None:
         report.wallet = await resolver.resolve_from_balances(
-            user, stats.raw_balances, swaps=swaps, use_cache=not args.fresh
+            user, stats.raw_balances, swaps=swaps, use_cache=not args.fresh,
+            candidates=candidates,
         )
         route = "balances"
+    if not report.wallet:
+        fallback = choose_unverified_wallets(candidates)
+        report.unverified = [item.address for item in fallback]
+        report.facts["unverified"] = len(fallback)
+        if fallback:
+            report.lines.append(
+                f"  {WARN} unverified {len(fallback)} likely wallet(s), none "
+                f"corroborated: " + ", ".join(report.unverified)
+            )
     if report.wallet:
         entry = _load_cache().get(handle) or {}
         report.stage = "resolved"
@@ -613,6 +631,7 @@ async def diagnose_handle(
             "reason": report.reason,
             "hint": report.hint,
             "facts": report.facts,
+            "unverified": report.unverified,
             "log": messages,
         }
     return result

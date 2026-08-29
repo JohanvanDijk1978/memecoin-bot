@@ -55,6 +55,18 @@ BLOCKSCOUT = {
     8453: "https://base.blockscout.com",
     4663: "https://robinhoodchain.blockscout.com",
 }
+
+# Same Cloudflare edge as `token_intelligence` and `pump_evm`: a default
+# client User-Agent is refused with a 403, which every caller below reads as
+# "this explorer has nothing".
+EXPLORER_USER_AGENT = os.getenv(
+    "EXPLORER_USER_AGENT",
+    "Mozilla/5.0 (compatible; fomo-bot/1.0; +https://fomo.family)",
+)
+EXPLORER_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": EXPLORER_USER_AGENT,
+}
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 STABLE_SYMBOLS = {"USDC", "USDT", "USD", "USDG", "USDS", "DAI"}
 STABLE_DECIMALS = {
@@ -892,7 +904,7 @@ class EvmWalletResolver:
         for _ in range(EVM_DISCOVERY_PAGES):
             response = await self.http.get(
                 f"{base}/api/v2/tokens/{token}/transfers",
-                params=params, headers={"Accept": "application/json"}, timeout=20,
+                params=params, headers=EXPLORER_HEADERS, timeout=20,
             )
             if int(getattr(response, "status_code", 200)) >= 400:
                 break
@@ -948,7 +960,7 @@ class EvmWalletResolver:
         try:
             response = await self.http.get(
                 f"{base}/api/v2/transactions/{transaction}/token-transfers",
-                headers={"Accept": "application/json"}, timeout=20,
+                headers=EXPLORER_HEADERS, timeout=20,
             )
             if int(getattr(response, "status_code", 200)) >= 400:
                 return []
@@ -1093,7 +1105,7 @@ class EvmWalletResolver:
             response = await self.http.get(
                 f"{base}/api/v2/tokens/{position.token}/holders",
                 params=params,
-                headers={"Accept": "application/json"},
+                headers=EXPLORER_HEADERS,
                 timeout=20,
             )
             if int(getattr(response, "status_code", 200)) >= 400:

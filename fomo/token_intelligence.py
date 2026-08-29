@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -13,7 +12,6 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from rpc_config import env_rpc_urls, normalize_rpc_urls, rpc_display_name
-from solscan_api import solscan_get, solscan_key
 from token_traders import (
     EVM_QUOTE_ASSETS,
     SOLANA_STABLE_MINTS,
@@ -64,6 +62,25 @@ BLOCKSCOUT = {
     "Robinhood": "https://robinhoodchain.blockscout.com",
 }
 
+# Blockscout sits behind Cloudflare, and Cloudflare refuses a request whose
+# User-Agent is a default client one -- httpx's included. Every call here sent
+# `Accept` alone, so every Robinhood holder read came back 403, and a 403 is
+# indistinguishable from an empty index once `_blockscout_holders` returns
+# `[]`: `/token` said "Top holders of 0 -- Holder data is currently
+# unavailable" for tokens with thousands of holders. `pump_evm.py` learned
+# this in session 42; the fix never reached these calls.
+EXPLORER_USER_AGENT = os.getenv(
+    "EXPLORER_USER_AGENT",
+    "Mozilla/5.0 (compatible; fomo-bot/1.0; +https://fomo.family)",
+)
+EXPLORER_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": EXPLORER_USER_AGENT,
+}
+# 50 rows a page. A top-50 card fits in one, but a page that comes back short
+# should not truncate the card, so the reader pages until it has the limit.
+BLOCKSCOUT_HOLDER_PAGES = 3
+
 # Hyperliquid is the one chain `/token` reaches that neither CMC nor a
 # Blockscout instance answers for holders, and pump.fun -- which does show a
 # holders panel for its Hyperliquid launches -- is not a source for it:
@@ -92,49 +109,15 @@ HYPEREVM_USER_AGENT = os.getenv(
     "Mozilla/5.0 (compatible; fomo-bot/1.0; +https://fomo.family)",
 )
 
+
 # `getTokenLargestAccounts` returns at most 20 token accounts, and several of
 # those collapse into one owner, so it cannot answer a top-50 question. Helius
 # DAS `getTokenAccounts` pages the full holder set instead -- the same reason
 # `fomo_map_top.py` prefers it.
 LARGEST_ACCOUNTS_CAP = 20
 DAS_PAGE_LIMIT = 1000
-# DAS returns token accounts in index order, NOT by balance, so a ceiling here
-# does not keep the biggest holders -- it keeps an arbitrary slice. At three
-# pages a token with more than 3,000 token accounts silently lost whoever
-# happened to sit past that line, however large their position. That is the
-# most likely reason a 2.6% holder of $Morty showed on Solscan and not here.
-# The loop already stops as soon as a short page proves the set is exhausted;
-# this is only the ceiling for when it is not.
-DAS_MAX_PAGES = int(os.getenv("DAS_MAX_PAGES", "40"))
-# Pages are independent, so asking for them one after another spends the whole
-# ceiling in round trips -- forty of them on a large token, which is most of a
-# minute of a command sitting there doing nothing. Page one is fetched alone,
-# because on a small token it is also the last one and a batch would be waste;
-# after that they go out together.
-DAS_CONCURRENCY = int(os.getenv("DAS_CONCURRENCY", "8"))
+DAS_MAX_PAGES = 3
 MAX_HOLDERS = 50
-
-# Solscan answers the same holder question as Helius DAS, from a different
-# index -- it is here because DAS lags, and a wallet that Solscan already ranks
-# was going missing from `/token`. `solscan_api` resolves whether this key
-# reaches the paid /v2.0 path or only the free /playground one; the two spell
-# their paging differently, so both spellings are offered. Page size is one of
-# 10/20/30/40 by contract.
-SOLSCAN_HOLDERS_PATH = "token/holders"
-SOLSCAN_PAGE_SIZE = 40
-SOLSCAN_MAX_PAGES = 3
-
-
-def _solscan_holder_params(mint: str, page: int) -> list[dict[str, Any]]:
-    """The same page, spelled for each of the two Solscan APIs."""
-    return [
-        {"address": mint, "page": page, "page_size": SOLSCAN_PAGE_SIZE},
-        {
-            "tokenAddress": mint,
-            "offset": (page - 1) * SOLSCAN_PAGE_SIZE,
-            "limit": SOLSCAN_PAGE_SIZE,
-        },
-    ]
 
 # ------------------------------------------------------------- traders ----
 # Top Traders reads the same chains the holder list does, but a holder list is
@@ -405,87 +388,49 @@ class TokenIntelligenceClient:
     async def _das_holders(
         self, mint: str, decimals: int, supply: Decimal | None, limit: int
     ) -> list[TokenHolder]:
-        """Owner totals from Helius DAS and Solscan, using whichever has more data.
+        """Owner totals from Helius DAS, which pages past the 20-account cap.
 
-        Queries both Helius DAS and Solscan in parallel. Uses the source with more
-        holders, or falls back to either if the other fails. Returns [] when no
-        Helius endpoint is configured or every one fails AND Solscan is unavailable.
+        Returns [] when no Helius endpoint is configured or every one of them
+        fails, so the caller can fall back to `getTokenLargestAccounts` rather
+        than reporting a token with no holders at all.
         """
-        # Query both sources in parallel
-        das_task = self._query_helius_das(mint, decimals, supply, limit)
-        solscan_task = self._solscan_holders(mint, supply, limit)
-
-        results = await asyncio.gather(
-            das_task, solscan_task, return_exceptions=True
-        )
-        das_holders = results[0] if not isinstance(results[0], Exception) else []
-        solscan_holders = results[1] if not isinstance(results[1], Exception) else []
-
-        # Handle exceptions by logging them
-        if isinstance(results[0], Exception):
-            log.debug("DAS query raised: %s", results[0])
-        if isinstance(results[1], Exception):
-            log.debug("Solscan query raised: %s", results[1])
-
-        # Use whichever has more data
-        if len(solscan_holders) > len(das_holders):
-            log.info(
-                "Using Solscan holders (%d) over Helius DAS (%d) for %s",
-                len(solscan_holders), len(das_holders), mint
-            )
-            return solscan_holders[:limit]
-        elif das_holders:
-            log.debug("Using Helius DAS holders (%d) over Solscan (%d)",
-                      len(das_holders), len(solscan_holders))
-            return das_holders[:limit]
-        elif solscan_holders:
-            log.debug("Helius DAS failed; using Solscan (%d holders)", len(solscan_holders))
-            return solscan_holders[:limit]
-        else:
-            log.warning("No holders found via Helius DAS or Solscan for %s", mint)
-            return []
-
-    async def _das_page(self, url: str, mint: str, page: int) -> list[dict[str, Any]]:
-        """One page of `getTokenAccounts`. Raises so the caller can fail over."""
-        response = await self.http.post(
-            url,
-            json={
-                "jsonrpc": "2.0", "id": 1, "method": "getTokenAccounts",
-                "params": {"mint": mint, "page": page, "limit": DAS_PAGE_LIMIT},
-            },
-            timeout=30,
-        )
-        if int(getattr(response, "status_code", 200)) >= 400:
-            raise TokenIntelligenceError("DAS returned an HTTP error")
-        payload = response.json()
-        if not isinstance(payload, dict) or payload.get("error"):
-            raise TokenIntelligenceError(
-                str((payload or {}).get("error") or "invalid DAS response")
-            )
-        accounts = (payload.get("result") or {}).get("token_accounts") or []
-        return [account for account in accounts if isinstance(account, dict)]
-
-    async def _query_helius_das(
-        self, mint: str, decimals: int, supply: Decimal | None, limit: int
-    ) -> list[TokenHolder]:
-        """Internal: query Helius DAS only (used by `_das_holders`)."""
         scale = Decimal(10) ** int(decimals)
         for url in self._helius_urls():
+            totals: dict[str, Decimal] = {}
             try:
-                accounts = await self._das_accounts(url, mint)
+                for page in range(1, DAS_MAX_PAGES + 1):
+                    response = await self.http.post(
+                        url,
+                        json={
+                            "jsonrpc": "2.0", "id": 1, "method": "getTokenAccounts",
+                            "params": {
+                                "mint": mint, "page": page, "limit": DAS_PAGE_LIMIT,
+                            },
+                        },
+                        timeout=30,
+                    )
+                    if int(getattr(response, "status_code", 200)) >= 400:
+                        raise TokenIntelligenceError("DAS returned an HTTP error")
+                    payload = response.json()
+                    if not isinstance(payload, dict) or payload.get("error"):
+                        raise TokenIntelligenceError(
+                            str((payload or {}).get("error") or "invalid DAS response")
+                        )
+                    accounts = (payload.get("result") or {}).get("token_accounts") or []
+                    for account in accounts:
+                        if not isinstance(account, dict):
+                            continue
+                        owner = str(account.get("owner") or "")
+                        raw = _decimal(account.get("amount"))
+                        if not owner or raw is None:
+                            continue
+                        totals[owner] = totals.get(owner, Decimal(0)) + raw
+                    if len(accounts) < DAS_PAGE_LIMIT:
+                        break
             except Exception as exc:
                 log.debug("DAS holder query failed via %s: %s",
                           rpc_display_name(url), exc)
                 continue
-
-            totals: dict[str, Decimal] = {}
-            for account in accounts:
-                owner = str(account.get("owner") or "")
-                raw = _decimal(account.get("amount"))
-                if not owner or raw is None:
-                    continue
-                totals[owner] = totals.get(owner, Decimal(0)) + raw
-
             holders = [
                 TokenHolder(
                     owner,
@@ -496,122 +441,6 @@ class TokenIntelligenceClient:
             ]
             return sorted(holders, key=lambda holder: holder.balance, reverse=True)[:limit]
         return []
-
-    async def _das_accounts(self, url: str, mint: str) -> list[dict[str, Any]]:
-        """Every token account DAS will give us, up to the page ceiling.
-
-        DAS orders accounts by index, not by balance, so stopping early keeps
-        an arbitrary slice rather than the largest holders -- which is how a
-        2.6% holder went missing from a card. The ceiling is therefore only a
-        backstop; the real stop is a short page proving the set is exhausted.
-        """
-        first = await self._das_page(url, mint, 1)
-        accounts = list(first)
-        if len(first) < DAS_PAGE_LIMIT:
-            return accounts
-
-        page = 2
-        while page <= DAS_MAX_PAGES:
-            stop = min(page + DAS_CONCURRENCY, DAS_MAX_PAGES + 1)
-            batch = await asyncio.gather(
-                *(self._das_page(url, mint, number) for number in range(page, stop))
-            )
-            exhausted = False
-            for chunk in batch:
-                accounts.extend(chunk)
-                if len(chunk) < DAS_PAGE_LIMIT:
-                    exhausted = True
-            if exhausted:
-                return accounts
-            page = stop
-
-        log.warning(
-            "DAS stopped at %d token accounts for %s (the DAS_MAX_PAGES "
-            "ceiling); holders past that point are not in this ranking. "
-            "Raise DAS_MAX_PAGES.",
-            DAS_MAX_PAGES * DAS_PAGE_LIMIT, mint,
-        )
-        return accounts
-
-    async def _solscan_holders(
-        self, mint: str, supply: Decimal | None, limit: int
-    ) -> list[TokenHolder]:
-        """Owner totals from Solscan Pro.
-
-        Solscan ranks *token accounts*, not owners, so the same wallet can
-        appear more than once -- the totals are summed per owner here, the way
-        `_query_helius_das` does it, or a wallet holding through two accounts
-        would rank below its real weight. Amounts come back raw, with the
-        token's `decimals` alongside them.
-        """
-        if not solscan_key():
-            log.debug("Solscan API key not configured, skipping")
-            return []
-
-        totals: dict[str, Decimal] = {}
-        percentages: dict[str, float] = {}
-        pages = max(1, min(SOLSCAN_MAX_PAGES,
-                           -(-limit // SOLSCAN_PAGE_SIZE)))
-        for page in range(1, pages + 1):
-            payload = await solscan_get(
-                self.http,
-                SOLSCAN_HOLDERS_PATH,
-                _solscan_holder_params(mint, page),
-                timeout=30,
-            )
-            if payload is None:
-                break
-
-            data = payload.get("data")
-            items = data.get("items") if isinstance(data, dict) else data
-            if isinstance(data, dict) and not isinstance(items, list):
-                items = data.get("result") or data.get("holders")
-            if not isinstance(items, list) or not items:
-                break
-
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                owner = str(item.get("owner") or item.get("address") or "").strip()
-                if not owner:
-                    continue
-                raw = _decimal(
-                    item.get("amount_str")
-                    if item.get("amount_str") is not None
-                    else item.get("amount")
-                )
-                if raw is None:
-                    continue
-                try:
-                    decimals = int(item.get("decimals") or 0)
-                except (TypeError, ValueError):
-                    decimals = 0
-                balance = raw / (Decimal(10) ** decimals)
-                totals[owner] = totals.get(owner, Decimal(0)) + balance
-                pct = item.get("percentage")
-                if isinstance(pct, (int, float)):
-                    # Solscan reports a fraction on some tokens and a percent
-                    # on others; anything at or below 1 is read as a fraction.
-                    scaled = float(pct) * 100 if 0 <= float(pct) <= 1 else float(pct)
-                    percentages[owner] = percentages.get(owner, 0.0) + scaled
-
-            if len(items) < SOLSCAN_PAGE_SIZE:
-                break
-
-        if not totals:
-            return []
-
-        holders = [
-            TokenHolder(
-                owner,
-                balance,
-                float(balance / supply * 100) if supply and supply > 0
-                else percentages.get(owner),
-            )
-            for owner, balance in totals.items()
-        ]
-        log.debug("Solscan returned %d owners for %s", len(holders), mint)
-        return sorted(holders, key=lambda holder: holder.balance, reverse=True)[:limit]
 
     async def _solana_holders(self, mint: str, limit: int) -> list[TokenHolder]:
         supply_raw = await self._solana_call("getTokenSupply", [mint])
@@ -685,37 +514,96 @@ class TokenIntelligenceClient:
                 holders.append(TokenHolder(wallet, balance, percentage))
         return sorted(holders, key=lambda holder: holder.balance, reverse=True)[:limit]
 
-    async def _blockscout_holders(self, token: str, chain: str, limit: int) -> list[TokenHolder]:
-        response = await self.http.get(
-            f"{BLOCKSCOUT[chain]}/api/v2/tokens/{token}/holders",
-            headers={"Accept": "application/json"},
-            timeout=20,
-        )
-        if int(getattr(response, "status_code", 200)) >= 400:
-            return []
-        raw = response.json()
-        rows = raw.get("items") if isinstance(raw, dict) else []
-        token_data = raw.get("token") if isinstance(raw, dict) else {}
+    async def _blockscout_token_meta(
+        self, token: str, chain: str
+    ) -> tuple[int, Decimal | None]:
+        """A Blockscout token's decimals and total supply.
+
+        These used to be read out of the holders response (`raw["token"]`),
+        but this Blockscout version answers `/holders` with `items` and
+        `next_page_params` and nothing else -- so decimals silently fell back
+        to 18 and `supply` stayed `None`, which makes every percentage `None`
+        and drops the `%` from every holder row. The token route carries both.
+        """
         try:
-            decimals = int((token_data or {}).get("decimals") or 18)
+            response = await self.http.get(
+                f"{BLOCKSCOUT[chain]}/api/v2/tokens/{token}",
+                headers=EXPLORER_HEADERS,
+                timeout=20,
+            )
+            if int(getattr(response, "status_code", 200)) >= 400:
+                return 18, None
+            raw = response.json()
+        except Exception:
+            return 18, None
+        if not isinstance(raw, dict):
+            return 18, None
+        try:
+            decimals = int(raw.get("decimals") or 18)
         except (TypeError, ValueError):
             decimals = 18
-        raw_supply = _decimal((token_data or {}).get("total_supply"))
-        supply = raw_supply / (Decimal(10) ** decimals) if raw_supply is not None else None
-        holders = []
-        for row in rows or []:
-            if not isinstance(row, dict):
-                continue
-            holder = row.get("address") or row.get("address_hash")
-            if isinstance(holder, dict):
-                holder = holder.get("hash")
-            wallet = str(holder or "").strip().lower()
-            raw_balance = _decimal(row.get("value"))
-            if not EVM_RE.fullmatch(wallet) or raw_balance is None:
-                continue
-            balance = raw_balance / (Decimal(10) ** decimals)
-            percentage = float(balance / supply * 100) if supply and supply > 0 else None
-            holders.append(TokenHolder(wallet, balance, percentage))
+        raw_supply = _decimal(raw.get("total_supply"))
+        supply = (
+            raw_supply / (Decimal(10) ** decimals)
+            if raw_supply is not None else None
+        )
+        return decimals, supply
+
+    async def _blockscout_holders(self, token: str, chain: str, limit: int) -> list[TokenHolder]:
+        decimals, supply = await self._blockscout_token_meta(token, chain)
+        holders: list[TokenHolder] = []
+        params: dict[str, Any] = {}
+        for _ in range(BLOCKSCOUT_HOLDER_PAGES):
+            try:
+                response = await self.http.get(
+                    f"{BLOCKSCOUT[chain]}/api/v2/tokens/{token}/holders",
+                    params=params,
+                    headers=EXPLORER_HEADERS,
+                    timeout=20,
+                )
+                if int(getattr(response, "status_code", 200)) >= 400:
+                    break
+                raw = response.json()
+            except Exception:
+                break
+            if not isinstance(raw, dict):
+                break
+            # Blockscout versions that DO inline the token still answer here;
+            # keep reading them when the token route gave nothing.
+            token_data = raw.get("token")
+            if isinstance(token_data, dict) and supply is None:
+                try:
+                    decimals = int(token_data.get("decimals") or decimals)
+                except (TypeError, ValueError):
+                    pass
+                raw_supply = _decimal(token_data.get("total_supply"))
+                if raw_supply is not None:
+                    supply = raw_supply / (Decimal(10) ** decimals)
+            for row in raw.get("items") or []:
+                if not isinstance(row, dict):
+                    continue
+                holder = row.get("address") or row.get("address_hash")
+                if isinstance(holder, dict):
+                    holder = holder.get("hash")
+                wallet = str(holder or "").strip().lower()
+                raw_balance = _decimal(row.get("value"))
+                if not EVM_RE.fullmatch(wallet) or raw_balance is None:
+                    continue
+                balance = raw_balance / (Decimal(10) ** decimals)
+                percentage = (
+                    float(balance / supply * 100)
+                    if supply and supply > 0 else None
+                )
+                holders.append(TokenHolder(wallet, balance, percentage))
+            if len(holders) >= limit:
+                break
+            following = raw.get("next_page_params")
+            if not isinstance(following, dict) or not following:
+                break
+            params = {
+                key: value for key, value in following.items()
+                if value is not None
+            }
         return sorted(holders, key=lambda holder: holder.balance, reverse=True)[:limit]
 
     async def _hyperevm_holders(self, token: str, limit: int) -> list[TokenHolder]:
@@ -1209,7 +1097,7 @@ class TokenIntelligenceClient:
     ) -> list[TokenFlow]:
         response = await self.http.get(
             f"{BLOCKSCOUT[chain]}/api/v2/tokens/{token}/transfers",
-            headers={"Accept": "application/json"},
+            headers=EXPLORER_HEADERS,
             timeout=20,
         )
         if int(getattr(response, "status_code", 200)) >= 400:

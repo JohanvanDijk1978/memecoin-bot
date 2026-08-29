@@ -4,6 +4,7 @@ import unittest
 
 from fomo_bot import _discord_line_chunks
 from token_intelligence import (
+    EXPLORER_HEADERS,
     LARGEST_ACCOUNTS_CAP,
     MAX_HOLDERS,
     TokenIntelligenceClient,
@@ -142,6 +143,107 @@ class FakeHyperEvmMissing(FakeHyperEvmHttp):
                 "holders": [],
             })
         return await super().get(url, **kwargs)
+
+
+
+RH_TOKEN = "0xcacb0e9caccee63ec4d82952e561a291c68bcb68"
+
+
+class FakeRobinhoodHttp:
+    """robinhoodchain.blockscout.com, answering the way it really does.
+
+    Two things this payload gets right that the old parser assumed away: the
+    holders response carries `items` and `next_page_params` and **no** `token`
+    object, and the whole host is behind Cloudflare, which 403s a request
+    without a browser-ish User-Agent.
+    """
+
+    def __init__(self) -> None:
+        self.holder_calls: list[dict[str, object]] = []
+        self.blocked = 0
+
+    async def get(self, url: str, **kwargs: object) -> FakeResponse:
+        headers = kwargs.get("headers") or {}
+        if "blockscout" in url and not str(headers.get("User-Agent") or "").strip():
+            self.blocked += 1
+            return FakeResponse({"message": "Forbidden"}, status_code=403)
+        if url.endswith("/holders"):
+            params = kwargs.get("params") or {}
+            self.holder_calls.append(dict(params))
+            page = 2 if params else 1
+            items = [{
+                "address": {"hash": f"0x{index:040x}", "is_contract": False},
+                "value": str((100 - index) * 10 ** 18),
+            } for index in range(0, 3) if page == 1] or [{
+                "address": {"hash": f"0x{index:040x}"},
+                "value": str((100 - index) * 10 ** 18),
+            } for index in range(3, 5)]
+            body: dict[str, object] = {"items": items}
+            if page == 1:
+                body["next_page_params"] = {
+                    "value": "970000000000000000000",
+                    "address_hash": "0x" + "3" * 40,
+                    "items_count": 50,
+                }
+            return FakeResponse(body)
+        if url.endswith(f"/api/v2/tokens/{RH_TOKEN}"):
+            return FakeResponse({
+                "decimals": "18",
+                "total_supply": str(1000 * 10 ** 18),
+                "holders_count": "3127",
+                "symbol": "GG",
+            })
+        return FakeResponse({"pairs": [{
+            "chainId": "robinhood",
+            "baseToken": {"address": RH_TOKEN, "name": "GG", "symbol": "GG"},
+            "quoteToken": {"address": "0xquote", "symbol": "WETH"},
+            "marketCap": 5_030_000,
+            "priceUsd": "0.005029",
+            "liquidity": {"usd": 90_000},
+        }]})
+
+
+class RobinhoodHolderTests(unittest.IsolatedAsyncioTestCase):
+    """`/token` reported "Top holders of 0" for every Robinhood token."""
+
+    async def test_explorer_calls_carry_a_user_agent(self) -> None:
+        http = FakeRobinhoodHttp()
+        client = TokenIntelligenceClient(http, [])
+        token = await client.lookup(RH_TOKEN, limit=MAX_HOLDERS)
+        self.assertEqual(http.blocked, 0)
+        self.assertTrue(EXPLORER_HEADERS["User-Agent"])
+        self.assertEqual(token.chain, "Robinhood")
+        self.assertTrue(token.holders)
+
+    async def test_percentages_come_from_the_token_route(self) -> None:
+        client = TokenIntelligenceClient(FakeRobinhoodHttp(), [])
+        token = await client.lookup(RH_TOKEN, limit=MAX_HOLDERS)
+        # The holders payload has no `token` object; supply has to come from
+        # /api/v2/tokens/{address} or every percentage is None.
+        self.assertIsNotNone(token.holders[0].percentage)
+        self.assertAlmostEqual(token.holders[0].percentage or 0, 10.0)
+        self.assertEqual(float(token.holders[0].balance), 100.0)
+
+    async def test_holders_page_when_the_first_page_is_short(self) -> None:
+        http = FakeRobinhoodHttp()
+        client = TokenIntelligenceClient(http, [])
+        token = await client.lookup(RH_TOKEN, limit=MAX_HOLDERS)
+        self.assertEqual(len(http.holder_calls), 2)
+        self.assertEqual(http.holder_calls[1]["items_count"], 50)
+        self.assertEqual(len(token.holders), 5)
+
+    async def test_a_blocked_explorer_is_an_empty_card_not_a_crash(self) -> None:
+        class Blocked(FakeRobinhoodHttp):
+            async def get(self, url: str, **kwargs: object) -> FakeResponse:
+                if "blockscout" in url:
+                    return FakeResponse({"message": "Forbidden"}, status_code=403)
+                return await super().get(url, **kwargs)
+
+        client = TokenIntelligenceClient(Blocked(), [])
+        token = await client.lookup(RH_TOKEN, limit=MAX_HOLDERS)
+        self.assertEqual(token.holders, ())
+        self.assertEqual(token.chain, "Robinhood")
+
 
 
 HELIUS_RPC = "https://mainnet.helius-rpc.com/?api-key=test"

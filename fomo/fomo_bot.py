@@ -101,8 +101,10 @@ from fomo_tracking import (
 from fomo_wallet import (
     SOLANA_ADDRESS_RE,
     CachedWalletMatch,
+    WalletCandidate,
     WalletResolver,
     cached_wallet,
+    choose_unverified_wallets,
     find_cached_wallets,
 )
 from fomo_api import (
@@ -128,7 +130,13 @@ from pump_api import (
     quote_value_usd,
 )
 from pump_chain import PumpChainClient, PumpRpcError
-from pump_evm import EVM_RE, PumpEvmMatch, PumpEvmResolver
+from pump_evm import (
+    EVM_RE,
+    CARD_SECONDS as PUMP_EVM_CARD_SECONDS,
+    HOLDER_PAGES_CARD as PUMP_EVM_CARD_PAGES,
+    PumpEvmMatch,
+    PumpEvmResolver,
+)
 from pump_profiles import (
     CARD_TTL as PUMP_CARD_TTL,
     PumpProfile,
@@ -752,6 +760,55 @@ def _fit_field(lines: list[str], limit: int = 1024) -> str:
     return "\n".join(kept)
 
 
+# A wallet the resolver pinned down but could not corroborate is worth
+# showing -- "here is almost certainly your man" beats "nothing found" -- but
+# only if the card is blunt about what is missing. These say the same two
+# things every time: FOMO gave no transaction evidence, and the address is a
+# likely match rather than a proven one.
+UNVERIFIED_WALLET_NOTE = (
+    "⚠️ **Unverified wallet** — FOMO published no swap or transaction that "
+    "confirms this address. It is the only wallet on chain holding the "
+    "positions FOMO lists for this trader, so it is very likely theirs — but "
+    "it is not proven, and it has not been saved as a linked wallet."
+)
+UNVERIFIED_WALLETS_NOTE = (
+    "⚠️ **Unverified wallets** — FOMO published no swap or transaction that "
+    "confirms any of these. Each one holds a position FOMO lists for this "
+    "trader and no single address explains them all, so one of them is likely "
+    "theirs — which one is a guess. None has been saved as a linked wallet."
+)
+
+
+def unverified_wallet_note(count: int) -> str:
+    """The warning that belongs under `count` unverified candidate rows."""
+    return UNVERIFIED_WALLET_NOTE if count == 1 else UNVERIFIED_WALLETS_NOTE
+
+
+def _wallet_rows(
+    wallet: str | None,
+    evm_wallet: str | None,
+    unverified_wallets: Sequence[WalletCandidate] = (),
+) -> list[str]:
+    """Wallet lines for a profile card, verified first.
+
+    A verified Solana wallet is rendered exactly as it always was and never
+    carries a warning. Candidates only appear in its absence, and they never
+    appear without the note under them.
+    """
+    rows: list[str] = []
+    note = ""
+    if wallet:
+        rows.append(f"◎ **Solana** · `{wallet}`")
+    elif unverified_wallets:
+        rows.extend(f"◎ **Solana** · `{item.address}`" for item in unverified_wallets)
+        note = unverified_wallet_note(len(unverified_wallets))
+    if evm_wallet:
+        rows.append(f"Ξ **EVM** · `{evm_wallet}`")
+    if note:
+        rows.extend(["", note])
+    return rows
+
+
 def _token_link(network_id: Any, token_address: str, symbol: str) -> str:
     """`$TICKER` linked to Padre, or bold when Padre has no route for the chain."""
     label = f"${(symbol or '').lstrip('$') or 'TOKEN'}"
@@ -762,7 +819,9 @@ def _token_link(network_id: Any, token_address: str, symbol: str) -> str:
 def build_embed(user: FomoUser, wallet: str | None = None,
                 evm_wallet: str | None = None,
                 stats: TraderStats | None = None,
-                activity_filter: str = "all") -> discord.Embed:
+                activity_filter: str = "all",
+                *,
+                unverified_wallets: Sequence[WalletCandidate] = ()) -> discord.Embed:
     stats = stats or TraderStats()
     all_time = user.rank("")
     pnl = (all_time or {}).get("pnl")
@@ -897,8 +956,19 @@ def build_embed(user: FomoUser, wallet: str | None = None,
     # Never use user.sol_address or user.evm_address: both are synthetic. The
     # real Solana wallet is derived on chain; EVM wallets are accepted only
     # from corroborated on-chain evidence or an explicitly verified mapping.
+    # A wallet that failed corroboration never occupies the verified field --
+    # it gets its own, named for what it is.
     if wallet:
         embed.add_field(name="Solana wallet", value=f"◎ `{wallet}`", inline=False)
+    elif unverified_wallets:
+        embed.add_field(
+            name="Solana wallet · unverified",
+            value=_fit_field(
+                [f"◎ `{item.address}`" for item in unverified_wallets]
+                + ["", unverified_wallet_note(len(unverified_wallets))]
+            ),
+            inline=False,
+        )
     if evm_wallet:
         embed.add_field(name="EVM wallet", value=f"Ξ `{evm_wallet}`", inline=False)
 
@@ -929,6 +999,7 @@ def build_compact_embed(
     stats: TraderStats | None = None,
     *,
     wallets_pending: bool = False,
+    unverified_wallets: Sequence[WalletCandidate] = (),
 ) -> discord.Embed:
     """Render only the essential identity and portfolio profile sections."""
     stats = stats or TraderStats()
@@ -973,15 +1044,11 @@ def build_compact_embed(
         twitter_value = "Not linked"
     embed.add_field(name="X / Twitter", value=twitter_value, inline=False)
 
-    wallets = []
-    if wallet:
-        wallets.append(f"◎ **Solana** · `{wallet}`")
-    if evm_wallet:
-        wallets.append(f"Ξ **EVM** · `{evm_wallet}`")
+    wallets = _wallet_rows(wallet, evm_wallet, unverified_wallets)
     embed.add_field(
         name="Linked wallets",
         value=(
-            "\n".join(wallets)
+            _fit_field(wallets)
             if wallets
             else ("Querying ⏳" if wallets_pending else "No verified wallets found.")
         ),
@@ -998,6 +1065,7 @@ def build_profile_embed(
     *,
     layout: str = "wide",
     wallets_pending: bool = False,
+    unverified_wallets: Sequence[WalletCandidate] = (),
 ) -> discord.Embed:
     if layout == "compact":
         return build_compact_embed(
@@ -1006,8 +1074,11 @@ def build_profile_embed(
             evm_wallet,
             stats,
             wallets_pending=wallets_pending,
+            unverified_wallets=unverified_wallets,
         )
-    return build_embed(user, wallet, evm_wallet, stats)
+    return build_embed(
+        user, wallet, evm_wallet, stats, unverified_wallets=unverified_wallets
+    )
 
 
 def build_track_embed(
@@ -1633,9 +1704,9 @@ async def _resolve_fomo_enrichment(
     stats: TraderStats,
     wallet: str | None,
     evm_wallet: str | None,
-) -> tuple[str | None, str | None, TraderStats]:
+) -> tuple[str | None, str | None, TraderStats, tuple[WalletCandidate, ...]]:
     """Complete optional wallet/activity panels after the base reply exists."""
-    async def resolve_solana() -> str | None:
+    async def resolve_solana() -> tuple[str | None, tuple[WalletCandidate, ...]]:
         """Three routes, cheapest first.
 
         The holder route runs before the transaction routes, which is a change
@@ -1648,25 +1719,46 @@ async def _resolve_fomo_enrichment(
         the whole budget proving it. Evidence quality does not drop, because
         the holder route's own gate is `verify_wallet` against this trader's
         swaps: a hit is transaction-backed either way.
+
+        The two identity routes also hand back the unambiguous owners they
+        pinned down but could not corroborate. Those are never promoted to a
+        wallet and never cached: they are only offered, under a warning, when
+        all three routes come back empty -- which is the difference between a
+        card that names a likely wallet and one that says nothing at all.
         """
         if wallet is not None or not client.wallets or not client.fomo:
-            return wallet
+            return wallet, ()
+        candidates: list[WalletCandidate] = []
+        result = None
         try:
-            result = None
             if stats.raw_balances is not None:
                 result = await client.wallets.resolve_from_holders(
-                    client.fomo, user, stats.raw_balances, swaps=stats.raw_swaps or ()
+                    client.fomo, user, stats.raw_balances,
+                    swaps=stats.raw_swaps or (), candidates=candidates,
                 )
             if result is None:
                 result = await client.wallets.resolve(client.fomo, user)
             if result is None and stats.raw_balances is not None:
                 result = await client.wallets.resolve_from_balances(
-                    user, stats.raw_balances, swaps=stats.raw_swaps or ()
+                    user, stats.raw_balances, swaps=stats.raw_swaps or (),
+                    candidates=candidates,
                 )
-            return result
         except Exception as exc:
+            # A route that raised after an earlier one banked a candidate has
+            # not made that candidate worthless, so the fallback below still
+            # gets to look at what was collected.
             log.warning("Solana wallet lookup failed for @%s: %s", user.handle, exc)
-            return None
+        if result is not None:
+            return result, ()
+        fallback = tuple(choose_unverified_wallets(candidates))
+        if fallback:
+            log.info(
+                "using unverified fallback wallet%s for %s: %s",
+                "" if len(fallback) == 1 else "s",
+                user.handle,
+                ", ".join(item.address for item in fallback),
+            )
+        return None, fallback
 
     async def resolve_evm() -> str | None:
         if evm_wallet is not None or not client.evm_wallets:
@@ -1712,11 +1804,12 @@ async def _resolve_fomo_enrichment(
                 log.warning("EVM activity lookup failed for @%s: %s", user.handle, exc)
         return resolved_wallet, resolved_stats
 
-    wallet, evm_result = await asyncio.gather(
+    solana_result, evm_result = await asyncio.gather(
         resolve_solana(), resolve_evm_with_activity()
     )
+    wallet, unverified_wallets = solana_result
     evm_wallet, stats = evm_result
-    return wallet, evm_wallet, stats
+    return wallet, evm_wallet, stats, unverified_wallets
 
 
 async def _enrich_fomo_message(
@@ -1732,7 +1825,7 @@ async def _enrich_fomo_message(
     wallets_pending: bool = False,
 ) -> None:
     """Bound optional enrichment and edit the already-visible profile card."""
-    initial = (wallet, evm_wallet, stats)
+    initial = (wallet, evm_wallet, stats, ())
     try:
         enriched = await asyncio.wait_for(
             _resolve_fomo_enrichment(
@@ -1743,11 +1836,13 @@ async def _enrich_fomo_message(
     except asyncio.TimeoutError:
         # A resolver may have completed and cached one identity before a later
         # stage consumed the remaining budget. Preserve that partial progress.
+        # Candidates are not cached, so a cancelled run has none to recover.
         handle = user.handle.lower()
         enriched = (
             cached_wallet(handle) if client.wallets else wallet,
             cached_evm_wallet(handle) if client.evm_wallets else evm_wallet,
             stats,
+            (),
         )
         log.info(
             "on-chain enrichment for @%s reached the %.1fs background deadline",
@@ -1756,7 +1851,7 @@ async def _enrich_fomo_message(
         )
     if enriched == initial and not wallets_pending:
         return
-    new_wallet, new_evm_wallet, new_stats = enriched
+    new_wallet, new_evm_wallet, new_stats, new_unverified = enriched
     try:
         await message.edit(
             embed=build_profile_embed(
@@ -1766,6 +1861,7 @@ async def _enrich_fomo_message(
                 new_stats,
                 layout=layout,
                 wallets_pending=False,
+                unverified_wallets=new_unverified,
             )
         )
     except discord.HTTPException as exc:
@@ -2554,7 +2650,11 @@ async def _connected_wallets_for(
         # nobody has looked up yet is the common case here.
         try:
             stats = await fetch_trader_stats(bot.fomo, user.id)
-            wallet, evm_wallet, _stats = await asyncio.wait_for(
+            # The unverified fallback is deliberately dropped here: `/connected`
+            # spends a real analysis budget on whatever it is handed and reports
+            # the result as this trader's cluster, which is not a claim an
+            # uncorroborated candidate can carry.
+            wallet, evm_wallet, _stats, _unverified = await asyncio.wait_for(
                 _resolve_fomo_enrichment(bot, user, stats, wallet, evm_wallet),
                 timeout=FOMO_ENRICH_TIMEOUT,
             )
@@ -3064,7 +3164,12 @@ async def pump_cmd(interaction: discord.Interaction, handle: str) -> None:
         bot.pump.holdings(user.address, limit=8),
         bot.pump.callouts(user.address, limit=8),
         bot.pump.created_coins(user.address, limit=5),
-        (bot.pump_evm.resolve(user) if bot.pump_evm else asyncio.sleep(0, result=None)),
+        # Shallow on purpose: the card must not wait on a deep holder
+        # walk. `pump_resolve_diag.py` / `pump_map_top.py` page deep and
+        # cache, and this then reads what they found.
+        (bot.pump_evm.resolve(user, pages=PUMP_EVM_CARD_PAGES,
+                              budget=PUMP_EVM_CARD_SECONDS)
+         if bot.pump_evm else asyncio.sleep(0, result=None)),
         return_exceptions=True,
     )
     portfolio = results[0] if isinstance(results[0], PumpPortfolio) else PumpPortfolio()

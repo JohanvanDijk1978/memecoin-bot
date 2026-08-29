@@ -67,6 +67,14 @@ choice changes rendering only.
 While Compact wallet enrichment is still running, its Linked wallets field
 shows `Querying ⏳`. The completed edit replaces that state with verified
 wallets or the final no-wallet result.
+When no route can corroborate a wallet but one of them did pin down an
+unambiguous on-chain owner, that owner is shown as an **unverified** wallet
+under an explicit warning rather than being discarded — Compact keeps the
+`Linked wallets` field, Wide adds `Solana wallet · unverified`. A verified
+wallet always wins and never carries the warning; several tied candidates are
+all shown rather than one being guessed at; and an unverified candidate is
+never written to the wallet cache, so `/wallet`, `/connected` and later
+`/fomo` calls still see verified mappings only.
 `/fomo` no longer waits for this optional on-chain work: it sends the core
 profile first, includes any cached wallets immediately, and edits that same
 card when background enrichment completes. `FOMO_ENRICH_TIMEOUT` bounds the
@@ -536,35 +544,87 @@ Common verdicts:
 
 `python -m unittest test_fomo_resolve_diag` covers the classification offline.
 
-## Diagnosing a missing Pump profile
+## Diagnosing a missing Pump profile — or a missing Pump EVM wallet
 
-`pump_resolve_diag.py` is the same tool for the Pump side. It drives the same
-`PumpProfileResolver.lookup()` the bot drives and captures the `pump.*` log
-records, so it cannot drift from `/pump`.
+`pump_resolve_diag.py` is `fomo_resolve_diag.py`'s counterpart, and it prints
+**both** of a Pump profile's wallets for every term. It drives the same
+`PumpProfileResolver.lookup()` and the same `PumpEvmResolver` the bot drives,
+and captures the `pump.*` log records, so it cannot drift from `/pump`.
 
 ```powershell
-python pump_resolve_diag.py 4y2T1ghy...dvE1
+python pump_resolve_diag.py eth
 python pump_resolve_diag.py hdegroot 1000XCryptoD --details
 python pump_resolve_diag.py <wallet> --fresh -v
 python pump_resolve_diag.py w1 w2 w3 --csv hunt_out/pump_wallets.csv
 ```
 
-Its stages are shorter than FOMO's because the mapping is published rather than
-inferred. What it exists to make visible is that there are three different
-kinds of "no":
+### Why `/pump` shows a Solana wallet and often no EVM one
 
-| stage | means |
+Because Pump publishes the first and not the second. A Pump profile **is** a
+Solana address, so naming it costs one request. The EVM account is returned by
+no Pump route: it has to be discovered from a fingerprint — Pump's exact
+`(chain, token, amountHeld)` balance matched against that token's public
+current-holder index, then confirmed independently with `balanceOf` through
+the chain's RPC. Four things must be true at once, and the tool says which one
+was not.
+
+| Solana stage | means |
 |---|---|
 | `input` | the term cannot address a Pump profile — usually an `0x…` wallet whose Pump profile has not been discovered by `pump_evm.py` yet |
 | `cache` | answered without a request: either a known profile, or a known *absence* recorded from a real 404 |
 | `profile` | Pump was asked: it returned the profile, or it returned 404 and the absence is now cached |
 | `transport` | Pump did not answer. Deliberately **not** cached, so this clears by itself |
 
-`--no-write` runs it without persisting anything; `--card` applies the shorter
-freshness bar the `/pump` card uses instead of the full TTL. Exit code is 0 when
-every term resolved, 1 otherwise.
+| EVM stage | means |
+|---|---|
+| `evm-cache` | already discovered and confirmed on chain; costs no requests |
+| `evm-portfolio` | Pump publishes no **open** position on Ethereum, BSC, Base or Robinhood. **The most common answer, and not a failure** — a Solana-only trader has nothing to fingerprint, and a position that has been sold leaves nothing behind |
+| `evm-holders` | no holder index answered for any candidate token (CoinMarketCap's keyless route, or Blockscout for Robinhood). `-v` prints the status codes |
+| `evm-truncated` | no holder at that balance **in the rows read**, and the index was truncated rather than exhausted — raise `PUMP_EVM_HOLDER_PAGES` or pass `--evm-holder-pages`. Holders are ranked by balance, so a dust fingerprint sits deep in the tail |
+| `evm-fingerprint` | the **complete** holder list holds no address at that exact balance (it moved since Pump's snapshot), or more than one does, which is refused rather than guessed |
+| `evm-verify` | a unique candidate the chain RPC would not confirm. A missing or broken `ETH_RPC` / `BSC_RPC` / `BASE_RPC` / `ROBINHOOD_RPC` fails this gate exactly like a wrong candidate does |
 
-`python -m unittest test_pump_profiles` covers the cache and resolver offline.
+The walk explains; the resolver decides. When a candidate survives every gate
+the answer comes from `PumpEvmResolver.resolve()`, which is what writes
+`pump_evm_cache.json` and therefore what `/pump` shows from then on.
+
+Discovery depth is a correctness parameter: holder indexes are ranked by
+balance, and a dust fingerprint sits deep in the tail. `PUMP_EVM_HOLDER_PAGES`
+(default 40 ≈ 2000 holders) is what the offline tools page; `/pump` passes
+`PUMP_EVM_HOLDER_PAGES_CARD` (default 6) because a card cannot wait on a
+public explorer answering at ~2s a page, and reads what the tools cached
+instead. A candidate is also cross-checked against the profile's *other*
+published balances, which both breaks ambiguity and records how much
+corroboration a match has.
+
+Blockscout answers a holder page in about 6.5 seconds, so a 40-page search is
+four minutes for one token — expect it, and watch the progress lines. The
+search is bounded by pages *and* wall-clock (`PUMP_EVM_HOLDER_SECONDS`, 300;
+`PUMP_EVM_CARD_SECONDS`, 8 for `/pump`), and stops with
+`PUMP_EVM_HOLDER_RATE_FLOOR` requests left in Cloudflare's 180-request window
+so the next run is still possible. A wallet is searched for once: the result is
+cached, and `/pump` reads it.
+
+Blockscout sits behind Cloudflare and refuses httpx's default User-Agent, and
+that refusal reads as an empty holder list. Every explorer request carries
+`EXPLORER_HEADERS` (`EXPLORER_USER_AGENT` overrides the UA). If you add a new
+explorer call, give it those headers — a bare `Accept` silently returns no
+holders.
+
+`--adopt-evm 0x…` skips the holder-index search for a wallet you already know
+and proves it instead: it is cached only if `balanceOf` confirms it against a
+balance Pump publishes for that profile, so a wrong address is refused.
+
+`--no-evm` skips EVM discovery; `--evm-holder-pages N` sets the depth; `--evm-positions N` changes how many of the
+profile's positions are fingerprinted (default 8, the slice `/pump` uses);
+`--require-evm` makes the exit code demand an EVM wallet too. `--no-write`
+runs without persisting anything; `--card` applies the shorter freshness bar
+the `/pump` card uses instead of the full TTL. Exit code is 0 when every term
+resolved a profile, 1 otherwise. The CSV carries both full addresses, the
+chain and both statuses.
+
+`python -m unittest test_pump_resolve_diag` covers the gate ladder offline;
+`python -m unittest test_pump_profiles` covers the cache and resolver.
 
 ## Token rotation
 
@@ -591,6 +651,7 @@ new one is written to `.fomo_session.json` — so:
 | `pump_chain.py` | Official Pump/PumpSwap event decoder and Solana polling |
 | `pump_tracking.py` | Pump subscription snapshots and normalized alerts |
 | `pump_evm.py` | Exact-balance Pump EVM discovery and reverse cache |
+| `pump_resolve_diag.py` | Both of a Pump profile's wallets, or the gate that lost one |
 | `pump_profiles.py` | Wallet ↔ Pump profile resolution, cached and deduplicated |
 | `wallet_profile_cache.py` | The keyed, expiring, negative-caching JSON store both flows share |
 | `token_intelligence.py` | Cross-chain metadata, top-holder owners, percentages and the trader-history routes |

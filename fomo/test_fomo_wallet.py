@@ -14,7 +14,9 @@ from fomo_wallet import (
     Rpc,
     RpcInvalidParams,
     SponsorIndex,
+    WalletCandidate,
     WalletResolver,
+    choose_unverified_wallets,
     find_tx_via_sponsor,
     find_cached_wallets,
     iso_epoch,
@@ -959,4 +961,203 @@ class HolderRouteTests(unittest.IsolatedAsyncioTestCase):
                 Broken(), SimpleNamespace(handle="scrill"),
                 self._balances(SOL_MINT_A),
             )
+        self.assertIsNone(found)
+
+
+SECOND_WALLET = "Second11111111111111111111111111111111111111"
+
+
+class UnverifiedCandidateChoiceTests(unittest.TestCase):
+    """`choose_unverified_wallets` -- merge first, rank after."""
+
+    def test_nothing_in_nothing_out(self) -> None:
+        self.assertEqual(choose_unverified_wallets([]), [])
+
+    def test_a_lone_candidate_is_the_fallback(self) -> None:
+        candidate = WalletCandidate(HOLDER_WALLET, ("hodlers+amount",), (SOL_MINT_A,))
+        self.assertEqual(choose_unverified_wallets([candidate]), [candidate])
+
+    def test_the_same_address_from_two_routes_merges_into_one(self) -> None:
+        chosen = choose_unverified_wallets([
+            WalletCandidate(HOLDER_WALLET, ("hodlers+amount",), (SOL_MINT_A,)),
+            WalletCandidate(HOLDER_WALLET, ("balance+helius",), (SOL_MINT_B,)),
+        ])
+        self.assertEqual(len(chosen), 1)
+        self.assertEqual(chosen[0].address, HOLDER_WALLET)
+        self.assertEqual(chosen[0].sources, ("hodlers+amount", "balance+helius"))
+        self.assertEqual(chosen[0].evidence, (SOL_MINT_A, SOL_MINT_B))
+
+    def test_the_address_two_routes_agree_on_beats_a_lone_one(self) -> None:
+        chosen = choose_unverified_wallets([
+            WalletCandidate(HOLDER_WALLET, ("hodlers+amount",), (SOL_MINT_A,)),
+            WalletCandidate(HOLDER_WALLET, ("balance+helius",), (SOL_MINT_A,)),
+            WalletCandidate(SECOND_WALLET, ("hodlers+amount",), (SOL_MINT_B,)),
+        ])
+        self.assertEqual([item.address for item in chosen], [HOLDER_WALLET])
+
+    def test_a_tie_is_never_broken_by_guessing(self) -> None:
+        chosen = choose_unverified_wallets([
+            WalletCandidate(HOLDER_WALLET, ("hodlers+amount",), (SOL_MINT_A,)),
+            WalletCandidate(SECOND_WALLET, ("hodlers+amount",), (SOL_MINT_B,)),
+        ])
+        self.assertEqual(
+            sorted(item.address for item in chosen),
+            sorted([HOLDER_WALLET, SECOND_WALLET]),
+        )
+
+
+class UnverifiedFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """The owners the routes pin down but cannot corroborate.
+
+    They are never returned as a wallet and never cached -- that is the whole
+    point of the corroboration gate. They are only carried out to the caller,
+    which is the difference between `/fomo` naming a likely wallet under a
+    warning and `/fomo` showing nothing at all.
+    """
+
+    def _balances(self, *mints: str) -> dict:
+        return {"balances": [
+            balance_row(mint, 123456789 + index, 123.456789, 3.0 - index)
+            for index, mint in enumerate(mints)
+        ]}
+
+    async def test_a_verified_holder_hit_offers_no_candidate(self) -> None:
+        when = iso_epoch("2026-08-18T13:05:59.531Z")
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("scrill", 123.456789)]})
+        http = HolderHttp(
+            {SOL_MINT_A: {HOLDER_WALLET: 123456789}},
+            signatures=[{"signature": "sig-1", "blockTime": when, "err": None}],
+            transactions={"sig-1": transaction(SOL_MINT_A, 5.0, HOLDER_WALLET)},
+        )
+        candidates: list[WalletCandidate] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"), self._balances(SOL_MINT_A),
+                swaps={"swaps": [swap(SOL_MINT_A, 5.0)]}, candidates=candidates,
+            )
+        self.assertEqual(found, HOLDER_WALLET)
+        self.assertEqual(candidates, [])
+
+    async def test_one_unambiguous_owner_survives_a_failed_gate(self) -> None:
+        # The pudgypenguins shape: FOMO names the trader in a published holder
+        # list, exactly one on-chain wallet holds that amount, and no gate can
+        # confirm it. The route still refuses to call it a wallet.
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("pudgypenguins", 123.456789)]})
+        http = HolderHttp({SOL_MINT_A: {HOLDER_WALLET: 123456789}})
+        candidates: list[WalletCandidate] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction", return_value=False,
+            ):
+                found = await resolver.resolve_from_holders(
+                    fomo, SimpleNamespace(handle="pudgypenguins"),
+                    self._balances(SOL_MINT_A), candidates=candidates,
+                )
+            self.assertIsNone(found)
+            # Nothing uncorroborated is ever written to the wallet cache.
+            self.assertFalse(path.exists())
+        self.assertEqual([item.address for item in candidates], [HOLDER_WALLET])
+        self.assertEqual(candidates[0].sources, ("hodlers+amount",))
+        self.assertEqual(candidates[0].evidence, (SOL_MINT_A,))
+
+    async def test_a_refuted_owner_is_not_offered(self) -> None:
+        # verify_wallet looked at this wallet's own history and this trader's
+        # swaps are not in it. That is an answer, not a gap, so re-offering it
+        # as "likely" would be worse than saying nothing.
+        when = iso_epoch("2026-08-18T13:05:59.531Z")
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("scrill", 123.456789)]})
+        http = HolderHttp(
+            {SOL_MINT_A: {HOLDER_WALLET: 123456789}},
+            signatures=[{"signature": "sig-1", "blockTime": when, "err": None}],
+            transactions={"sig-1": transaction(SOL_MINT_A, 999.0, HOLDER_WALLET)},
+        )
+        candidates: list[WalletCandidate] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"), self._balances(SOL_MINT_A),
+                swaps={"swaps": [swap(SOL_MINT_A, 5.0)]}, candidates=candidates,
+            )
+        self.assertIsNone(found)
+        self.assertEqual(candidates, [])
+
+    async def test_two_tokens_naming_two_owners_offer_both(self) -> None:
+        fomo = FakeFomoHolders({
+            SOL_MINT_A: [holder_row("scrill", 123.456789)],
+            SOL_MINT_B: [holder_row("scrill", 123.456790)],
+        })
+        http = HolderHttp({
+            SOL_MINT_A: {HOLDER_WALLET: 123456789},
+            SOL_MINT_B: {SECOND_WALLET: 123456790},
+        })
+        candidates: list[WalletCandidate] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"),
+                self._balances(SOL_MINT_A, SOL_MINT_B), candidates=candidates,
+            )
+        self.assertIsNone(found)
+        self.assertEqual(
+            sorted(item.address for item in candidates),
+            sorted([HOLDER_WALLET, SECOND_WALLET]),
+        )
+        # Two owners, one token each: nothing to prefer, so both are shown.
+        self.assertEqual(
+            sorted(item.address for item in choose_unverified_wallets(candidates)),
+            sorted([HOLDER_WALLET, SECOND_WALLET]),
+        )
+
+    async def test_an_ambiguous_token_offers_nothing(self) -> None:
+        # Two wallets could hold the published amount, so the route never
+        # reached one owner and there is no candidate to carry.
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("scrill", 123.456789)]})
+        http = HolderHttp({SOL_MINT_A: {
+            HOLDER_WALLET: 123456789,
+            "Neighbour111111111111111111111111111111111": 123456790,
+        }})
+        candidates: list[WalletCandidate] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            found = await resolver_for(http, path).resolve_from_holders(
+                fomo, SimpleNamespace(handle="scrill"), self._balances(SOL_MINT_A),
+                candidates=candidates,
+            )
+        self.assertIsNone(found)
+        self.assertEqual(candidates, [])
+
+    async def test_the_balance_route_offers_its_own_fingerprint_owner(self) -> None:
+        http = HolderHttp({SOL_MINT_A: {WALLET: 123456789}})
+        candidates: list[WalletCandidate] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction", return_value=False,
+            ):
+                found = await resolver.resolve_from_balances(
+                    SimpleNamespace(handle="pudgypenguins"),
+                    self._balances(SOL_MINT_A), candidates=candidates,
+                )
+            self.assertIsNone(found)
+            self.assertFalse(path.exists())
+        self.assertEqual([item.address for item in candidates], [WALLET])
+        self.assertEqual(candidates[0].sources, ("balance+helius",))
+
+    async def test_a_caller_that_asks_for_no_candidates_is_unaffected(self) -> None:
+        fomo = FakeFomoHolders({SOL_MINT_A: [holder_row("scrill", 123.456789)]})
+        http = HolderHttp({SOL_MINT_A: {HOLDER_WALLET: 123456789}})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wallets.json"
+            resolver = resolver_for(http, path)
+            with mock.patch.object(
+                resolver, "_has_fomo_sponsored_transaction", return_value=False,
+            ):
+                found = await resolver.resolve_from_holders(
+                    fomo, SimpleNamespace(handle="scrill"),
+                    self._balances(SOL_MINT_A),
+                )
         self.assertIsNone(found)

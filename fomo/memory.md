@@ -1,6 +1,6 @@
 # Full Memory — Zenza (Updated)
 
-**Last updated:** 2026-08-23 (session 40)
+**Last updated:** 2026-08-29 (session 43)
 
 ---
 
@@ -160,6 +160,143 @@ trader's real associates.
   probe (run on **unfiltered** history — a service is a service because of the
   swaps it handles)
 - Cache keys prefixed `CACHE_SCHEMA` = `v2`, so old scored reports are ignored
+
+### `/fomo` unverified wallet fallback (Session 41)
+
+`/fomo pudgypenguins` showed "No verified wallets found." while its own log
+said both derived routes had found **1 unambiguous owner**. They had — and
+threw it away, because neither could corroborate it (FOMO publishes no swap
+for that handle, so `verify_wallet` had nothing to check).
+
+There are now three states, not two: **verified**, **likely/unverified**, and
+**none**. The corroboration gate and the wallet cache are untouched; a
+candidate is never cached and never called linked. `WalletCandidate` +
+an optional `candidates=` sink on `resolve_from_holders` /
+`resolve_from_balances` carry the owner out to the card;
+`choose_unverified_wallets()` merges by address (two routes agreeing beats
+one) and refuses to break a tie — tied candidates are all shown. An owner
+`verify_wallet` actively *refuted* is never offered. `/connected` drops the
+fallback on purpose; `fomo_resolve_diag.py` prints it. Log line:
+`using unverified fallback wallet for <handle>: <wallet>`.
+
+### `/pump` EVM wallet diagnostic (Session 42)
+
+Reported: `/pump eth` shows the Solana wallet but no EVM wallet. Wanted a Pump
+counterpart to `python fomo_resolve_diag.py` that returns **both** wallets for
+a Pump profile.
+
+`pump_resolve_diag.py` already existed for the Solana/profile half; it now
+covers EVM too, so one command prints both wallets and, when one is missing,
+the gate that lost it:
+
+- `evm-cache` — already discovered and confirmed, no requests
+- `evm-portfolio` — no **open** position on Ethereum/BSC/Base/Robinhood.
+  The usual answer and not a failure: Pump never publishes the EVM address, so
+  discovery needs a live balance to fingerprint. A Solana-only trader has none.
+- `evm-holders` — no holder index answered (CMC keyless route, or Blockscout)
+- `evm-fingerprint` — zero holders at that exact balance, or more than one
+  (ambiguity is refused, never guessed)
+- `evm-verify` — a unique candidate the chain RPC would not confirm; a missing
+  `ETH_RPC`/`BSC_RPC`/`BASE_RPC`/`ROBINHOOD_RPC` fails this the same way
+
+Context for the numbers: `pump_evm_cache.json` holds 7 mappings against 4009
+cached profiles. That is discovery being precise, not broken.
+
+The tool walks `PumpEvmResolver`'s own ordering through its own helpers and
+hands a surviving candidate back to `PumpEvmResolver.resolve()` for the
+decision and the cache write — the walk explains, the resolver decides.
+
+`pump_evm.py` gained `portfolio_rows()` (public), `order_positions()` and
+`EXAMINED_POSITIONS`, all additive, so the diagnostic examines exactly the
+slice `/pump` examines.
+
+Flags: `--fresh`, `-v` (per-request HTTP log, API keys redacted to host),
+`--no-evm`, `--evm-positions N`, `--require-evm`, `--no-write`, `--csv`,
+`--json`. New offline suite: `python -m unittest test_pump_resolve_diag`.
+
+
+**Session 42 outcome — `eth`'s EVM wallet found: `0x6a4aab5657f10d44d27e8ff06e3dfba7e1d3c7b3`**
+
+- Confirmed by exact `balanceOf` against all three of Pump's published open
+  Robinhood balances (372.5228803259225 / 50 / 25) and by holding 0 COPPERINU
+  after selling 6.4M (the +$61.6k closed trade).
+- Root cause of the miss: `_blockscout_holders` paged only 5 pages (250
+  holders); this wallet is at holder rank ~1211. A throttled page also looked
+  identical to an empty index.
+- SECOND cause (the one that kept it broken after the depth fix): Blockscout
+  is behind Cloudflare and refuses httpx's default User-Agent. Holder calls
+  sent `Accept` alone and 403'd; `_positions` sent pump_api.HEADERS (with a UA)
+  and worked — so positions were found but holders were always empty. Fixed
+  with `EXPLORER_HEADERS` on every explorer request in `pump_evm.py`.
+  FIXED in session 43 for `token_intelligence._blockscout_holders` and all
+  three Blockscout calls in `fomo_evm.py` — it was indeed what broke `/token`
+  Robinhood holders.
+- THIRD cause: after the UA fix the search succeeded (found
+  0x6a4aab…d3c7b3 in ~4 min) but the diagnostic then called resolve(), which
+  re-paged the whole holder index — another 4 silent minutes, looked hung.
+  Now hands the winner to adopt() instead: one search, ever.
+- Blockscout holder pages take ~6.5s each. Added wall-clock budgets
+  (PUMP_EVM_HOLDER_SECONDS 300 / PUMP_EVM_CARD_SECONDS 8), a rate-limit floor
+  (Cloudflare: 180/window, ~40min lockout), HolderIndex.stopped, and live
+  progress logging every 5 pages.
+- Added `--adopt-evm 0x…`: proves a known address with balanceOf against
+  Pump's published balances and caches only on agreement.
+- Fixed: `PUMP_EVM_HOLDER_PAGES` (40) with backoff, `HolderIndex.complete`,
+  a new `evm-truncated` gate, candidate corroboration across the profile's
+  other balances, and a shallow `HOLDER_PAGES_CARD` (6) for `/pump` so the
+  card reads what the deep tools cached.
+- Found but not yet wired: `GET /user-portfolio/{sol}?filter=closed` and
+  `GET /user-positions/{sol}?mints=…` publish `amountBought` for CLOSED
+  positions (79 for `eth`, 25 on EVM chains) — a second fingerprint that
+  works for positions the trader has exited. Needs the private ROBINHOOD_RPC;
+  the public one times out on `eth_getLogs` over busy ranges.
+
+### `/token` Robinhood holders — FIXED (Session 43)
+
+**Symptom:** `/token address: 0xcacb0e9caccee63ec4d82952e561a291c68bcb68` ($GG)
+and `0x5317c0d077d2eeb639448939b930d49c4984b63b` ($COPPERINU) both rendered
+market cap and price fine and then `Top holders of 0 — Holder data is
+currently unavailable.` Blockscout says those tokens have 3,129 and ~4k
+holders.
+
+**Cause 1 (the one that emptied the card):** the exact latent bug session 42
+flagged and did not fix. `token_intelligence._blockscout_holders` sent
+`headers={"Accept": "application/json"}` and nothing else. Blockscout is
+behind Cloudflare, which refuses httpx's default User-Agent with a 403 — and
+`_blockscout_holders` returns `[]` on any status >= 400, so a 403 and an
+empty index are the same answer to `/token`. Verified live in Chrome: the
+same URL with a browser UA answers 200 with 50 rows.
+
+**Cause 2 (would have survived the UA fix, silently):** the parser read
+decimals and total supply out of `raw["token"]`. This Blockscout version's
+holders response has exactly two top-level keys, `items` and
+`next_page_params` — no `token` object. So decimals fell back to 18 and
+`supply` stayed `None`, which makes every `percentage` `None` and drops the
+`%` off every holder row. Decimals and `total_supply` come from
+`GET /api/v2/tokens/{address}` instead (`"18"` / `"1000000000000000000000000000"`
+for GG). The `raw["token"]` read is kept as a fallback for Blockscout
+versions that do inline it.
+
+**Cause 3 (latent, not yet observed):** one page is 50 rows, which is exactly
+`MAX_HOLDERS`, with no headroom — a short page would have truncated the card.
+The reader now follows `next_page_params` until it has the limit, capped at
+`BLOCKSCOUT_HOLDER_PAGES` (3).
+
+**Shipped:**
+- `EXPLORER_USER_AGENT` / `EXPLORER_HEADERS` in `token_intelligence.py`, on
+  `_blockscout_holders` and `_blockscout_trader_flows`
+- New `_blockscout_token_meta()`; `_blockscout_holders` rewritten to page
+- The same `EXPLORER_HEADERS` in `fomo_evm.py`, on all three Blockscout calls
+  (`_blockscout_token_transfers`, `_blockscout_quote_values`, the EVM holder
+  index) — the same 403 was latent there
+- `EXPLORER_USER_AGENT` in `.env.example`
+- 4 new tests (`RobinhoodHolderTests` in `test_token_intelligence.py`): the UA
+  is sent, percentages survive the missing `token` object, a short page pages
+  on, and a genuine 403 still shortens the card rather than raising
+
+**Verified:** live payloads for both CAs pulled through Chrome, then replayed
+through the real parser — 5/5 rows, top holder 81,632,653.06 GG = 8.1633% of
+the 1B supply, which matches the explorer. Not yet run through Discord.
 
 ### `/thesis` (New Command)
 - Top holders' written theses ranked by position value
