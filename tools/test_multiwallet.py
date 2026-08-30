@@ -17,6 +17,9 @@ It covers the things that would be embarrassing in production:
     transaction again (a restart, or a reconcile sweep) posts nothing
   * a buy older than the window does not count
   * the ceiling stops a hot token, and the cooldown lets it start again
+  * a decimals-only write does not blank the metadata Dexscreener stored
+  * a long link row still leaves the alert short enough to carry a picture
+  * a token Dexscreener has never heard of is still named, and still priced
 """
 
 from __future__ import annotations
@@ -168,6 +171,142 @@ def test_evm_parser() -> None:
           len(unknown) == 1 and unknown[0]["amount"] == 0 and unknown[0]["raw_amount"] == 5 * 10**18)
 
 
+
+# ── token metadata ────────────────────────────────────────────────────────
+DEX_TOKEN = "0x3333333333333333333333333333333333333333"
+
+
+def test_token_cache() -> None:
+    """The bug behind '? · Market cap: —' on every EVM alert."""
+    print("\nToken metadata cache")
+    store.init_schema()
+
+    # the order production runs in: decimals are learned when the buy is
+    # detected, metadata only later when the token crosses the threshold
+    store.put_token("ethereum", DEX_TOKEN, {"decimals": 18})
+    fresh = store.get_token("ethereum", DEX_TOKEN, max_age=MW.TOKEN_TTL)
+    check("a decimals-only row is not a metadata cache hit", not MW._usable(fresh))
+
+    store.put_token("ethereum", DEX_TOKEN, {
+        "symbol": "MEME", "name": "Meme Coin", "image": "https://example.invalid/b.png",
+        "price": 0.0001, "mcap": 123_456.0, "supply": 1e9, "links": {"twitter": "t"}})
+    store.put_token("ethereum", DEX_TOKEN, {"decimals": 18})     # a second sighting
+    row = store.get_token("ethereum", DEX_TOKEN)
+    check("a later decimals write keeps the symbol", row["symbol"] == "MEME", row["symbol"])
+    check("a later decimals write keeps the image", row["image"].endswith("b.png"))
+    check("a later decimals write keeps the market cap", row["mcap"] == 123_456.0)
+    check("decimals survive a metadata write", row["decimals"] == 18)
+    check("the cached row is now servable", MW._usable(
+        store.get_token("ethereum", DEX_TOKEN, max_age=MW.TOKEN_TTL)))
+
+
+# ── the photo caption ─────────────────────────────────────────────────────
+class _FakeResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    async def json(self) -> dict:
+        return self.payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+class FakeTelegram:
+    """Records which Telegram method an alert actually reached for."""
+
+    def __init__(self) -> None:
+        self.methods: list[str] = []
+
+    def post(self, url: str, json: dict | None = None, timeout=None):
+        self.methods.append(url.rsplit("/", 1)[-1])
+        return _FakeResponse({"ok": True, "result": {"message_id": 7}})
+
+
+def _azure_alert() -> str:
+    """A real three-wallet Solana alert: short to read, long in raw Markdown
+    because every TX link carries an 88-character signature."""
+    now = time.time()
+    rows = [{"wallet": WALLETS["rowdy"], "name": "Pow", "amount": 26_250_000,
+             "spent_usd": 1000.0, "price": 0.0000766, "ts": now, "tx": "5" * 88, "buys": 1},
+            {"wallet": WALLETS["ProfitPUMP"], "name": "brz1", "amount": 747_560,
+             "spent_usd": 50.0, "price": 0.0000260, "ts": now, "tx": "6" * 88, "buys": 1},
+            {"wallet": WALLETS["RowdyFOMO"], "name": "brz2", "amount": 817_670,
+             "spent_usd": 55.0, "price": 0.0000262, "ts": now, "tx": "7" * 88, "buys": 1}]
+    token = {"symbol": "AZURE", "name": "qinglong", "mcap": 76_390.0,
+             "price": 0.00007638, "supply": 1e9, "links": {}}
+    rule = {"min_wallets": 2, "window_min": 120, "max_wallets": 6, "cooldown_h": 24}
+    return MW.format_alert("solana", MINT, token, rows, rule)
+
+
+async def test_caption() -> None:
+    print("\nPhoto caption")
+    text = _azure_alert()
+    check("the raw Markdown is over Telegram's 1024 limit", len(text) > 1024, str(len(text)))
+    check("but the caption Telegram counts is well under it",
+          MW.visible_len(text) <= MW.CAPTION_LIMIT, f"{MW.visible_len(text)} chars")
+
+    fake = FakeTelegram()
+    await MW.send_alert(fake, text, "https://example.invalid/banner.png")
+    check("so the alert goes out as a photo", fake.methods[:1] == ["sendPhoto"],
+          ", ".join(fake.methods))
+
+    fake = FakeTelegram()
+    await MW.send_alert(fake, "🚨 " + "x" * 1100, "https://example.invalid/banner.png")
+    check("a genuinely long caption still falls back to text",
+          fake.methods[:1] == ["sendMessage"], ", ".join(fake.methods))
+
+    fake = FakeTelegram()
+    await MW.send_alert(fake, text, "")
+    check("no banner means no sendPhoto attempt", fake.methods[:1] == ["sendMessage"])
+
+
+# ── a token Dexscreener does not know ─────────────────────────────────────
+RH_TOKEN = "0x2deff95b296d148c13dce9117ffa2c38a4b40c6a"
+
+
+async def test_offchain_token() -> None:
+    print("\nA token Dexscreener has never heard of")
+    check("an ABI string decodes", S.decode_abi_string(
+        "0x" + "0000000000000000000000000000000000000000000000000000000000000020"
+             + "0000000000000000000000000000000000000000000000000000000000000004"
+             + "4d454d45" + "00" * 28) == "MEME")
+    check("a bytes32 symbol decodes",
+          S.decode_abi_string("0x" + "4d454d45" + "00" * 28) == "MEME")
+    check("an empty answer decodes to nothing", S.decode_abi_string("0x") == "")
+
+    async def fake_meta(session, chain: str, token: str) -> dict:
+        return {"symbol": "RBH", "name": "Robinhood Meme", "decimals": 18, "supply": 1e9}
+
+    real_meta, S.evm_token_meta = S.evm_token_meta, fake_meta
+    try:
+        token = await MW._token_without_dexscreener(None, "robinhood", RH_TOKEN)
+    finally:
+        S.evm_token_meta = real_meta
+    check("the contract names the coin", token.get("symbol") == "RBH", str(token.get("symbol")))
+    check("and gives it a supply", float(token.get("supply") or 0) == 1e9)
+    check("which is cached with its decimals",
+          (store.get_token("robinhood", RH_TOKEN) or {}).get("decimals") == 18)
+
+    now = time.time()
+    rows = [{"wallet": EVM_WALLET, "name": "MAgi", "amount": 12_660_000, "spent_usd": 1230.0,
+             "price": 1230.0 / 12_660_000, "ts": now - 60, "tx": "0x" + "a" * 64, "buys": 2},
+            {"wallet": EVM_WALLET[:-1] + "2", "name": "Durant", "amount": 478_380,
+             "spent_usd": 61.51, "price": 61.51 / 478_380, "ts": now,
+             "tx": "0x" + "b" * 64, "buys": 1}]
+    rule = {"min_wallets": 2, "window_min": 120, "max_wallets": 6, "cooldown_h": 24}
+    text = MW.format_alert("robinhood", RH_TOKEN, token, rows, rule)
+    check("the alert names the coin instead of '?'", "2 wallets bought RBH" in text)
+    check("and prices it from the newest buy", "at last buy" in text and "—" not in text,
+          [line for line in text.splitlines() if line.startswith("💰")][0])
+    print("─" * 62)
+    print(text)
+    print("─" * 62)
+
+
 # ── engine tests ──────────────────────────────────────────────────────────
 SENT: list[dict] = []
 
@@ -261,6 +400,9 @@ async def test_engine() -> None:
 def main() -> int:
     test_solana_parser()
     test_evm_parser()
+    test_token_cache()
+    asyncio.run(test_caption())
+    asyncio.run(test_offchain_token())
     asyncio.run(test_engine())
     print()
     if _failures:

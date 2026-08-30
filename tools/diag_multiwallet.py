@@ -5,6 +5,7 @@ Verify the multi-wallet buy watcher's plumbing from the machine that runs it.
     python3 tools/diag_multiwallet.py                 # endpoints + sockets + Telegram
     python3 tools/diag_multiwallet.py <wallet>        # replay that wallet's recent txs
     python3 tools/diag_multiwallet.py <wallet> 50     # …looking further back
+    python3 tools/diag_multiwallet.py token <chain> <CA>   # what an alert would know
 
 It answers, for THIS machine and THESE keys:
 
@@ -15,6 +16,9 @@ It answers, for THIS machine and THESE keys:
   * can the bot reach the multi-wallet channel it is configured to post in
   * for a given wallet: what its recent transactions look like through the same
     parser the watcher uses — which were buys, and why the others were not
+  * for a given token: the name, market cap and banner an alert would carry,
+    where each came from, and whether the message is short enough to be sent as
+    a picture — the two questions behind "? · Market cap: —" and "no image"
 
 Nothing here posts to Telegram or writes a buy. It is safe to run on the VPS
 while the bot is live; `--send` is the only exception and it is opt-in.
@@ -149,8 +153,52 @@ async def replay_wallet(session: aiohttp.ClientSession, wallet: str, limit: int)
     print(f"\n  {buys} buy(s) in the last {len(rows)} transactions")
 
 
+async def probe_token(chain: str, address: str) -> int:
+    """Everything an alert would know about one coin, and where it came from.
+
+    Run this against a CA whose alert came out wrong: it separates "Dexscreener
+    has no pool for this token" from "the cached row was blanked" from "the
+    coin simply has no banner".
+    """
+    print(f"\n▶ Token {address} on {chain}\n")
+    cached = store.get_token(chain, address)
+    line("cached row", "— none yet" if not cached else
+         f"symbol={cached.get('symbol') or '∅'} decimals={cached.get('decimals')} "
+         f"{'servable' if MW._usable(cached) else 'NOT servable (metadata missing)'}")
+
+    async with aiohttp.ClientSession() as session:
+        # -1 forces a cache miss: get_token reads max_age=0 as "no age limit".
+        token = await MW.fetch_token(session, chain, address, max_age=-1)
+        line("symbol / name", f"{token.get('symbol') or '—'} / {token.get('name') or '—'}")
+        line("market cap", MW.fmt_mcap(token.get("mcap")))
+        line("price", MW.fmt_price(token.get("price")))
+        line("supply", f"{float(token.get('supply') or 0):,.0f}")
+        line("banner", token.get("image") or "— none, the alert will have no picture")
+        line("links", ", ".join((token.get("links") or {})) or "— none")
+        if chain != "solana":
+            meta = await S.evm_token_meta(session, chain, address)
+            line("from the contract",
+                 ", ".join(f"{k}={v}" for k, v in meta.items()) or "— no answer")
+
+    rule = store.get_rule()
+    rows = MW.group_buys(store.buys_in_window(chain, address, time.time() - 86400))
+    if rows:
+        text = MW.format_alert(chain, address, token, rows, rule)
+        fits = MW.visible_len(text) <= MW.CAPTION_LIMIT
+        line("caption", f"{MW.visible_len(text)} chars (raw Markdown {len(text)}) — "
+                        f"{'fits a photo' if fits else 'TOO LONG, text only'}")
+        print("\n" + text)
+    else:
+        line("buys on record", "— none in the last 24h, so no alert preview")
+    print()
+    return 0
+
+
 async def main() -> int:
     wallet_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if wallet_arg == "token":
+        return await probe_token(sys.argv[2] if len(sys.argv) > 2 else "solana",
+                                 sys.argv[3] if len(sys.argv) > 3 else "")
     limit = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 
     print("\n🪙 Multi-wallet watcher diagnostics\n")

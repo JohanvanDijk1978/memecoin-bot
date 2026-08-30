@@ -1,8 +1,8 @@
 # Handoff: Multi-wallet buy alerts
 
-**Date:** 2026-08-29
-**Commit:** `195dd86` (committed locally from the Cowork session — **not pushed**, no GitHub credentials there)
-**Status:** Complete and offline-tested. Nothing has touched a live RPC or Telegram yet — see *What was verified, and what was not*.
+**Date:** 2026-08-29, revised 2026-08-30 (see *Fixed after the first live run*)
+**Commits:** `195dd86` shipped the feature; the 2026-08-30 fixes are committed locally from the Cowork session — **not pushed**, no GitHub credentials there.
+**Status:** Live on the box. The two faults the first alerts showed — no coin image, and `? · Market cap: —` on EVM — are fixed and covered offline; the network half is still Johan's to confirm.
 
 When several monitored wallets buy the same token inside a window, the bot posts to its own
 Telegram channel:
@@ -245,6 +245,56 @@ alerted N wallets on …` per post.
 
 ---
 
+## Fixed after the first live run (2026-08-30)
+
+Two things were wrong with the first alerts off the box, both visible in the same
+screenshot: the Solana alert had no coin picture, and the EVM alert read
+`2 wallets bought ?` with `Market cap: —`.
+
+**1 · No picture.** `send_alert` skipped `sendPhoto` whenever `len(text) > 1024`.
+Telegram's caption limit is 1024 characters **after entity parsing** — the URL behind
+`[TX](…)` does not count — and a Solana TX link carries an 88-character signature, so a
+perfectly ordinary three-wallet alert measured **1071 raw against 401 visible** and lost
+its banner every time. `visible_len()` now measures what Telegram measures (Markdown
+links collapsed to their label, UTF-16 code units, so an emoji counts as two), and a
+caption that really is too long says so in the log instead of failing silently.
+Dexscreener's `info.openGraph` was added as a third image fallback behind `header` and
+`imageUrl`, and an alert with no image at all now logs why.
+
+**2 · `? · Market cap: —` on EVM.** Two separate causes, both fixed:
+
+- **The token cache was being blanked.** `EvmWatcher._decimals_for` writes
+  `{"decimals": 18}` for every new EVM token *at detection time*. `put_token` was a
+  whole-row upsert, so that write overwrote the symbol, name, image and market cap with
+  empty defaults **and bumped `updated_at`** — after which `fetch_token` served the blank
+  row from its 120s cache and never called Dexscreener at all. `put_token` now writes
+  **only the fields the caller supplied**, a decimals-only write no longer restarts the
+  metadata TTL, and `_usable()` refuses to serve a row that carries nothing but decimals.
+  Existing poisoned rows heal themselves on the next alert — no migration.
+- **Dexscreener does not index every chain.** A Robinhood-chain coin has no entry there
+  at all. `_token_without_dexscreener()` now asks the ERC-20 contract instead —
+  `symbol()`, `name()`, `decimals()`, `totalSupply()`, with the bytes32 spelling some
+  older tokens use handled — so the alert names the coin, and `totalSupply` turns the
+  price paid in the newest buy into a market cap. That line is marked `· at last buy`,
+  because it is not a live quote and should not be read as one.
+
+New diagnostic, for the next time an alert looks wrong:
+
+```bash
+python3 tools/diag_multiwallet.py token robinhood 0x2deff95b296d148c13dce9117ffa2c38a4b40c6a
+```
+
+It prints the cached row and whether it is servable, what Dexscreener answered, what the
+contract answered, the banner URL, and the caption length with a verdict on whether the
+message fits a photo — which separates "no pool on Dexscreener" from "the cache was
+blanked" from "this coin simply has no image".
+
+`tools/test_multiwallet.py` covers all of it offline and now runs **37 checks**. Still
+unverified from here, for the same reason as before: no session in this repo can reach
+Dexscreener, an RPC or Telegram. What a live run has to confirm is narrow — that
+Dexscreener really does return an image for a typical pump.fun coin, and that the
+Robinhood RPC answers `symbol()` / `totalSupply()`. Both are one `diag … token …` away.
+
 ## Troubleshooting
 
 | Symptom | First thing to check |
@@ -253,6 +303,8 @@ alerted N wallets on …` per post.
 | `/buys` fills but the channel stays quiet | The rule (`/multirule`), then the channel: diag's Telegram line. A missing admin right looks exactly like a broken watcher. |
 | Buys appear only for Solana | EVM websocket refused or no `*_RPC` — diag's Websockets section names the reason. |
 | One wallet never produces a buy | `python3 tools/diag_multiwallet.py <wallet> 50` — it prints a verdict per transaction, including *why* a transaction was not a buy. |
+| An alert arrives with no picture | `diag … token <chain> <CA>` — `banner` says whether Dexscreener has one, `caption` whether the message fits. |
+| An alert says `?` or `Market cap: —` | Same command. `cached row … NOT servable` plus a good Dexscreener answer means the cache was stale; `from the contract — no answer` means the RPC for that chain is not answering `eth_call`. |
 | An alert repeated after a restart | Should be impossible (`mw_alerts`). If it happens, check `data/multiwallet.db` was not deleted or replaced. |
 | Alerts stop for one hot token | Expected: ceiling reached, 24h cooldown. `/multirule 3 120 8 6` would raise the ceiling to 8 and shorten the cooldown to 6h. |
 

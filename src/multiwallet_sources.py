@@ -426,6 +426,75 @@ def parse_evm_buys(receipt: dict, tx: dict, wallets: set[str], chain: str,
     return out
 
 
+# ── ERC-20 metadata, straight from the contract ───────────────────────────
+# Dexscreener only knows a token once it has an indexed pool, and it does not
+# index every chain at all — a Robinhood-chain coin has no entry there, which
+# is how an alert ends up reading "? · Market cap: —". The contract always
+# answers, and totalSupply is what turns a per-transaction price into a market
+# cap, so this is the floor under the metadata rather than a nicety.
+ERC20_SYMBOL = "0x95d89b41"
+ERC20_NAME = "0x06fdde03"
+ERC20_DECIMALS = "0x313ce567"
+ERC20_TOTAL_SUPPLY = "0x18160ddd"
+
+
+def decode_abi_string(result: Any) -> str:
+    """A `symbol()`/`name()` return value, ABI string or the bare bytes32 that
+    a handful of older tokens still answer with."""
+    if not isinstance(result, str) or not result.startswith("0x"):
+        return ""
+    body = result[2:]
+    try:
+        raw = bytes.fromhex(body if len(body) % 2 == 0 else "0" + body)
+    except ValueError:
+        return ""
+    if len(raw) >= 64:
+        offset = int.from_bytes(raw[:32], "big")
+        if 0 < offset <= len(raw) - 32:
+            length = int.from_bytes(raw[offset:offset + 32], "big")
+            if 0 < length <= len(raw) - offset - 32:
+                raw = raw[offset + 32:offset + 32 + length]
+    text = raw.rstrip(b"\x00").decode("utf-8", "ignore")
+    return "".join(ch for ch in text if ch.isprintable()).strip()
+
+
+async def evm_token_meta(session: aiohttp.ClientSession, chain: str, token: str) -> dict:
+    """symbol, name, decimals and total supply for one ERC-20. Never raises.
+
+    Returns only the keys it actually established, because `store.put_token`
+    writes exactly the fields it is given — an empty answer must not blank a
+    row Dexscreener has already filled in.
+    """
+    url = evm_rpc(chain)
+    if not url:
+        return {}
+    rpc = Rpc(session, [url], chain)
+
+    async def call(selector: str) -> Any:
+        return await rpc.call("eth_call", [{"to": token, "data": selector}, "latest"])
+
+    out: dict[str, Any] = {}
+    symbol = decode_abi_string(await call(ERC20_SYMBOL))
+    name = decode_abi_string(await call(ERC20_NAME))
+    if symbol:
+        out["symbol"] = symbol[:24]
+    if name:
+        out["name"] = name[:64]
+
+    raw_decimals = await call(ERC20_DECIMALS)
+    decimals = _hex_int(raw_decimals) if raw_decimals and raw_decimals != "0x" else -1
+    if not 0 <= decimals <= 36:
+        decimals = -1
+    if decimals >= 0:
+        out["decimals"] = decimals
+
+    raw_supply = await call(ERC20_TOTAL_SUPPLY)
+    supply = _hex_int(raw_supply) if raw_supply and raw_supply != "0x" else 0
+    if supply > 0 and decimals >= 0:
+        out["supply"] = supply / (10 ** decimals)
+    return out
+
+
 # ── watchers ──────────────────────────────────────────────────────────────
 OnBuy = Callable[[dict], Awaitable[None]]
 

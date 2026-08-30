@@ -42,6 +42,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -60,6 +61,7 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 TOKENS_URL = "https://api.dexscreener.com/latest/dex/tokens/{address}"
 
 TOKEN_TTL = float(os.getenv("MULTIWALLET_TOKEN_TTL", "120"))     # seconds of metadata reuse
+CAPTION_LIMIT = 1024        # Telegram photo caption, counted AFTER entity parsing
 NATIVE_TTL = 300.0
 PRUNE_HOURS = 6.0
 
@@ -112,6 +114,25 @@ def strip_md(text: Any) -> str:
     return (str(text or "")
             .replace("\\", "").replace("*", "").replace("_", "")
             .replace("`", "").replace("[", "(").replace("]", ")"))
+
+
+_MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+
+def visible_len(text: str) -> int:
+    """How long Telegram thinks this caption is.
+
+    The photo caption limit is 1024 characters *after entities are parsed*, so
+    `[TX](https://solscan.io/tx/<88-char signature>)` costs two characters, not
+    ninety-odd. Measuring the raw Markdown instead is why a perfectly ordinary
+    three-wallet Solana alert — 401 visible characters, 1071 raw — silently
+    lost its picture and went out as text. Telegram counts UTF-16 code units,
+    so an emoji counts as two; this counts them the same way.
+    """
+    stripped = _MD_LINK.sub(r"\1", text or "")
+    for ch in ("*", "_", "`"):
+        stripped = stripped.replace(ch, "")
+    return len(stripped.encode("utf-16-le")) // 2
 
 
 def fmt_mcap(value: float) -> str:
@@ -225,6 +246,46 @@ def _links_from_pair(pair: dict) -> dict[str, str]:
     return links
 
 
+def _usable(token: Optional[dict]) -> bool:
+    """Whether a cached row is worth serving.
+
+    A row carrying only `decimals` is not: that is the shape
+    `EvmWatcher._decimals_for` writes the moment a buy is detected, and
+    treating it as a cache hit is what made every EVM alert read
+    "? · Market cap: —" — Dexscreener was never asked at all.
+    """
+    if not token:
+        return False
+    return bool(token.get("symbol")
+                or float(token.get("price") or 0) > 0
+                or float(token.get("supply") or 0) > 0)
+
+
+async def _token_without_dexscreener(session: aiohttp.ClientSession, chain: str,
+                                     address: str) -> dict:
+    """Metadata for a token Dexscreener has no pool for — minutes old, or on a
+    chain it does not index at all (Robinhood). The ERC-20 contract still knows
+    its name, and totalSupply still turns a per-buy price into a market cap."""
+    if chain != "solana":
+        try:
+            onchain = await sources.evm_token_meta(session, chain, address)
+        except Exception as e:
+            logger.info("multiwallet: on-chain metadata failed for %s (%r)", address[:10], e)
+            onchain = {}
+        if onchain.get("symbol") or onchain.get("supply"):
+            store.put_token(chain, address, onchain)
+            result = store.get_token(chain, address) or dict(onchain)
+            result["links"] = {}
+            logger.info("multiwallet: %s is not on Dexscreener — named '%s' from its contract",
+                        address[:10], result.get("symbol") or "?")
+            return result
+    stale = store.get_token(chain, address)         # better an old name than none
+    if _usable(stale):
+        return stale
+    return {"symbol": "", "name": "", "image": "", "price": 0,
+            "mcap": 0, "supply": 0, "liq": 0, "links": {}}
+
+
 async def fetch_token(session: aiohttp.ClientSession, chain: str, address: str,
                       max_age: float = TOKEN_TTL) -> dict:
     """Name, symbol, current mcap, supply, banner and socials for one token.
@@ -233,7 +294,7 @@ async def fetch_token(session: aiohttp.ClientSession, chain: str, address: str,
     mixed batch, and the bot has been bitten by that before.
     """
     cached = store.get_token(chain, address, max_age=max_age)
-    if cached:
+    if _usable(cached):
         return cached
     data: dict[str, Any] = {}
     try:
@@ -246,9 +307,7 @@ async def fetch_token(session: aiohttp.ClientSession, chain: str, address: str,
         logger.info("multiwallet: dexscreener failed for %s (%r)", address[:8], e)
     pair = _pick_pair(data.get("pairs") or [], address)
     if not pair:
-        stale = store.get_token(chain, address)     # better an old name than none
-        return stale or {"symbol": "", "name": "", "image": "", "price": 0,
-                         "mcap": 0, "supply": 0, "liq": 0, "links": {}}
+        return await _token_without_dexscreener(session, chain, address)
     base = pair.get("baseToken") or {}
     price = float(pair.get("priceUsd") or 0)
     mcap = float(pair.get("marketCap") or pair.get("fdv") or 0)
@@ -256,7 +315,11 @@ async def fetch_token(session: aiohttp.ClientSession, chain: str, address: str,
     token = {
         "symbol": base.get("symbol") or "",
         "name": base.get("name") or "",
-        "image": info.get("header") or info.get("imageUrl") or "",
+        # banner, then the token icon, then Dexscreener's generated share card —
+        # in that order because a wide banner is what the other alerts use, and
+        # a coin with none of the three is why an alert arrives with no picture
+        "image": (info.get("header") or info.get("imageUrl")
+                  or info.get("openGraph") or ""),
         "price": price,
         "mcap": mcap,
         # supply is what turns a per-transaction price into a market cap. It is
@@ -345,11 +408,23 @@ def format_alert(chain: str, address: str, token: dict, rows: list[dict],
     symbol = token.get("symbol") or "?"
     name = token.get("name") or symbol
     supply = float(token.get("supply") or 0)
+    mcap = float(token.get("mcap") or 0)
+    price = float(token.get("price") or 0)
+
+    # No live quote — Dexscreener has no pool for this token. The newest buy
+    # priced it and totalSupply scales that to a market cap, so the line says
+    # something true and dated rather than "—".
+    dated = ""
+    if mcap <= 0 and supply > 0 and rows:
+        newest = max(rows, key=lambda r: r["ts"])
+        if newest["price"] > 0:
+            price, mcap = newest["price"], newest["price"] * supply
+            dated = " · at last buy"
 
     head = f"🚨 *{count} wallets bought {strip_md(symbol)}*"
     meta = f"🪙 *{strip_md(name)}* ({strip_md(symbol)}) · {chain_display_name(chain)}"
-    market = (f"💰 Market cap: *{fmt_mcap(token.get('mcap'))}* · "
-              f"Price: {fmt_price(token.get('price'))}")
+    market = (f"💰 Market cap: *{fmt_mcap(mcap)}* · "
+              f"Price: {fmt_price(price)}{dated}")
 
     lines = [head, rule_line(rule, list_name), "", meta, market,
              f"📄 CA: `{address}`", "", "🛍 *Buys:*"]
@@ -387,9 +462,14 @@ async def send_alert(session: aiohttp.ClientSession, text: str,
         logger.warning("multiwallet: no TELEGRAM_BOT_TOKEN or MULTIWALLET_CHANNEL_ID")
         return None
 
-    # A caption is capped at 1024 characters; a six-wallet buy list can exceed
-    # that, and a truncated buy list is worse than no picture.
-    if image_url and len(text) <= 1024:
+    # A caption is capped at 1024 characters AFTER entity parsing — the URLs
+    # behind the TX and link-row labels do not count. A six-wallet buy list can
+    # still exceed it, and a truncated buy list is worse than no picture.
+    caption_len = visible_len(text)
+    if image_url and caption_len > CAPTION_LIMIT:
+        logger.info("multiwallet: caption is %d chars, too long for a photo — sending text",
+                    caption_len)
+    if image_url and caption_len <= CAPTION_LIMIT:
         try:
             async with session.post(
                     TELEGRAM_API.format(token=token, method="sendPhoto"),
@@ -505,7 +585,11 @@ class Watcher:
                 token = dict(token)
                 token["symbol"] = next((b["symbol"] for b in buys if b.get("symbol")), "?")
             text = format_alert(chain, token_address, token, rows, rule, list_name)
-            message_id = await send_alert(self.session, text, token.get("image") or "")
+            image = token.get("image") or ""
+            if not image:
+                logger.info("multiwallet: no banner for %s — Dexscreener has no image",
+                            token.get("symbol") or token_address[:10])
+            message_id = await send_alert(self.session, text, image)
             if message_id is None:
                 # A send that failed for a transient reason should be retried by
                 # the next buy, so nothing is recorded here.

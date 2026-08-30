@@ -380,24 +380,63 @@ def get_token(chain: str, address: str, max_age: float = 0) -> Optional[dict]:
     return row
 
 
+# The columns put_token may write, and how a supplied value is coerced. A key
+# the caller omits is left alone — see the docstring below for why that matters.
+_TOKEN_COLUMNS = {
+    "symbol":   lambda v: (str(v or ""))[:24],
+    "name":     lambda v: (str(v or ""))[:64],
+    "image":    lambda v: str(v or ""),
+    "price":    lambda v: float(v or 0),
+    "mcap":     lambda v: float(v or 0),
+    "supply":   lambda v: float(v or 0),
+    "liq":      lambda v: float(v or 0),
+    "decimals": lambda v: int(v if v is not None else -1),
+}
+
+# Writing any of these means "this is token metadata, the cache is fresh".
+# A decimals-only write is not metadata and must not restart fetch_token's TTL.
+_TOKEN_META = ("symbol", "name", "image", "price", "mcap", "supply", "liq", "links")
+
+
 def put_token(chain: str, address: str, data: dict) -> None:
+    """Upsert ONLY the fields the caller actually supplied.
+
+    The whole-row version of this cost an evening of "? · Market cap: —" on
+    every EVM alert. `EvmWatcher._decimals_for` writes `{"decimals": 18}` for
+    each new token it sees; with the other columns defaulted, that INSERT wiped
+    the symbol, name, image and market cap Dexscreener had stored — and bumped
+    `updated_at`, so `fetch_token` then served the blanked row from cache and
+    never asked Dexscreener again. Partial writes are the fix: a caller states
+    what it knows and says nothing about the rest.
+    """
     ensure_schema()
+    fields = {name: cast(data[name])
+              for name, cast in _TOKEN_COLUMNS.items() if name in data}
+    if "links" in data:
+        fields["links_json"] = json.dumps(data.get("links") or {})
+    if not fields:
+        return
+    # 0 here means "not a metadata write"; the ON CONFLICT clause keeps the
+    # existing timestamp in that case, and a fresh row starts stale.
+    fields["updated_at"] = time.time() if any(k in data for k in _TOKEN_META) else 0.0
+
+    updates = []
+    for name in fields:
+        if name == "decimals":
+            # a token's decimals never change; a caller passing -1 must not
+            # erase what an earlier eth_call established
+            updates.append("decimals=CASE WHEN excluded.decimals >= 0"
+                           " THEN excluded.decimals ELSE mw_tokens.decimals END")
+        elif name == "updated_at":
+            updates.append("updated_at=CASE WHEN excluded.updated_at > 0"
+                           " THEN excluded.updated_at ELSE mw_tokens.updated_at END")
+        else:
+            updates.append(f"{name}=excluded.{name}")
+
+    columns = ["chain", "address", *fields]
+    values = [chain, normalize(address), *fields.values()]
     with db() as c:
-        c.execute(
-            "INSERT INTO mw_tokens(chain, address, symbol, name, image, price, mcap,"
-            " supply, liq, decimals, links_json, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
-            " ON CONFLICT(chain, address) DO UPDATE SET"
-            "  symbol=excluded.symbol, name=excluded.name, image=excluded.image,"
-            "  price=excluded.price, mcap=excluded.mcap, supply=excluded.supply,"
-            "  liq=excluded.liq,"
-            # a token's decimals never change; a caller that does not know them
-            # passes -1 and must not erase what an earlier eth_call established
-            "  decimals=CASE WHEN excluded.decimals >= 0 THEN excluded.decimals"
-            "           ELSE mw_tokens.decimals END,"
-            "  links_json=excluded.links_json, updated_at=excluded.updated_at",
-            (chain, normalize(address), (data.get("symbol") or "")[:24],
-             (data.get("name") or "")[:64], data.get("image") or "",
-             float(data.get("price") or 0), float(data.get("mcap") or 0),
-             float(data.get("supply") or 0), float(data.get("liq") or 0),
-             int(data.get("decimals", -1)), json.dumps(data.get("links") or {}),
-             time.time()))
+        c.execute(f"INSERT INTO mw_tokens({', '.join(columns)})"
+                  f" VALUES({', '.join('?' * len(columns))})"
+                  f" ON CONFLICT(chain, address) DO UPDATE SET {', '.join(updates)}",
+                  values)
