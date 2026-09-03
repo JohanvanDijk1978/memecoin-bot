@@ -64,21 +64,27 @@ for m in "${MEMBERS[@]}"; do
 done
 echo "   session installed ($(du -sh "$PROFILE" | cut -f1) profile total)"
 
-echo "== 5. gate test on a throwaway copy (does not disturb the profile) =="
-rm -rf /tmp/diag-profile
-cp -a "$PROFILE" /tmp/diag-profile
-rm -f /tmp/diag-profile/Singleton*
+echo "== 5. gate test ON THE REAL PROFILE (the bot is stopped, so it is free) =="
+# NEVER gate on a copy. Loading fomo.family makes the SPA refresh its Privy
+# session, and Privy ROTATES the refresh token on use -- the copy would consume
+# the rotation and leave the real profile holding a token the server has already
+# retired. The gate would go green and the bot would then be logged out with no
+# way back. Cost us the 2026-09-03 evening. The rule is bigger than this script:
+# the FOMO session has exactly one owner, and any second Chrome that opens
+# fomo.family with a copy of the profile steals it -- including the
+# /tmp/diag-profile trick in DEPLOY_VPS.md, which is only safe when you accept
+# that the running bot loses its session.
 cd "$FOMO" || die "cannot cd $FOMO"
-FOMO_CHROME_CHANNEL= FOMO_CHROME_PROFILE=/tmp/diag-profile \
-    xvfb-run -a "$FOMO/.venv/bin/python" vps_gate.py
+FOMO_CHROME_CHANNEL= xvfb-run -a "$FOMO/.venv/bin/python" vps_gate.py
 gate=$?
-rm -rf /tmp/diag-profile
 
 if [ "$gate" -ne 0 ]; then
     echo
     echo "!! GATE RED -- not starting the bot."
     echo "   'no privy:token'  -> the session did not travel; re-run ship_session.ps1."
-    echo "   'HTTP 401'        -> the profile is logged out; log in on borz first."
+    echo "   'HTTP 401' / fetch threw -> the profile is logged out. Log in again on"
+    echo "                        borz (.venv\\Scripts\\python.exe fomo_browser.py --login),"
+    echo "                        then re-run ship_session.ps1."
     echo "   'Cloudflare block'-> the WAF changed its mind about this IP; DEPLOY_VPS.md"
     echo "                        'If the gate is red' has the three fallbacks."
     exit 1

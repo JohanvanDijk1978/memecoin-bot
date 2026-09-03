@@ -372,7 +372,7 @@ class FomoClient:
                 status, body, resp_headers = await self._browser.get(
                     API_BASE + path, lane=lane
                 )
-            except BrowserUnavailable:
+            except BrowserUnavailable as exc:
                 # An in-page fetch that THROWS is usually an expired session, not
                 # a dead browser: the API omits `access-control-allow-origin` on
                 # its error responses, so the browser refuses to hand JS the 401
@@ -384,12 +384,27 @@ class FomoClient:
                 # then try once more. Without this a 24/7 process wedges the
                 # first time its token goes stale and never recovers.
                 if not _retry:
-                    raise
+                    # The retry did not help, so the session is gone rather than
+                    # merely stale. Raise a FomoError, NOT the bare
+                    # BrowserUnavailable: BrowserUnavailable is a plain
+                    # RuntimeError, so every command handler's
+                    # `except (FomoError, asyncio.TimeoutError)` missed it and the
+                    # interaction was left on "Generating the … profile for @x…"
+                    # forever with the real reason only in the log (2026-09-03).
+                    raise FomoAuthError(
+                        "the FOMO browser session is no longer valid -- re-ship "
+                        "the profile from borz (fomo/ship_session.ps1)"
+                    ) from exc
                 log.info(
                     "in-page fetch threw for %s, reloading the app page to "
                     "re-mint the token", path,
                 )
-                await self._browser.reload()
+                try:
+                    await self._browser.reload()
+                except BrowserUnavailable as reload_exc:
+                    raise FomoAuthError(
+                        f"the browser could not reload the app page: {reload_exc}"
+                    ) from reload_exc
                 return await self._get(
                     path, cache=cache, _retry=False, lane=lane
                 )

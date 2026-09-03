@@ -64,9 +64,27 @@ That refuses to run while anything holds the profile, packages the five session
 paths, scp's them plus `vps_relogin.sh` to the box, and runs the remote half:
 stop fomobot → kill orphaned Chrome → clear `Singleton*` → back up the old
 session under `/root/fomo-session-backups/` → install the new one → **gate test
-on a throwaway copy** → start fomobot only if the gate is green. Add
+on the real profile** → start fomobot only if the gate is green. Add
 `-SkipRemote` to stop after the copy; run `bash /root/vps_relogin.sh` yourself
 afterwards.
+
+### The session has exactly one owner — copies steal it
+
+Loading fomo.family makes the SPA refresh its Privy session, and Privy **rotates
+the refresh token on use**. So any second Chrome that opens the app with a
+*copy* of the profile consumes the rotation and leaves the original holding a
+token the server has already retired. The copy works; the original is logged out
+and cannot recover.
+
+This is not only the borz-vs-VPS problem. It burned us on 2026-09-03 in a much
+sneakier form: `vps_relogin.sh` gate-tested on `/tmp/diag-profile`, the gate went
+**green**, and the bot it then started was already logged out — every command
+hung on "Generating the … profile for @x…". The gate now runs on the real
+profile, which is safe because the bot is stopped at that point.
+
+Same warning applies to the `/tmp/diag-profile` trick in Troubleshooting below:
+it does not disturb the *files*, but it does take the *session*. Use it only
+when you are willing to re-ship afterwards.
 
 `vps_relogin.sh` also checks that the box's `fomo_api.py` contains the
 `BrowserUnavailable` retry. If it warns that it does not, the deployed code is
@@ -286,7 +304,9 @@ pkill -f "user-data-dir=/root/memecoin-bot-new/fomo/.chrome-profile" ; sleep 2
 rm -f /root/memecoin-bot-new/fomo/.chrome-profile/Singleton*
 ```
 
-To diagnose *without* stopping a running bot, work against a copy:
+To diagnose *without* stopping a running bot, work against a copy — but see
+"The session has exactly one owner" above: the copy will take the running bot's
+Privy session with it, so plan to re-ship afterwards.
 
 ```bash
 cp -a .chrome-profile /tmp/diag-profile && rm -f /tmp/diag-profile/Singleton*
@@ -315,6 +335,15 @@ long-lived orphaned Chrome was doing on the box.
 If it still throws after the retry, run `vps_diag.py` — it watches Playwright's
 `response`/`requestfailed` events, which see the real status even when CORS
 hides it from JS.
+
+### A command hangs on "Generating the … profile for @x…" forever
+
+The interaction is waiting on a call that raised `BrowserUnavailable`, which is a
+plain `RuntimeError` — so the handlers' `except (FomoError, asyncio.TimeoutError)`
+never caught it and the placeholder was never edited. Fixed 2026-09-03:
+`fomo_api._get()` converts a `BrowserUnavailable` that survives the reload-retry
+into `FomoAuthError`, so the card now says the session is gone instead of
+spinning. **The underlying cause is still a dead session** — re-ship it.
 
 ### Every traceback frame is `/usr/lib/python3.12/`
 
