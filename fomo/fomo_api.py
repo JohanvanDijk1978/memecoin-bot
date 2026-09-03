@@ -25,6 +25,7 @@ from urllib.parse import quote, urlencode
 
 import aiohttp
 
+from fomo_browser import BrowserUnavailable
 from fomo_chains import SUPPORTED_CHAINS_HEADER
 from fomo_hodlers import holders_query, holders_query_many, thesis_feed_query
 
@@ -367,9 +368,31 @@ class FomoClient:
             return hit[1]
 
         if self._browser is not None:
-            status, body, resp_headers = await self._browser.get(
-                API_BASE + path, lane=lane
-            )
+            try:
+                status, body, resp_headers = await self._browser.get(
+                    API_BASE + path, lane=lane
+                )
+            except BrowserUnavailable:
+                # An in-page fetch that THROWS is usually an expired session, not
+                # a dead browser: the API omits `access-control-allow-origin` on
+                # its error responses, so the browser refuses to hand JS the 401
+                # and fetch() raises instead. That hides the status, which means
+                # the 401 branch in _decode_response can never fire. Confirmed
+                # on the VPS 2026-09-01: a stale long-lived page threw
+                # "Failed to fetch" on every call while a fresh launch returned
+                # 200. Treat it exactly like a 401 -- reload so the SPA re-mints,
+                # then try once more. Without this a 24/7 process wedges the
+                # first time its token goes stale and never recovers.
+                if not _retry:
+                    raise
+                log.info(
+                    "in-page fetch threw for %s, reloading the app page to "
+                    "re-mint the token", path,
+                )
+                await self._browser.reload()
+                return await self._get(
+                    path, cache=cache, _retry=False, lane=lane
+                )
         else:
             token = await self._ensure_token()
             async with self._http.get(
