@@ -170,6 +170,115 @@ fomo.family egress (section 5). Its first real run is the open item, and
     hl.eco's CDN answers an `httpx` client — which is exactly why the probe
     prints the HTTP status of that first call before anything else.
 
+## Session 43 — three ways to be logged out, and a green gate that lied
+
+`systemctl status fomobot` said `active (running)` for a day and a half, with
+10 hours of CPU burned and not one answered command. Nothing about the unit was
+wrong. The process had been dead since the moment its Privy token went stale,
+and every layer that could have said so was, in its own way, silent: the API
+hides the 401 behind CORS, the code that was supposed to recover from that had
+never been pushed, and the exception it raised instead was of a type no command
+handler catches.
+
+Three failures, one silence. Each of them alone reproduces the whole outage.
+
+### 1. The fix existed only on borz
+
+`fomo_api._get()` gained a `BrowserUnavailable` retry on 2026-09-01 — the change
+that makes 24/7 possible, because the API omits `access-control-allow-origin` on
+error responses, so an expired session makes `fetch()` **throw** instead of
+returning 401 and the re-mint branch in `_decode_response` can never fire.
+
+It was never committed. `git show origin/main:fomo/fomo_api.py` had no
+`BrowserUnavailable` import at all, so for two days the box ran the version that
+wedges permanently while the working tree on borz looked fixed.
+
+**The rule that follows: a fix is deployed only if `git show origin/main:<path>`
+contains it.** The mount's working tree is not evidence about the VPS, and
+`git rev-list --left-right --count origin/main...HEAD` is the two-second check.
+This one is worth running *first* whenever the box misbehaves in a way the code
+supposedly handles.
+
+### 2. Browsing fomo.family on borz logs the box out
+
+`.chrome-profile/Default/History` — plain sqlite, readable straight off the
+mount — showed fomo.family opened at 15:04 and the profile written until 15:55
+on the day of the outage. Privy rotates its refresh token on every use, so borz
+took ownership of the session and the copy on the VPS was retired without a
+single log line anywhere.
+
+Reading `History` and the profile mtimes answers "who touched this session last"
+without going near the box, which matters because there is no SSH from a Cowork
+session (re-confirmed: `/dev/tcp/209.250.245.16/22` is unreachable from the
+desktop VM).
+
+### 3. The repair stole the session it was verifying
+
+This one was mine. The first `vps_relogin.sh` gate-tested on `/tmp/diag-profile`,
+a copy, on the reasoning that a copy cannot disturb the profile. It cannot
+disturb the *files*. It takes the *session*: loading fomo.family makes the SPA
+refresh, Privy rotates, and the rotation lands in the copy — which the script
+then deleted, leaving the real profile holding a token the server had already
+retired.
+
+So the gate printed `PASS HTTP 200, envelope success=true` and the bot it started
+was, at that exact moment, logged out.
+
+**The general rule, now written into DEPLOY_VPS.md: the FOMO session has exactly
+one owner, and any second Chrome that opens fomo.family with a copy of the
+profile steals it.** That includes the `/tmp/diag-profile` diagnosis trick — it
+is only safe if you accept that the running bot loses its session and plan to
+re-ship. And the corollary for reading any future gate result: **a green gate
+does not prove the bot's own profile is live**, only that the profile the gate
+used was.
+
+### 4. Why it hung instead of failing
+
+`/fomo onmycheck` sat on "Generating the Compact profile for @onmycheck…"
+forever. `BrowserUnavailable` subclasses `RuntimeError`, not `FomoError`, so
+`_generate_fomo_profile`'s `except (FomoError, asyncio.TimeoutError)` let it
+through, the interaction was never edited, and the only trace was a log line
+nobody was watching. A dead session should cost one card, not one hang.
+
+**Shipped:**
+
+- `255b01a` — the `BrowserUnavailable` retry, committed at last; plus
+  `fomo/ship_session.ps1`, `fomo/vps_relogin.sh` and the re-ship section in
+  `DEPLOY_VPS.md`
+- `30db928` — the gate runs on the real profile (safe: the bot is stopped at
+  that point in the script), the single-owner rule is documented against both
+  the script and the diag-copy trick, and `fomo_api._get()` converts a
+  `BrowserUnavailable` that survives the reload-retry — and a reload that itself
+  throws — into `FomoAuthError`, which every handler already catches
+- `ship_session.ps1` refuses to run while any Chrome holds the profile or a
+  local `fomo_bot.py` is alive, checks the five session paths exist, tars them
+  (456 KB of a 716 MB profile), scp's them plus the remote script and runs it
+- `vps_relogin.sh` stops the unit, kills orphaned Chrome, clears `Singleton*`,
+  **warns if the box's `fomo_api.py` lacks the retry**, backs the old session up
+  under `/root/fomo-session-backups/` (keeps 5), removes `Local Storage`,
+  `IndexedDB` and `Network` before extracting — extracting on top merges two
+  leveldb generations — gates, and starts the bot only on green
+
+**Verified:** the tarball members (the fomo.family IndexedDB and
+`Default/Network/Cookies` are both in it), both scripts' syntax, `fomo_api.py`
+compiles, and — on the box, by Johan — `PASS HTTP 200, envelope success=true,
+message='Leaderboard found'`, which is the standing proof that Cloudflare serves
+the Vultr IP through a real browser.
+
+**Not verified:** nothing in this session was run against the box by me; there
+is no SSH from here. The `FomoAuthError` path has not been exercised live, and
+the recovery sequence (log in on borz → re-ship → gate → start) had not
+completed when this was written.
+
+**Open, and now the highest-value item on this project:** *give the bot its own
+FOMO account.* Two of the three failures above are one cause wearing different
+clothes — a single account cannot be in two Chromes. Until that is fixed, every
+login anywhere costs the other machine its session, and the only cure is a
+re-ship. `FOMO_TRACK_INTERVAL=5` on the box also means a broken transport writes
+a warning every five seconds, which is how 10 hours of CPU disappeared into a
+log file; it is the cheapest live health probe there is, and worth reading
+before anything else.
+
 ## Session 42 — `/pump` has two wallets, and only one of them is published
 
 `/pump eth` shows a Solana wallet and no EVM one. That is not a bug in the
