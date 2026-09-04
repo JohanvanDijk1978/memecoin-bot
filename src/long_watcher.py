@@ -580,6 +580,7 @@ class LongWatcher:
     async def _frontend_loop(self, venue_id: str = "long") -> None:
         fw = self.frontends[venue_id]
         scope = f"frontend:{venue_id}"
+        base_delay = fw.venue.poll_seconds or FRONTEND_POLL_SECONDS
         consecutive_errors = 0
         while True:
             try:
@@ -596,7 +597,7 @@ class LongWatcher:
                     logger.warning("long[%s]: frontend RECOVERED — read %d assets from "
                                    "build %s, %d new vs the recorded set", venue_id,
                                    len(snap["numeraires"]), snap["fingerprint"], len(added))
-                    await asyncio.sleep(FRONTEND_POLL_SECONDS)
+                    await asyncio.sleep(base_delay)
                     continue
                 fp = await fw.build_changed()
                 if fp:
@@ -610,13 +611,17 @@ class LongWatcher:
                         logger.info("long[%s]: build %s shipped, asset set unchanged (%d)",
                                     venue_id, fp, len(snap["numeraires"]))
                 consecutive_errors = 0
-                delay = FRONTEND_POLL_SECONDS
+                delay = base_delay
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 consecutive_errors += 1
                 self.stats["errors"] += 1
-                delay = min(FRONTEND_POLL_SECONDS * (2 ** min(consecutive_errors, 6)), 300)
+                # A 429 is the origin asking for less, not a transient error —
+                # back off harder and further than for an ordinary failure.
+                rate_limited = "429" in str(e)
+                ceiling = 1800 if rate_limited else 300
+                delay = min(base_delay * (2 ** min(consecutive_errors, 6)), ceiling)
                 logger.warning("long[%s]: frontend poll failed (%d in a row): %s — "
                                "next in %.0fs", venue_id, consecutive_errors, e, delay)
             await asyncio.sleep(delay)
@@ -656,6 +661,12 @@ class LongWatcher:
             if not ROBINHOOD_RPC:
                 logger.warning("long: ROBINHOOD_RPC unset — on-chain detectors are off. "
                                "Deploy fomo/.env to the box (see reference_vps_setup).")
+
+            # Take Cloudflare's interstitial once, up front. Without this the
+            # very first read of a venue can be the request that gets challenged,
+            # and the venue is reported dead when it is merely cold.
+            await http.warmup([v.base + (v.pages[0] if v.pages else "/")
+                               for v in venues])
 
             try:
                 seeded = await self.seed()

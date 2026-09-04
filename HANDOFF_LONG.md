@@ -9,45 +9,54 @@ unless it says otherwise. Read this before re-deriving anything about Long.
 
 ## 0. State at handoff — read this first
 
-**2026-09-04, on the VPS: `app.long.xyz` returns 403.** The risk called out in §7
-item 1 is the one that landed. What that does and does not mean:
+**2026-09-04, run on the VPS. Verdict, per venue:**
 
-* The **frontend detector is blocked** — the pairable-asset array cannot be read.
-* **Nothing else is affected.** The factory, indexer and feed detectors never
-  touch `app.long.xyz`. In particular the *first-coin-per-numeraire* detector
-  still catches a new listing within minutes of the first launch against it.
-* The watcher no longer refuses to start over this (it did, in `5b52579` — that
-  was wrong and is fixed). It seeds the numeraire set from
-  `tools/long_baseline.json`, logs `FRONTEND DETECTOR DEGRADED`, runs the other
-  three, and keeps retrying the frontend. See §9.
+| venue | reachable from the box | detector |
+|---|---|---|
+| **Long** | ✅ **but only through curl_cffi** — aiohttp gets a Cloudflare challenge on every path, including static JS | working after §9 |
+| **Pons** | ✅ plain aiohttp, no tricks (Vercel) — 42 assets read live | working |
+| **o1** | ❌ **HTTP 429** to a datacentre IP, on every client tried | slow-polled; see below |
+| factory / feeds | ✅ RPC + WSS resolve from `fomo/.env` | working |
 
-**Next steps, in order:**
+`tools/probe_long_403.py` settled the Long question outright: `aiohttp bare` and
+`aiohttp browserish` both 403 with a challenge page, `curl binary` 403, and
+**`curl_cffi chrome` 200 on the page, on `/create`, and on the config chunk**.
+It is a TLS/JA3 bot-score block exactly as with fomo, and `curl_cffi` is now in
+`requirements.txt`.
 
-1. ```bash
-   cd /root/memecoin-bot-new && git pull && python3 tools/probe_long_403.py
-   ```
-   One run, four HTTP clients × every host the watcher needs. It ends in a
-   VERDICT block that names the fix. Do not guess before reading it.
-2. If it asks for it (most likely outcome):
-   ```bash
-   pip install curl_cffi --break-system-packages && systemctl restart memebot
-   ```
-   No code change — `LONG_TRANSPORT=auto` picks curl_cffi up by itself.
-3. Confirm the box took the commit — a clean `deploy.log` proves nothing,
-   `deploy.sh` restarts even when the pull aborted:
-   `git log --oneline -1 && grep -c run_long main.py` (expect `2`).
-4. `python3 tools/diag_long.py venues` — the three-venue comparison, and the
-   quickest confirmation that Pons and o1 are reachable where Long is not.
-5. `python3 tools/diag_long.py` for the rest of §7, and
-   `python3 tools/diag_long.py simulate PYPL --send` once the frontend is back.
+**Two bugs that first run exposed, both fixed (§9):**
 
-`.env` already has the webhook (`LONG_DISCORD_WEBHOOK` is set on the box — the
-diag output confirmed it). `fomo/.env` is supplying `ROBINHOOD_RPC`/`WSS`.
+1. **The first impersonated request gets the interstitial, the second passes.**
+   `/create` was read as dead while `/` succeeded — and `/create` is the ONLY
+   page referencing the config chunk (46 chunks vs 42), so the venue looked
+   broken with the message "array not found in any of 42 chunks". The transport
+   now retries through the challenge, warms up before seeding, and treats the
+   first page as **required** rather than parsing a plausible partial set.
+2. **A Vercel 429 was being reported as a Cloudflare WAF block** because its body
+   was HTML. `is_cf_challenge()` is now strict (`cf-mitigated: challenge`, or a
+   CF-fronted 403/503 whose body carries the interstitial text) and a 429 is
+   named as rate limiting with its `Retry-After`.
+
+**o1 and the 429.** Vercel rate-limits the VPS's address; no transport changes
+it, and it is not a bot-score block. o1 therefore polls at **120 s**
+(`O1_POLL_SECONDS`) with a 30-minute backoff ceiling on repeated 429s. This
+costs little: o1 lists ~194 of the ~206 on-chain stocks, so the factory event
+already covers nearly everything its array diff would say. Its Convex backend
+answers from the box regardless.
+
+**Next steps:**
+
+1. `cd /root/memecoin-bot-new && git pull && systemctl restart memebot`
+2. `python3 tools/diag_long.py venues` — should now print all three lists and
+   the on-chain stocks nobody lists.
+3. `python3 tools/diag_long.py simulate PYPL --send` to see a real alert land.
+4. Watch for `long: cleared the Cloudflare interstitial on attempt 2` in the log
+   — that line is the fix working.
 
 **If the channel stays silent:** near-silence is correct. Long lists a stock
 rarely, Robinhood's last stock-token batch was 2026-07-28, and coin alerts fire
-only on the first-ever coin against a numeraire. A noisy channel means something
-is broken, not a working one.
+only on the first-ever coin against a pairing asset. A noisy channel means
+something is broken, not a working one.
 
 ---
 
@@ -479,3 +488,54 @@ paired asset is the cheapest remaining upgrade; capture it by hooking
   startup, that venue's listing detector stays dark until the fetch works — it
   does not fall back, and it does not stop anything else. The log line is
   `long[<venue>]: DEGRADED`.
+
+---
+
+## 11. What the first live run on the VPS taught (2026-09-04)
+
+Both of these were invisible in every offline test and in the browser, and both
+produced a *plausible* wrong answer rather than an error — which is what made
+them expensive.
+
+### The first impersonated request is the one that gets challenged
+curl_cffi's first request to `app.long.xyz` came back `cf-mitigated: challenge`
+("Just a moment…"); the next one succeeded, because the session had picked up
+the clearance cookie. The code treated that first answer as a hard failure, so:
+
+* `/create` → failed
+* `/` → succeeded (session now warm)
+* union of chunks → **42, from `/` alone**
+* `/`'s HTML does **not** reference the config chunk; `/create`'s does
+
+…and the watcher reported "pairable-asset array not found in any of 42 chunks",
+which reads exactly like a broken parser. Nothing was wrong with the parser.
+
+**Fixes:** `_curl_through_challenge()` retries up to 3 times with growing delays
+while the response is still an interstitial; `Http.warmup()` takes the challenge
+once at startup before any real read; and `snapshot()` now treats the FIRST page
+in `Venue.pages` as required, refusing to parse a partial chunk set rather than
+drawing conclusions from it.
+
+**The general lesson, worth carrying to any future scraper:** when a source is
+assembled from several requests, a partial success is more dangerous than a
+total failure. Name the request that is load-bearing and fail loudly without it.
+
+### "The body is HTML" does not mean Cloudflare
+The 403 classifier called any HTML error body a WAF block. o1's Vercel 429 is an
+HTML page, so the diagnosis said "blocked by Cloudflare's WAF" about a host that
+is not behind Cloudflare at all, and prescribed curl_cffi — which cannot help
+with a rate limit. `is_cf_challenge()` is now strict, and 429 has its own branch
+that says to poll less often.
+
+### Where each venue actually stands from a datacentre IP
+* **Long** — CF bot-score block; only curl_cffi passes. Static assets are
+  blocked too, so there is no "just fetch the chunk" shortcut.
+* **Pons** — completely open to plain aiohttp. Nothing needed.
+* **o1** — 429 on every client. Not a bot score, an origin rate limit, and the
+  probe hitting it four times in a row plus the diag twice more will have made
+  it worse. If it stays 429 at a 120 s poll, the fallbacks in order are: accept
+  it (the factory event covers ~194 of its ~206 assets anyway), fetch it from
+  borz instead, or drop o1 from `LONG_VENUES` entirely.
+* **api.long.xyz `/v1/config` and `/v1/assets`** return 403 even through
+  curl_cffi, with `content-type: application/json` — that is the app's own API
+  key gate, not the WAF. Correct behaviour, no action.

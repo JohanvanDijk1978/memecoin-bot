@@ -219,6 +219,8 @@ def test_venue_parsers() -> None:
           o1by["cbBTC"]["extra"]["chain_id"] == 8453)
     check("o1 skips entries whose address is an identifier (ETH/USDG)",
           "ETH" not in o1by)
+    check("o1 gets its own slower poll interval (it 429s a datacentre IP)",
+          S.VENUES["o1"].poll_seconds >= 60)
     check("o1 chunk passes its own guard",
           S.looks_like_config_chunk(o1, S.VENUES["o1"].min_assets))
 
@@ -227,6 +229,34 @@ def test_venue_parsers() -> None:
     check("a Pons chunk is not mistaken for a Long one",
           not S.looks_like_config_chunk(S.parse_numeraires(make_pons_chunk()),
                                         S.VENUES["long"].min_assets))
+
+
+async def test_primary_page_required() -> None:
+    """The failure that made the first live run look like a parser bug: Long's
+    config chunk is referenced only by /create, so if /create fails and / does
+    not, the chunk set is plausible and useless."""
+    print("\n▶ the primary page is required")
+
+    class HalfBlocked(S.LongFrontendWatcher):
+        def __init__(self):
+            super().__init__(http=None)
+
+        async def _page_html(self, page):
+            if page == self.pages[0]:
+                raise RuntimeError("HTTP 403 — cf-mitigated=challenge")
+            return make_html(["vendor01", "vendor02"])      # no config chunk
+
+        async def _chunk_text(self, url):
+            return "console.log('vendor');"
+
+    fw = HalfBlocked()
+    try:
+        await fw.snapshot()
+        check("a failed primary page raises", False, "it returned a snapshot")
+    except RuntimeError as e:
+        check("a failed primary page raises", True)
+        check("the error names the primary page, not the parser",
+              "primary page" in str(e) and "config chunk" in str(e), str(e)[:120])
 
 
 def test_venue_registry() -> None:
@@ -518,7 +548,32 @@ def test_block_classifier() -> None:
         '{"message":"Forbidden resource","statusCode":403}',
         {"content-type": "application/json", "server": "cloudflare"})
     check("an app-level refusal is NOT called a WAF block",
-          "Cloudflare's WAF" not in origin and "origin refused" in origin)
+          "Cloudflare's WAF" not in origin and "app-level refusal" in origin)
+
+    # The bug this test exists for: a Vercel 429 was being reported as a
+    # Cloudflare WAF block because its body happened to be HTML, which sent the
+    # first live diagnosis in the wrong direction entirely.
+    rl = S.describe_block("https://launch.o1.exchange/token/create", 429,
+                          "<!DOCTYPE html><html>Too many requests</html>",
+                          {"server": "Vercel", "content-type": "text/html",
+                           "retry-after": "60"})
+    check("a 429 is called rate limiting, not a WAF block",
+          "Cloudflare's WAF" not in rl and "rate limited" in rl)
+    check("the 429 message carries Retry-After", "Retry-After=60" in rl)
+    check("and it says to poll less, not to change transport",
+          "Poll less often" in rl)
+
+    check("is_cf_challenge: cf-mitigated is enough",
+          S.is_cf_challenge(403, "", {"cf-mitigated": "challenge"}))
+    check("is_cf_challenge: interstitial text on a CF 403",
+          S.is_cf_challenge(403, "<title>Just a moment...</title>",
+                            {"cf-ray": "x", "server": "cloudflare"}))
+    check("is_cf_challenge: plain HTML on a Vercel 429 is NOT a challenge",
+          not S.is_cf_challenge(429, "<html>nope</html>", {"server": "Vercel"}))
+    check("is_cf_challenge: a JSON 403 from a CF-fronted app is NOT a challenge",
+          not S.is_cf_challenge(403, '{"message":"Forbidden"}',
+                                {"cf-ray": "x", "server": "cloudflare",
+                                 "content-type": "application/json"}))
 
 
 async def test_degraded_start() -> None:
@@ -619,6 +674,7 @@ def main() -> int:
     test_block_classifier()
     test_venue_parsers()
     test_venue_registry()
+    asyncio.run(test_primary_page_required())
     test_pons_feed_normalise()
     asyncio.run(test_end_to_end())
     asyncio.run(test_factory_path())

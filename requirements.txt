@@ -4,3 +4,4 @@ discord.py-self==2.0.1
 aiohttp==3.10.5
 python-dotenv==1.0.1
 asyncio==3.4.3
+curl_cffi>=0.7   # Cloudflare TLS impersonation for app.long.xyz (see HANDOFF_LONG.md §9)

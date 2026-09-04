@@ -159,20 +159,33 @@ _CF_BODY_MARKERS = (
 )
 
 
-def describe_block(url: str, status: int, body: str, headers: dict) -> str:
-    """Turn a 403/503 into an actionable sentence instead of a bare status.
+def is_cf_challenge(status: int, body: str, headers: dict) -> bool:
+    """True only for an actual Cloudflare bot-management block.
 
-    The whole of long.xyz sits behind Cloudflare, so `server: cloudflare` and
-    `cf-ray` appear on ordinary responses too — only an HTML challenge page or
-    an explicit `cf-mitigated` means the WAF ate the request.
+    Deliberately strict. `server: cloudflare` and `cf-ray` ride on ordinary
+    responses from these hosts, and "the body is HTML" is true of any error
+    page — an earlier version used that and cheerfully told us a Vercel 429 was
+    a Cloudflare WAF block, which sent the diagnosis in the wrong direction.
+    What actually distinguishes a challenge is `cf-mitigated: challenge` or the
+    interstitial's own text.
     """
     h = {k.lower(): v for k, v in (headers or {}).items()}
+    if (h.get("cf-mitigated") or "").lower() == "challenge":
+        return True
+    if status not in (403, 503):
+        return False
+    if not (h.get("cf-ray") or "cloudflare" in (h.get("server") or "").lower()):
+        return False
+    return any(m.lower() in (body or "").lower() for m in _CF_BODY_MARKERS)
+
+
+def describe_block(url: str, status: int, body: str, headers: dict) -> str:
+    """Turn a non-200 into an actionable sentence instead of a bare status."""
+    h = {k.lower(): v for k, v in (headers or {}).items()}
     ctype = (h.get("content-type") or "").lower()
-    body_looks_cf = any(m.lower() in (body or "").lower() for m in _CF_BODY_MARKERS)
-    is_cf = bool(h.get("cf-mitigated")) or "html" in ctype or body_looks_cf
 
     bits = [f"HTTP {status} from {url}"]
-    if is_cf:
+    if is_cf_challenge(status, body, headers):
         bits.append(
             "blocked by Cloudflare's WAF, not by the app. CF scores the TLS/JA3 "
             "fingerprint and sec-* headers as well as the IP, so a bare aiohttp "
@@ -180,6 +193,13 @@ def describe_block(url: str, status: int, body: str, headers: dict) -> str:
             "(LONG_TRANSPORT=auto then impersonates Chrome). Same lesson as "
             "fomo/FOMO_API.md §1."
         )
+    elif status == 429:
+        ra = h.get("retry-after")
+        bits.append("rate limited by the origin (not a WAF block)"
+                    + (f"; Retry-After={ra}" if ra else "")
+                    + ". Poll less often rather than changing transport.")
+    elif "json" in ctype:
+        bits.append("app-level refusal: " + (body or "")[:120].replace("\n", " "))
     else:
         bits.append("origin refused it (no Cloudflare challenge markers found)")
     detail = [f"{k}={h[k]}" for k in
@@ -401,6 +421,7 @@ class Venue:
     chain_id: int
     min_assets: int = 8
     token_url: str = ""          # format string with {address}
+    poll_seconds: float = 0.0    # 0 = use LONG_FRONTEND_POLL_SECONDS
     enabled: bool = True
 
 
@@ -426,6 +447,12 @@ VENUES: dict[str, Venue] = {
         pages=("/token/create", "/"), chunk_re=_CHUNK_RE_VITE,
         parser=parse_assets_o1, chain_id=ROBINHOOD_CHAIN_ID, min_assets=40,
         token_url="https://launch.o1.exchange/token/{address}",
+        # o1 answers 429 to a datacentre IP at any brisk rate (Vercel, not
+        # Cloudflare — no transport change helps). It also lists ~194 of the
+        # ~206 on-chain stocks, so its array diff is the least urgent of the
+        # three: the factory event already covers almost everything it would
+        # say. Poll it slowly and let the on-chain detector carry it.
+        poll_seconds=float(os.getenv("O1_POLL_SECONDS", "120")),
     ),
 }
 
@@ -585,29 +612,62 @@ class Http:
             headers = {**_BROWSERISH_SCRIPT, **headers}
 
         if LONG_TRANSPORT == "curl_cffi" or Http._impersonating:
-            return await self._curl_get(url, headers)
+            return await self._curl_through_challenge(url, headers)
 
         async with self.session.get(url, headers=headers, **kw) as r:
             status, text, hdrs = r.status, await r.text(), dict(r.headers)
 
-        # A 403/503 on a page we know is public means the client was judged, not
-        # the request. Switch transports once and retry, rather than reporting a
-        # dead source for the rest of the process.
-        if status in (403, 503) and LONG_TRANSPORT == "auto":
+        # A Cloudflare challenge means the CLIENT was judged, not the request —
+        # aiohttp will never pass it, on this or any address. Switch for good,
+        # do not keep paying a blocked round-trip per poll.
+        if LONG_TRANSPORT == "auto" and is_cf_challenge(status, text, hdrs):
             if not Http._curl_warned:
                 Http._curl_warned = True
                 logger.warning("long: %s", describe_block(url, status, text, hdrs))
-                logger.warning("long: retrying through curl_cffi (Chrome impersonation)")
+                logger.warning("long: switching to curl_cffi (Chrome impersonation)")
             try:
-                status2, text2, hdrs2 = await self._curl_get(url, headers)
+                out = await self._curl_through_challenge(url, headers)
             except RuntimeError as e:
                 logger.error("long: %s", e)
                 return status, text, hdrs
-            if status2 < 400:
-                Http._impersonating = True
-                logger.warning("long: curl_cffi got through — using it for this process")
-            return status2, text2, hdrs2
+            Http._impersonating = True
+            return out
         return status, text, hdrs
+
+    async def _curl_through_challenge(self, url: str, headers: dict,
+                                      attempts: int = 3) -> tuple[int, str, dict]:
+        """curl_cffi, retrying while Cloudflare is still showing the interstitial.
+
+        The FIRST impersonated request to a host often comes back as
+        "Just a moment…" (`cf-mitigated: challenge`) and the next one succeeds —
+        the session has picked up the clearance cookie by then. Treating that
+        first answer as failure is what made the very first live run read
+        `/create` as dead while `/` worked, and `/create` is the only page that
+        references the config chunk, so the whole venue looked broken.
+        """
+        delay = 1.5
+        status, text, hdrs = 0, "", {}
+        for i in range(attempts):
+            status, text, hdrs = await self._curl_get(url, headers)
+            if not is_cf_challenge(status, text, hdrs):
+                if i:
+                    logger.info("long: cleared the Cloudflare interstitial on attempt %d",
+                                i + 1)
+                return status, text, hdrs
+            await asyncio.sleep(delay)
+            delay *= 2
+        return status, text, hdrs
+
+    async def warmup(self, urls: list[str]) -> None:
+        """Take the interstitial before the first real read, so a venue is never
+        reported dead because its very first request was the one that got the
+        challenge."""
+        for u in urls:
+            try:
+                st, body, hd = await self.get_text(u, kind="doc")
+                logger.info("long: warmup %s -> %s", u, st)
+            except Exception as e:
+                logger.info("long: warmup %s failed: %s", u, str(e)[:120])
 
     async def post_json(self, url: str, payload: dict, **kw) -> Any:
         async with self.session.post(url, json=payload, **kw) as r:
@@ -714,16 +774,30 @@ class VenueFrontendWatcher:
         """Read the current pairable-asset set. Raises if it cannot be found —
         a silent empty list would look exactly like 'Long delisted everything'.
         """
+        # The FIRST page is required, the rest are enrichment. On Long the
+        # config chunk is referenced only by `/create` (46 chunks) and not by
+        # `/` (42), so a silent failure of the first page yields a plausible but
+        # useless chunk set — which is exactly how the first live run reported
+        # "array not found in any of 42 chunks" while nothing was actually wrong
+        # with the parser.
         urls: list[str] = []
-        for page in self.pages:
+        primary_error: Optional[Exception] = None
+        for i, page in enumerate(self.pages):
             try:
                 urls.extend(chunk_urls_from_html(
                     await self._page_html(page), self.base, self.venue.chunk_re))
             except Exception as e:
+                if i == 0:
+                    primary_error = e
                 logger.warning("long[%s]: page %s failed: %s", self.venue.id, page, e)
+        if primary_error is not None:
+            raise RuntimeError(
+                f"{self.venue.label}: the primary page {self.pages[0]} failed, and it is "
+                f"the one that references the config chunk — refusing to parse a partial "
+                f"chunk set: {primary_error}")
         urls = sorted(set(urls))
         if not urls:
-            raise RuntimeError("no chunk URLs found on any Long page")
+            raise RuntimeError(f"{self.venue.label}: no chunk URLs on any page")
 
         fingerprint = chunk_fingerprint(urls)
 
