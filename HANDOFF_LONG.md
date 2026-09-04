@@ -5,6 +5,43 @@ unless it says otherwise. Read this before re-deriving anything about Long.
 
 ---
 
+## 0. State at handoff — what is done, what is yours
+
+**Done and committed locally as `5b52579`** (9 files, +2889 lines). `git rev-list
+--left-right --count origin/main...HEAD` reports `0 1`, i.e. **one commit ahead
+and NOT pushed** — Cowork has no GitHub credentials. Nothing is deployed yet.
+
+**Four things stand between this and a live watcher, in order:**
+
+1. **Push.** From VS Code, `cd C:\Users\mzshu\Downloads\memebot` first — a
+   `git push` from `fomo/` is the trap that has already cost a debugging round.
+2. **Create the Discord channel and its webhook**, paste the URL into the
+   `LONG_DISCORD_WEBHOOK=` line already waiting at the bottom of `.env`, then
+   `scp C:\Users\mzshu\Downloads\memebot\.env root@209.250.245.16:/root/memecoin-bot-new/.env`.
+   `.env` is not in git, so the push alone does nothing for it.
+3. **Confirm the box actually took the commit.** A clean `deploy.log` proves
+   nothing — `deploy.sh` restarts even when the pull aborted:
+   `cd /root/memecoin-bot-new && git log --oneline -1 && grep -c run_long main.py`
+   (expect `5b52579…` and `2`).
+4. **Run `python3 tools/diag_long.py` on the box** and read §7. That is the only
+   thing that closes the five unverified items — above all whether Cloudflare
+   serves a non-browser HTTP client at all.
+
+**If the watcher never speaks:** in order of likelihood — Cloudflare 403 on the
+frontend poll (the log line is `long: frontend poll failed`), `LONG_DISCORD_WEBHOOK`
+empty (`long: LONG_DISCORD_WEBHOOK unset — alert not delivered`), `fomo/.env`
+missing so the on-chain detectors are off (`long: ROBINHOOD_RPC unset`), or
+seeding failing, which by design stops the watcher rather than letting it alert
+against a world it never recorded (`long: seeding failed — refusing to start`).
+Silence with none of those lines is the correct behaviour: Long listed nothing.
+
+**Expected alert volume:** near zero. Long lists a stock rarely, Robinhood
+deployed its last batch of stock tokens on 2026-07-28, and coin-launch alerts
+fire only on the first-ever coin against a numeraire. If this channel is noisy,
+something is wrong.
+
+---
+
 ## 1. How Long actually decides which stocks it supports
 
 Long (`https://app.long.xyz`) is a Next.js app on Railway behind Cloudflare. It
