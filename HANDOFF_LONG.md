@@ -642,3 +642,64 @@ alongside the rows. `venues` now prints `⚠ factory scan failed` and the words
 * The identical-HTML and cache-key measurements above, from borz's browser pane.
 * **Not** verified: the 429 clearing on the VPS. That is `python3
   tools/diag_long.py venues` after a `git pull && systemctl restart memebot`.
+
+---
+
+## 13. Every restart was a hole in the listing detector (2026-09-04)
+
+Johan: *"the bot gives me notifications for the first coin launched against a
+stock, but I want one when the stock becomes available to pair against."*
+
+That alert already exists — `🚀 {venue} now supports {SYMBOL}`, fired from
+`on_numeraires()` for every venue, and it is the **earlier** of the two:
+
+| tier | alert | fires when |
+|---|---|---|
+| 1 | `🆕 New tokenised stock on Robinhood Chain` | the factory deploys the token — earliest, venue-independent |
+| 2 | **`🚀 Pons now supports F`** | the stock appears in a venue's pairable-asset array — **what he asked for** |
+| 3 | `🥇 First Pons coin ever launched against F` | someone launches a coin against it — what he was getting |
+
+So why had tier 2 never arrived? Two reasons, one benign and one a bug.
+
+**Benign:** seeding is silent by design, so every asset already pairable when
+the watcher first ran is recorded without an alert. F, BULL and AMC were all
+pairable before the watcher existed — tier 2 could not have fired for them, and
+tier 3 firing for them is the system working.
+
+**The bug:** `build_changed()` keeps the last fingerprint in memory and adopts
+whatever it sees first as its baseline. `seed()` skips a venue that is already
+seeded, so after a restart the first poll set the baseline to *the build running
+right now* and returned "no change". **Anything that became pairable while the
+process was down was absorbed in silence** and could only surface whenever the
+venue happened to ship its *next* build — which can be days, and is usually
+after the first coin has launched against it. Every `git pull && systemctl
+restart memebot` opened that window, and this repo restarts a lot.
+
+The fingerprint of the last build actually parsed was already in the store
+(`{venue}:fingerprint`), written at seed and after every re-read. It was simply
+never read back.
+
+**Fixed:** `VenueFrontendWatcher.prime_fingerprint()`, and `_frontend_loop()`
+priming from that cursor before its first poll. A build that shipped during the
+downtime is now a change on the first poll, `snapshot()` re-reads the array and
+the diff against the store alerts exactly the assets that appeared. The first
+post-restart check is capped at `LONG_CATCHUP_MAX_ALERTS` (default 8) so a long
+outage absorbs instead of bursting — the same rule the degraded-mode recovery
+uses.
+
+**Also fixed, same shape as §11:** `build_changed()` now requires the primary
+page too. Computing a fingerprint from a partial chunk set produced a different
+number on every poll, so a venue whose primary page was blocked looked like it
+was deploying continuously.
+
+**Proof:** `tools/test_long.py` gained a test that seeds against build 1, stops,
+starts a *new* watcher against build 2 (which adds PYPL) and drives the real
+`_frontend_loop`. With the fix: one alert, `PYPL`, "now supports". With
+`prime_fingerprint()` commented out: `sent []`. 136 checks pass.
+
+**What Johan should expect after deploying:** still nothing for stocks already
+pairable — those are known. The next stock that becomes pairable on Long, Pons
+or o1 fires tier 2 within one poll (5 s on Long and Pons, 120 s on o1), and the
+`🥇 first coin` alert then arrives later, if and when someone launches against
+it. `python3 tools/diag_long.py venues` lists what each venue currently offers,
+which is the "am I actually watching the right thing" check.

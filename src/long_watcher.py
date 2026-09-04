@@ -77,6 +77,9 @@ INDEXER_POLL_SECONDS = float(os.getenv("LONG_INDEXER_POLL_SECONDS", "2"))
 FEED_POLL_SECONDS = float(os.getenv("LONG_FEED_POLL_SECONDS", "300"))
 PONS_POLL_SECONDS = float(os.getenv("LONG_PONS_POLL_SECONDS", "5"))
 FEED_WATCHER_ENABLED = os.getenv("LONG_FEED_WATCHER", "1") not in ("0", "false", "False")
+# How many "venue now supports X" alerts a single post-restart catch-up may fire.
+# More than this and the gap is too wide to be news — absorb it and say so.
+CATCHUP_MAX_ALERTS = int(os.getenv("LONG_CATCHUP_MAX_ALERTS", "8"))
 
 EXPLORER_WEB = ROBINHOOD_EXPLORER_API.replace("/api/v2", "")
 
@@ -582,6 +585,20 @@ class LongWatcher:
         scope = f"frontend:{venue_id}"
         base_delay = fw.venue.poll_seconds or FRONTEND_POLL_SECONDS
         consecutive_errors = 0
+
+        # A restart must not blind the listing detector. `build_changed()` adopts
+        # whatever it sees first as its baseline, so a stock that became pairable
+        # while the process was down — every deploy, every `systemctl restart` —
+        # was absorbed in silence and only surfaced whenever the venue happened
+        # to ship its NEXT build. The fingerprint of the last build we actually
+        # parsed is in the store, so the comparison starts from there.
+        stored_fp = store.get_cursor(f"{venue_id}:fingerprint")
+        catching_up = bool(stored_fp) and store.is_seeded(scope)
+        if catching_up:
+            fw.prime_fingerprint(stored_fp)
+            logger.info("long[%s]: resuming from build %s — anything listed while we "
+                        "were down will be caught on the first poll", venue_id, stored_fp)
+
         while True:
             try:
                 self.stats["frontend_polls"] += 1
@@ -600,13 +617,19 @@ class LongWatcher:
                     await asyncio.sleep(base_delay)
                     continue
                 fp = await fw.build_changed()
+                # Only the FIRST successful check after a restart is a catch-up;
+                # after that we are live again and every listing is news.
+                first_check, catching_up = catching_up, False
                 if fp:
                     self.stats["builds_seen"] += 1
-                    logger.info("long[%s]: new build %s — re-reading the asset array",
-                                venue_id, fp)
+                    logger.info("long[%s]: new build %s — re-reading the asset array%s",
+                                venue_id, fp,
+                                " (catch-up: this build shipped while we were down)"
+                                if first_check else "")
                     snap = await fw.snapshot()
                     store.set_cursor(f"{venue_id}:fingerprint", snap["fingerprint"])
-                    added = await self.on_numeraires(snap)
+                    added = await self.on_numeraires(
+                        snap, max_new_alerts=CATCHUP_MAX_ALERTS if first_check else None)
                     if not added:
                         logger.info("long[%s]: build %s shipped, asset set unchanged (%d)",
                                     venue_id, fp, len(snap["numeraires"]))

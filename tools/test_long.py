@@ -703,6 +703,91 @@ async def test_degraded_start() -> None:
           f"added={len(added2)} sent={len(notifier.sent) - before}")
 
 
+async def test_restart_catchup() -> None:
+    """The hole this closes: a stock becomes pairable while memebot is down.
+
+    `build_changed()` adopts the first fingerprint it sees as its baseline, so
+    every `systemctl restart` used to swallow whatever shipped during the gap —
+    the "venue now supports X" alert never fired, and the stock only surfaced
+    later as "first coin ever launched against X", by which point somebody else
+    had already launched it. The fingerprint of the last build we actually
+    parsed is in the store, so the comparison now starts from there.
+    """
+    print("\n▶ a listing that ships while the bot is restarting")
+    from src import long_watcher as W
+
+    tmp = tempfile.mkdtemp(prefix="longcatchup_")
+    store.set_db_path(os.path.join(tmp, "long.db"))
+
+    class FakeFrontend(S.LongFrontendWatcher):
+        def __init__(self, state: int):
+            super().__init__(http=None)
+            self.state = state
+
+        async def _page_html(self, page):
+            return make_html([f"cfg000{self.state}", "vendor01"])
+
+        async def _chunk_text(self, url):
+            if "cfg0001" in url:
+                return make_chunk()
+            if "cfg0002" in url:
+                return make_chunk(NEW_TICKER_ENTRY)
+            return "console.log('vendor');"
+
+    # the unit of the fix, on its own
+    fw = FakeFrontend(2)
+    fw.prime_fingerprint("a_build_we_parsed")
+    check("prime_fingerprint sets the comparison baseline",
+          fw._last_fingerprint == "a_build_we_parsed")
+    changed = await fw.build_changed()
+    check("a primed watcher calls the very first poll a change",
+          changed is not None and changed != "a_build_we_parsed", f"got {changed}")
+
+    class NoPrimary(FakeFrontend):
+        async def _page_html(self, page):
+            if page == self.pages[0]:
+                raise RuntimeError("HTTP 403 — cf-mitigated=challenge")
+            return make_html(["vendor01"])
+
+    np = NoPrimary(2)
+    np.prime_fingerprint("a_build_we_parsed")
+    check("a failed primary page is not a build change",
+          await np.build_changed() is None)
+
+    # …and the whole path: seed, stop, the venue ships, start again.
+    notifier = W.CollectingNotifier()
+    for scope in ("factory", "indexer", "feeds", "pons_feed"):
+        store.mark_seeded(scope)
+
+    w1 = W.LongWatcher(notifier=notifier)
+    w1.frontends = {"long": FakeFrontend(1)}
+    w1.frontend = w1.frontends["long"]
+    await w1.seed()
+    check("seeding is silent", len(notifier.sent) == 0, f"sent {len(notifier.sent)}")
+    seeded_fp = store.get_cursor("long:fingerprint")
+    check("the seeded build is recorded", bool(seeded_fp))
+
+    # process restarts; build 2 (with PYPL) is what the first poll sees
+    w2 = W.LongWatcher(notifier=notifier)
+    w2.frontends = {"long": FakeFrontend(2)}
+    w2.frontend = w2.frontends["long"]
+    task = asyncio.create_task(w2._frontend_loop("long"))
+    await asyncio.sleep(0.4)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    check("a listing missed during the restart alerts on the first poll",
+          len(notifier.sent) == 1 and notifier.sent[0]["ticker"] == "PYPL",
+          f"sent {[a.get('ticker') for a in notifier.sent]}")
+    check("the alert says the venue now supports it",
+          notifier.sent and "now supports" in notifier.sent[0]["title"])
+    check("the recorded build moved on",
+          store.get_cursor("long:fingerprint") not in (None, seeded_fp))
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="longtest_")
     store.set_db_path(os.path.join(tmp, "long.db"))
@@ -720,6 +805,7 @@ def main() -> int:
     asyncio.run(test_end_to_end())
     asyncio.run(test_factory_path())
     asyncio.run(test_degraded_start())
+    asyncio.run(test_restart_catchup())
     print(f"\n{'='*54}\n  {PASS} passed, {FAIL} failed\n{'='*54}")
     return 1 if FAIL else 0
 

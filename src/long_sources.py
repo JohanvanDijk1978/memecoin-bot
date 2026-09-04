@@ -874,15 +874,32 @@ class VenueFrontendWatcher:
             f"changed how it ships config"
         )
 
+    def prime_fingerprint(self, fingerprint: str) -> None:
+        """Start the change comparison from a build we actually parsed.
+
+        Without this, the first poll after a restart adopts whatever it sees as
+        the baseline, so a listing that shipped while the process was down is
+        absorbed in silence — the caller passes the fingerprint recorded in the
+        store instead."""
+        self._last_fingerprint = fingerprint
+
     async def build_changed(self) -> Optional[str]:
         """One cheap request. Returns the new fingerprint if the build moved,
         else None. This is what runs on the hot loop."""
         urls: list[str] = []
-        for page in self.pages:
+        for i, page in enumerate(self.pages):
             try:
                 urls.extend(chunk_urls_from_html(
                     await self._page_html(page), self.base, self.venue.chunk_re))
             except Exception as e:
+                if i == 0:
+                    # Same rule as snapshot(): the primary page is the one that
+                    # references the config chunk, so a fingerprint computed
+                    # without it is a different number entirely and would read as
+                    # a deploy on every single poll. No page, no opinion.
+                    logger.debug("long[%s]: build check skipped — primary page %s "
+                                 "failed: %s", self.venue.id, page, e)
+                    return None
                 logger.debug("long[%s]: build check on %s failed: %s",
                              self.venue.id, page, e)
         if not urls:
