@@ -104,6 +104,46 @@ async def _diag_one_venue(http: S.Http, venue) -> None:
           f"{W.FRONTEND_POLL_SECONDS:.0f}s; the chunk fetch above only happens on a deploy")
 
 
+async def scan_deployed(rpc, head: int, limit: int = 0) -> tuple[dict, str]:
+    """Every `Deployed` event from the stock factory, as address → row.
+
+    Returns (rows, error) — and the error is the point. An earlier version of
+    this scan swallowed the exception and printed "tokenised stocks on chain: 0",
+    which reads as a fact about the chain when it is really a failed RPC call;
+    the "listed by NO venue: 0 ← untouched pool" line under it was then a
+    confident lie. Same lesson as the 42-chunk report: a partial success is
+    worse than a failure.
+
+    The window narrows when the RPC refuses a range — providers cap both the
+    block span and the result count of `eth_getLogs`, and Robinhood Chain's
+    ~101 ms blocks make 5M blocks a very large ask — so a rejected window is
+    retried smaller instead of ending the scan.
+    """
+    rows: dict[str, dict] = {}
+    window = int(os.getenv("LONG_DIAG_WINDOW", "5000000"))
+    cur, err = 0, ""
+    while cur <= head:
+        end = min(cur + window, head)
+        try:
+            logs = await rpc.get_logs(S.RH_STOCK_FACTORY, [S.TOPIC_DEPLOYED], cur, end)
+        except Exception as e:
+            if window > 10_000:
+                window //= 10
+                print(f"  eth_getLogs refused {end - cur} blocks ({str(e)[:70]}) "
+                      f"— retrying in {window}-block windows")
+                continue
+            err = f"stopped at block {cur}: {str(e)[:110]}"
+            break
+        for lg in logs:
+            row = S.decode_deployed_log(lg)
+            if row:
+                rows[row["address"]] = row
+        if limit and len(rows) >= limit:
+            break
+        cur = end + 1
+    return rows, err
+
+
 async def diag_venues(http: S.Http) -> None:
     """The comparison that says where the opportunity is: which tokenised stocks
     each venue lists, and which exist on chain but nobody lists yet."""
@@ -134,20 +174,14 @@ async def diag_venues(http: S.Http) -> None:
         return
     rpc = S.JsonRpc(http, S.ROBINHOOD_RPC)
     head = await rpc.block_number()
-    onchain: dict[str, dict] = {}
-    cur, window = 0, 5_000_000
-    while cur <= head:
-        end = min(cur + window, head)
-        try:
-            for lg in await rpc.get_logs(S.RH_STOCK_FACTORY, [S.TOPIC_DEPLOYED], cur, end):
-                row = S.decode_deployed_log(lg)
-                if row:
-                    onchain[row["address"]] = row
-        except Exception:
-            break
-        cur = end + 1
+    onchain, err = await scan_deployed(rpc, head)
+    if err and not onchain:
+        print(f"\n  tokenised stocks on chain  : ⚠ factory scan failed, {err}")
+        print("  listed by NO venue         : unknown — not 0; the RPC never answered")
+        return
     nowhere = [r for a, r in onchain.items() if a not in union]
-    print(f"\n  tokenised stocks on chain  : {len(onchain)}")
+    print(f"\n  tokenised stocks on chain  : {len(onchain)}"
+          + (f"   ⚠ partial, {err}" if err else ""))
     print(f"  listed by NO venue         : {len(nowhere)}   ← untouched pool")
     for r in sorted(nowhere, key=lambda x: x["block_number"] or 0, reverse=True)[:20]:
         print(f"    {r['symbol']:<10} {r['address']}  {r['name']}")
@@ -224,22 +258,9 @@ async def diag_chain(http: S.Http) -> None:
     head = await rpc.block_number()
     print(f"  head block: {head}")
 
-    found: list[dict] = []
-    window = 5_000_000
-    cur = 0
-    while cur <= head and len(found) < 400:
-        end = min(cur + window, head)
-        try:
-            logs = await rpc.get_logs(S.RH_STOCK_FACTORY, [S.TOPIC_DEPLOYED], cur, end)
-        except Exception as e:
-            print(f"  eth_getLogs {cur}-{end} failed: {e}")
-            break
-        for lg in logs:
-            row = S.decode_deployed_log(lg)
-            if row:
-                found.append(row)
-        cur = end + 1
-    print(f"  Deployed events found: {len(found)}")
+    rows, err = await scan_deployed(rpc, head, limit=400)
+    found = list(rows.values())
+    print(f"  Deployed events found: {len(found)}" + (f"   ⚠ {err}" if err else ""))
     print("\n  newest 12 tokenised stocks:")
     for r in sorted(found, key=lambda x: x["block_number"] or 0, reverse=True)[:12]:
         print(f"    block {r['block_number']:<12} {r['symbol']:<10} {r['address']}  {r['name']}")
@@ -270,19 +291,9 @@ async def diag_gap(http: S.Http) -> None:
         print("  ⟨needs ROBINHOOD_RPC⟩")
         return
     head = await rpc.block_number()
-    onchain: dict[str, dict] = {}
-    cur, window = 0, 5_000_000
-    while cur <= head:
-        end = min(cur + window, head)
-        try:
-            for lg in await rpc.get_logs(S.RH_STOCK_FACTORY, [S.TOPIC_DEPLOYED], cur, end):
-                row = S.decode_deployed_log(lg)
-                if row:
-                    onchain[row["address"]] = row
-        except Exception as e:
-            print(f"  window {cur}-{end}: {e}")
-            break
-        cur = end + 1
+    onchain, err = await scan_deployed(rpc, head)
+    if err:
+        print(f"  ⚠ factory scan {err} — the numbers below are partial")
 
     missing = [r for a, r in onchain.items() if a not in listed]
     extra = [r for a, r in listed.items() if a not in onchain]

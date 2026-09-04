@@ -32,7 +32,7 @@ Cloudflare story, §10 is Pons and o1.
 |---|---|---|
 | **Long** | ✅ **but only through curl_cffi** — aiohttp gets a Cloudflare challenge on every path, including static JS | working after §9 |
 | **Pons** | ✅ plain aiohttp, no tricks (Vercel) — 42 assets read live | working |
-| **o1** | ❌ **HTTP 429** to a datacentre IP, on every client tried | slow-polled; see below |
+| **o1** | ❌ **HTTP 429** to a datacentre IP, on every client tried — request pattern since fixed, **see §12** | slow-polled; see below |
 | factory / feeds | ✅ RPC + WSS resolve from `fomo/.env` | working |
 
 `tools/probe_long_403.py` settled the Long question outright: `aiohttp bare` and
@@ -556,3 +556,89 @@ that says to poll less often.
 * **api.long.xyz `/v1/config` and `/v1/assets`** return 403 even through
   curl_cffi, with `content-type: application/json` — that is the app's own API
   key gate, not the WAF. Correct behaviour, no action.
+
+---
+
+## 12. The second live run, and why o1 was 429ing (2026-09-04, later)
+
+The run that produced this section:
+
+```
+run 1 (08:46)  long: retrying through curl_cffi …  ❌ array not found in any of 42 chunks
+run 2 (08:53)  long: switching to curl_cffi …      ✅ 59 assets, build 9f40757c44452d51
+```
+
+**Long is fixed and confirmed live.** The two runs are not the same code — the
+string `retrying through curl_cffi` only ever existed before `a554cf0`, and
+`switching to curl_cffi` only after it. Run 1 was the old binary still on the
+box; run 2 is `a554cf0`, and it read 59 assets on the first try. §11's fix works.
+The 42 in run 1 is the tell — that is `/` alone, the fingerprint of the bug §11
+describes, not a parser fault.
+
+### o1's 429 was partly self-inflicted, and the request pattern was the fix
+
+Two facts, both measured from the browser pane on borz against the live site:
+
+1. **`/` and `/token/create` return byte-identical HTML** — 9732 bytes, the same
+   61 `/assets/*.js` chunks, no diff at all. o1 is a client-routed SPA, so every
+   path serves the same shell. We were making **two origin requests per poll for
+   one page's worth of information**, against the one venue that rate-limits us.
+2. **`?_lw=` is part of Vercel's cache key.** Measured:
+
+   | request | `x-vercel-cache` |
+   |---|---|
+   | `/token/create` | **HIT** (age 4) |
+   | `/token/create?_lw=<ms>` | **MISS** |
+   | `/token/create?_lw=<ms+1>` | **MISS** |
+
+   Every busted poll therefore left the edge and hit the origin — which is the
+   traffic a rate limiter counts. The cache buster exists for **Long**, where
+   Cloudflare fronts Railway and is *not* purged when a build ships. Vercel
+   purges its CDN on deploy, so on o1 a cache HIT cannot hide a new build: the
+   buster bought nothing and cost every request.
+
+**Changed:** `Venue.cache_bust_every` (new field, default `1` = bust every read,
+which is Long's behaviour unchanged). o1 is `pages=("/",)` and
+`cache_bust_every=15` (`O1_CACHE_BUST_EVERY`), so it reads the edge and busts
+once every ~30 minutes as a safety net. Origin hits from o1 go from **2 per
+poll to 1 per 15 polls — a 30× reduction**. The config chunk
+(`/assets/contracts-V2GJF_L9.js`, 194 stock entries) is served
+`max-age=31536000, immutable` and was already a cache HIT, so the chunk scan
+never touched the origin in the first place.
+
+**Honest caveat:** this removes traffic that a rate limiter would count; it is
+not *proved* to clear the 429, because the block may be an edge firewall rule
+scoped to the IP, which a cache HIT would not escape. The next 429 will say
+which — `describe_block()` now prints `x-vercel-cache`, `x-vercel-error`,
+`x-vercel-id`, `x-vercel-mitigated`, `retry-after` and `x-ratelimit-remaining`
+alongside the `cf-*` headers. A 429 with `x-vercel-cache: HIT` means an edge
+rule and the fallbacks in §11 apply; a MISS means we are still reaching the
+origin somewhere. Note also that the probe and the diag hit o1 from the same
+address while the service polls it, so let it sit for ten minutes before judging.
+
+### The diag was reporting a failed RPC scan as the number zero
+
+The same run printed:
+
+```
+  tokenised stocks on chain  : 0
+  listed by NO venue         : 0   ← untouched pool
+```
+
+That is not a fact about the chain. `diag_venues` walked the factory in
+5,000,000-block windows with a bare `except Exception: break`, so the first
+refused `eth_getLogs` ended the scan silently and printed a plausible zero —
+§11's lesson again, in a new place. There are ~206 tokenised stocks on chain and
+Robinhood Chain's ~101 ms blocks make a 5M-block window a very large ask of any
+provider.
+
+**Changed:** one `scan_deployed()` helper for all three diag modes. It narrows the window ten-fold when the RPC refuses a range, and returns the error
+alongside the rows. `venues` now prints `⚠ factory scan failed` and the words
+`unknown — not 0` rather than a number it did not earn.
+
+### Verified this round
+* 128 offline checks pass (`tools/test_long.py`, five new ones covering the
+  cache-bust policy and o1's single page).
+* The identical-HTML and cache-key measurements above, from borz's browser pane.
+* **Not** verified: the 429 clearing on the VPS. That is `python3
+  tools/diag_long.py venues` after a `git pull && systemctl restart memebot`.

@@ -259,6 +259,46 @@ async def test_primary_page_required() -> None:
               "primary page" in str(e) and "config chunk" in str(e), str(e)[:120])
 
 
+async def test_cache_bust_policy() -> None:
+    """o1's 429 was partly self-inflicted. `?_lw=` lands in Vercel's cache key,
+    so every busted poll was `x-vercel-cache: MISS` — an origin hit from a
+    datacentre IP, twice per poll because both o1 pages were fetched and they
+    return byte-identical HTML. Long must keep busting (Cloudflare in front of
+    Railway does not purge on deploy); Vercel does purge, so o1 can read the
+    edge and bust only as an occasional safety net."""
+    print("\n▶ cache-busting policy per venue")
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        async def get_text(self, url, kind="", **kw):
+            self.calls.append((url, dict(kw.get("headers") or {})))
+            return 200, "<html></html>", {}
+
+    rec = Recorder()
+    fw = S.VenueFrontendWatcher(rec, S.VENUES["long"])
+    for _ in range(3):
+        await fw._page_html("/create")
+    check("Long busts the cache on every read",
+          all("_lw=" in u for u, _ in rec.calls)
+          and all(h.get("Cache-Control") == "no-cache" for _, h in rec.calls))
+
+    rec2 = Recorder()
+    fw2 = S.VenueFrontendWatcher(rec2, S.VENUES["o1"])
+    for _ in range(16):
+        await fw2._page_html("/")
+    busted = [u for u, _ in rec2.calls if "_lw=" in u]
+    check("o1 reads from the edge and busts only every 15th poll",
+          len(busted) == 2 and "_lw=" in rec2.calls[0][0] and "_lw=" not in rec2.calls[1][0],
+          f"{len(busted)}/16 busted")
+    check("a cached o1 read carries no no-cache headers", not rec2.calls[1][1])
+    check("o1 polls ONE page — / and /token/create are the same document",
+          S.VENUES["o1"].pages == ("/",))
+    check("every venue still declares at least one page",
+          all(len(v.pages) >= 1 for v in S.VENUES.values()))
+
+
 def test_venue_registry() -> None:
     print("\n▶ venue registry")
     check("three venues registered", set(S.VENUES) == {"long", "pons", "o1"})
@@ -675,6 +715,7 @@ def main() -> int:
     test_venue_parsers()
     test_venue_registry()
     asyncio.run(test_primary_page_required())
+    asyncio.run(test_cache_bust_policy())
     test_pons_feed_normalise()
     asyncio.run(test_end_to_end())
     asyncio.run(test_factory_path())

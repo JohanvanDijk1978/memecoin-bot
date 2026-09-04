@@ -202,8 +202,13 @@ def describe_block(url: str, status: int, body: str, headers: dict) -> str:
         bits.append("app-level refusal: " + (body or "")[:120].replace("\n", " "))
     else:
         bits.append("origin refused it (no Cloudflare challenge markers found)")
+    # x-vercel-* is to a Vercel 429 what cf-mitigated is to a Cloudflare block:
+    # it says whether the edge served us from cache or sent us to the origin,
+    # and which mitigation answered. Without them a 429 is unattributable.
     detail = [f"{k}={h[k]}" for k in
-              ("cf-ray", "cf-mitigated", "cf-cache-status", "server", "content-type")
+              ("cf-ray", "cf-mitigated", "cf-cache-status", "retry-after",
+               "x-vercel-cache", "x-vercel-error", "x-vercel-id", "x-vercel-mitigated",
+               "x-ratelimit-remaining", "server", "content-type")
               if h.get(k)]
     if detail:
         bits.append("[" + " ".join(detail) + "]")
@@ -422,6 +427,7 @@ class Venue:
     min_assets: int = 8
     token_url: str = ""          # format string with {address}
     poll_seconds: float = 0.0    # 0 = use LONG_FRONTEND_POLL_SECONDS
+    cache_bust_every: int = 1    # bust the CDN cache every Nth page read; 0 = never
     enabled: bool = True
 
 
@@ -444,14 +450,25 @@ VENUES: dict[str, Venue] = {
     "o1": Venue(
         id="o1", label="o1 Launchpad",
         base=os.getenv("O1_APP_BASE", "https://launch.o1.exchange"),
-        pages=("/token/create", "/"), chunk_re=_CHUNK_RE_VITE,
+        # ONE page. Verified 2026-09-04 from the browser pane: `/` and
+        # `/token/create` return byte-identical HTML (9732 bytes, the same 61
+        # `/assets/*.js` chunks) — o1 is an SPA, so the route is resolved in the
+        # client and every path serves the same shell. Fetching both was two
+        # origin hits per poll for one page of information, against the one
+        # venue that rate-limits us.
+        pages=("/",), chunk_re=_CHUNK_RE_VITE,
         parser=parse_assets_o1, chain_id=ROBINHOOD_CHAIN_ID, min_assets=40,
         token_url="https://launch.o1.exchange/token/{address}",
-        # o1 answers 429 to a datacentre IP at any brisk rate (Vercel, not
-        # Cloudflare — no transport change helps). It also lists ~194 of the
-        # ~206 on-chain stocks, so its array diff is the least urgent of the
-        # three: the factory event already covers almost everything it would
-        # say. Poll it slowly and let the on-chain detector carry it.
+        # o1 answers 429 to a datacentre IP (Vercel, not Cloudflare — no
+        # transport change helps). Part of that was self-inflicted: `?_lw=` puts
+        # the query string in Vercel's cache key, so every poll was a documented
+        # MISS (`x-vercel-cache: MISS`) and therefore an origin hit, while the
+        # same URL unbusted is a HIT served at the edge. Vercel purges its CDN on
+        # deploy, so a HIT cannot hide a new build — read from the edge and bust
+        # only occasionally as a safety net. It also lists ~194 of the ~206
+        # on-chain stocks, so its array diff is the least urgent of the three:
+        # the factory event already covers almost everything it would say.
+        cache_bust_every=int(os.getenv("O1_CACHE_BUST_EVERY", "15")),
         poll_seconds=float(os.getenv("O1_POLL_SECONDS", "120")),
     ),
 }
@@ -745,19 +762,40 @@ class VenueFrontendWatcher:
         self._seen_chunks: set[str] = set()
         self._config_chunk: Optional[str] = None
         self._last_fingerprint: Optional[str] = None
+        self._page_reads = 0
 
     @property
     def venue_id(self) -> str:
         return self.venue.id
 
+    def _bust_cache(self) -> bool:
+        """Whether this page read should carry `?_lw=` and no-cache headers.
+
+        Long sits behind Cloudflare in front of Railway, and that edge cache is
+        NOT purged when a build ships (`s-maxage`, `x-nextjs-stale-time: 300`),
+        so a cached answer there can be five minutes stale — every read must
+        miss the cache, which is what `cache_bust_every=1` means.
+
+        Vercel (Pons, o1) purges its CDN on deploy, so a cache HIT cannot hide a
+        new build. On o1 that difference is the whole ballgame: a unique query
+        string goes into Vercel's cache key, so every busted poll was a MISS and
+        an origin hit from a datacentre IP — which is what earns the 429. Reading
+        from the edge costs nothing in latency and keeps us off the origin.
+        """
+        n = self.venue.cache_bust_every
+        self._page_reads += 1
+        if n <= 0:
+            return False
+        return (self._page_reads - 1) % n == 0
+
     async def _page_html(self, page: str) -> str:
         url = f"{self.base}{page}"
-        sep = "&" if "?" in url else "?"
-        full = f"{url}{sep}_lw={int(time.time() * 1000)}"
-        status, text, hdrs = await self.http.get_text(
-            full, kind="doc",
-            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
-        )
+        full, headers = url, {}
+        if self._bust_cache():
+            sep = "&" if "?" in url else "?"
+            full = f"{url}{sep}_lw={int(time.time() * 1000)}"
+            headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
+        status, text, hdrs = await self.http.get_text(full, kind="doc", headers=headers)
         if status != 200:
             raise RuntimeError(describe_block(full, status, text, hdrs))
         return text
