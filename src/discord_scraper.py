@@ -149,118 +149,153 @@ def _mirror_dedup(msg_id: int) -> bool:
 
 # ── Bot card rendering (Rick & co) ───────────────────────────────────────
 # A bot's post is an embed, and flattening it to plain text gives an ugly wall
-# with raw <:name:id> custom emoji and markdown links. _render_bot_card turns it
-# into a Telegram photo card: banner on top, bold title, one stat per line,
-# tap-to-copy contract address, and the link rows as inline keyboard buttons.
+# with raw <:name:id> custom emoji and unrendered Discord markdown. This turns
+# it into a Telegram card: banner photo, bold token name + ticker from the
+# embed AUTHOR line (Rick puts the name there, not in .title), Discord markdown
+# translated to Telegram HTML, and contract addresses tap-to-copy.
 _CUSTOM_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
-_MD_LINK_RE      = re.compile(r"\[([^\]\n]{1,24})\]\((https?://[^\s)]+)\)")
+_MD_LINK_RE      = re.compile(r"\[([^\]\n]{1,60})\]\((https?://[^\s)]+)\)")
 _CA_RE           = re.compile(r"\b(0x[a-fA-F0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})\b")
+_MD_CODE_RE      = re.compile(r"`([^`\n]+)`")
+_MD_BOLD_RE      = re.compile(r"\*\*([^*\n]+)\*\*")
+_MD_UNDER_RE     = re.compile(r"__([^_\n]+)__")
+_MD_ITAL_RE      = re.compile(r"(?<![*\w])\*([^*\n]+)\*(?!\*)")
+_MD_STRIKE_RE    = re.compile(r"~~([^~\n]+)~~")
 
 
 def _esc(t: str) -> str:
     return html_mod.escape(t or "", quote=False)
 
 
-def _code_addresses(escaped: str) -> str:
-    """Wrap contract addresses in <code> so Telegram makes them tap-to-copy."""
-    return _CA_RE.sub(lambda m: f"<code>{m.group(1)}</code>", escaped)
+def _code_addresses(t: str) -> str:
+    """Wrap contract addresses in <code> — Telegram copies those on tap.
+
+    Skips anything already inside a <code> span so we never nest tags.
+    """
+    parts = re.split(r"(<code>.*?</code>)", t, flags=re.S)
+    for i, part in enumerate(parts):
+        if not part.startswith("<code>"):
+            parts[i] = _CA_RE.sub(lambda m: f"<code>{m.group(1)}</code>", part)
+    return "".join(parts)
+
+
+def _md_to_html(raw: str) -> str:
+    """Discord markdown → Telegram HTML.
+
+    Without this the card shows literal backticks and `**NEW:**` — Telegram's
+    HTML parse mode does not understand Discord's markdown. Links are stashed
+    behind placeholders first so their URLs never get escaped or matched by the
+    inline-formatting patterns.
+    """
+    raw = _CUSTOM_EMOJI_RE.sub("", raw or "")      # drop <:robinhood:123…>
+    links: list = []
+
+    def stash(m):
+        links.append((m.group(1), m.group(2)))
+        return f"\x00L{len(links) - 1}\x00"
+
+    txt = _MD_LINK_RE.sub(stash, raw)
+    txt = _esc(txt)
+    txt = _MD_CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", txt)
+    txt = _MD_BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", txt)
+    txt = _MD_UNDER_RE.sub(lambda m: f"<u>{m.group(1)}</u>", txt)
+    txt = _MD_ITAL_RE.sub(lambda m: f"<i>{m.group(1)}</i>", txt)
+    txt = _MD_STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", txt)
+    txt = _code_addresses(txt)
+
+    def restore(m):
+        label, url = links[int(m.group(1))]
+        label = _esc(_CUSTOM_EMOJI_RE.sub("", label)).strip() or "link"
+        return f'<a href="{_esc(url).replace("&", "&amp;")}">{label}</a>'
+
+    return re.sub(r"\x00L(\d+)\x00", restore, txt).strip()
+
+
+async def _fetch_bytes(url: str, limit: int = 8_000_000):
+    """Download a banner ourselves.
+
+    Telegram's own fetcher often cannot read Discord CDN URLs (they are signed
+    and expire), which is why the card arrived with no image. Uploading the
+    bytes sidesteps that entirely.
+    """
+    if not url:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    logger.warning(f"banner fetch {resp.status} for {url[:80]}")
+                    return None
+                data = await resp.read()
+        return data if 0 < len(data) <= limit else None
+    except Exception as e:
+        logger.warning(f"banner fetch failed: {e}")
+        return None
 
 
 def _render_bot_card(message):
-    """Return (html_body, image_url, buttons) for an embed-carrying bot post.
-
-    Returns None when there is no embed worth rendering, so the caller can fall
-    back to the plain flattened text.
-    """
+    """Return (html_body, image_url) for an embed-carrying bot post, else None."""
     embeds = getattr(message, "embeds", None) or []
     if not embeds:
         return None
 
-    buttons: list = []
-    seen_btn: set = set()
     lines: list = []
     img = ""
 
-    def harvest(raw: str, drop_if_link_row: bool = True):
-        """Pull markdown links out of one line.
-
-        A line with two or more links is a link row (Rick's "Chart:" / "More:")
-        — those become buttons and the line itself is dropped. A single link
-        stays inline as an anchor so the sentence still reads.
-        """
-        found = _MD_LINK_RE.findall(raw or "")
-        for label, url in found:
-            label = label.strip()
-            key = label.lower()
-            if label and key not in seen_btn and len(buttons) < 8:
-                seen_btn.add(key)
-                buttons.append((label, url))
-        if len(found) >= 2 and drop_if_link_row:
-            return ""
-        return _MD_LINK_RE.sub(
-            lambda m: f'<a href="{_esc(m.group(2)).replace("&", "&amp;")}">{_esc(m.group(1))}</a>',
-            _esc_outside_links(raw),
-        )
-
-    def _esc_outside_links(raw: str) -> str:
-        """Escape everything except the markdown link syntax we still need."""
-        out, last = [], 0
-        for m in _MD_LINK_RE.finditer(raw or ""):
-            out.append(_esc(raw[last:m.start()]))
-            out.append(m.group(0))
-            last = m.end()
-        out.append(_esc(raw[last:]))
-        return "".join(out)
-
-    def clean(raw: str) -> str:
-        raw = _CUSTOM_EMOJI_RE.sub("", raw or "")          # drop <:robinhood:123…>
-        raw = re.sub(r"[ \t]{2,}", " ", raw)
-        return raw.strip()
-
     for emb in embeds:
         try:
-            title = clean(getattr(emb, "title", "") or "")
-            if title:
-                lines.append(f"<b>{_code_addresses(harvest(title, drop_if_link_row=False))}</b>")
+            emb_author = getattr(emb, "author", None)
+            # Rick puts the token name + ticker + move on the embed AUTHOR line.
+            # Missing this is why the card had no name or ticker.
+            a_name = getattr(emb_author, "name", "") or ""
+            a_url = getattr(emb_author, "url", "") or ""
+            if a_name:
+                head = _md_to_html(a_name)
+                lines.append(f'<b><a href="{_esc(str(a_url)).replace("&", "&amp;")}">{head}</a></b>'
+                             if a_url else f"<b>{head}</b>")
 
-            desc = getattr(emb, "description", "") or ""
-            for raw in desc.split("\n"):
-                raw = clean(raw)
-                if not raw:
-                    continue
-                rendered = harvest(raw)
-                if rendered.strip():
-                    lines.append(_code_addresses(rendered))
+            title = _md_to_html(getattr(emb, "title", "") or "")
+            if title:
+                t_url = getattr(emb, "url", "") or ""
+                lines.append(f'<b><a href="{_esc(str(t_url)).replace("&", "&amp;")}">{title}</a></b>'
+                             if t_url else f"<b>{title}</b>")
+
+            for raw in (getattr(emb, "description", "") or "").split("\n"):
+                rendered = _md_to_html(raw)
+                if rendered:
+                    lines.append(rendered)
 
             for field in (getattr(emb, "fields", None) or []):
-                fname = clean(str(getattr(field, "name", "") or ""))
-                fval  = clean(str(getattr(field, "value", "") or ""))
-                rendered = harvest(fval) if fval else ""
-                if fname and rendered.strip():
-                    lines.append(f"<b>{_esc(fname)}</b> {_code_addresses(rendered)}")
-                elif rendered.strip():
-                    lines.append(_code_addresses(rendered))
-                elif fname:
-                    lines.append(f"<b>{_esc(fname)}</b>")
+                fname = _md_to_html(str(getattr(field, "name", "") or ""))
+                fval = _md_to_html(str(getattr(field, "value", "") or ""))
+                if fname and fval:
+                    lines.append(f"<b>{fname}</b> {fval}")
+                elif fname or fval:
+                    lines.append(fname or fval)
 
+            footer = getattr(getattr(emb, "footer", None), "text", "") or ""
+            if footer:
+                rendered = _md_to_html(str(footer))
+                if rendered:
+                    lines.append(f"<i>{rendered}</i>")
+
+            # Banner, best first: big image, then thumbnail, then the author's
+            # icon (Rick's token logo) — something is better than a bare card.
             if not img:
-                cand = (getattr(getattr(emb, "image", None), "url", "") or
-                        getattr(getattr(emb, "thumbnail", None), "url", ""))
-                if cand:
-                    img = str(cand)
-
-            url = getattr(emb, "url", "") or ""
-            if url and "open" not in seen_btn and len(buttons) < 8:
-                seen_btn.add("open")
-                buttons.append(("🔗 Open", str(url)))
+                for cand in (
+                    getattr(getattr(emb, "image", None), "url", ""),
+                    getattr(getattr(emb, "thumbnail", None), "url", ""),
+                    getattr(emb_author, "icon_url", ""),
+                ):
+                    if cand:
+                        img = str(cand)
+                        break
         except Exception as e:
             logger.warning(f"bot card: embed render failed: {e}")
             continue
 
-    # The CA is usually in the message the bot replied to, not in its own card.
-    # Surface it as a tap-to-copy line when the plain content carries one.
-    plain = getattr(message, "content", "") or ""
-    for m in _CA_RE.finditer(plain):
+    # The CA usually sits in the message the bot replied to, not in its card.
+    for m in _CA_RE.finditer(getattr(message, "content", "") or ""):
         line = f"<code>{m.group(1)}</code>"
         if line not in lines:
             lines.append(line)
@@ -269,7 +304,7 @@ def _render_bot_card(message):
     body = "\n".join(l for l in lines if l.strip())
     if not body and not img:
         return None
-    return body[:900], img, buttons
+    return body[:900], img
 
 
 # Messages we saw on a mirrored channel but could not mirror because they
@@ -690,12 +725,12 @@ try:
                     break
             # clean_content resolves <@ID>, <#ID>, <@&roleID> to @name / #channel / @role.
             body = getattr(message, "clean_content", "") or getattr(message, "content", "") or ""
-            html_body, buttons = "", None
+            html_body = ""
 
             card = _render_bot_card(message) if getattr(author, "bot", False) else None
             if card:
-                # Bot post (Rick & co) → banner + formatted card + link buttons.
-                card_html, card_img, buttons = card
+                # Bot post (Rick & co) → banner photo + formatted card.
+                card_html, card_img = card
                 html_body = f"🤖 <b>{_esc(sender)}</b>\n{card_html}"
                 img_url = card_img or img_url
                 body = html_body
@@ -712,7 +747,8 @@ try:
                 f"author={sender!r} bot={getattr(author, 'bot', None)} edit={from_edit} "
                 f"blocked={blocked} content_len={len(getattr(message, 'content', '') or '')} "
                 f"embeds={len(getattr(message, 'embeds', None) or [])} "
-                f"atts={len(getattr(message, 'attachments', None) or [])} body_len={len(body)}"
+                f"atts={len(getattr(message, 'attachments', None) or [])} body_len={len(body)} "
+                f"banner={(img_url or '-')[:70]}"
             )
 
             if blocked:
@@ -725,15 +761,22 @@ try:
                 return
 
             try:
-                asyncio.create_task(mirror_message(
-                    text="" if html_body else body,
-                    group_name="",  # unused when topic_id is passed explicitly
-                    sender_name=sender,
-                    image_url=img_url,
-                    topic_id=mirror_topic,
-                    html_text=html_body,
-                    buttons=buttons,
-                ))
+                async def _send(text_body=body, html=html_body, banner=img_url, who=sender):
+                    # Upload the banner ourselves — Telegram's fetcher usually
+                    # cannot read signed Discord CDN URLs, which is why the card
+                    # arrived with no image. Fall back to the URL if that fails.
+                    data = await _fetch_bytes(banner)
+                    await mirror_message(
+                        text="" if html else text_body,
+                        group_name="",  # unused when topic_id is passed explicitly
+                        sender_name=who,
+                        image_url="" if data else banner,
+                        image_bytes=data,
+                        topic_id=mirror_topic,
+                        html_text=html,
+                    )
+
+                asyncio.create_task(_send())
                 _mirror_feed_append(sender, body, img_url)
             except Exception as e:
                 logger.warning(f"discord mirror failed for msg {message.id}: {e}")
