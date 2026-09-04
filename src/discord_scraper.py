@@ -90,6 +90,43 @@ def _mirror_feed_append(sender: str, text: str, image_url: str):
     except Exception as e:
         logger.warning(f"mirror feed append failed: {e}")
 
+def _flatten_embeds(message):
+    """Return (text, image_url) built from a message's embeds.
+
+    Bot posts (Rick & co) usually carry their whole payload in an embed and
+    leave .content empty — without this the mirror would forward a blank line.
+    """
+    lines = []
+    img = ""
+    for emb in (getattr(message, "embeds", None) or []):
+        try:
+            author = getattr(getattr(emb, "author", None), "name", "") or ""
+            title  = getattr(emb, "title", "") or ""
+            desc   = getattr(emb, "description", "") or ""
+            for part in (author, title, desc):
+                if part:
+                    lines.append(str(part))
+            for field in (getattr(emb, "fields", None) or []):
+                fname = str(getattr(field, "name", "") or "").strip()
+                fval  = str(getattr(field, "value", "") or "").strip()
+                if fname and fval:
+                    lines.append(f"{fname}: {fval}")
+                elif fname or fval:
+                    lines.append(fname or fval)
+            footer = getattr(getattr(emb, "footer", None), "text", "") or ""
+            if footer:
+                lines.append(str(footer))
+            if not img:
+                cand = (getattr(getattr(emb, "image", None), "url", "") or
+                        getattr(getattr(emb, "thumbnail", None), "url", ""))
+                if cand:
+                    img = str(cand)
+        except Exception:
+            continue
+    text = "\n".join(l for l in (x.strip() for x in lines) if l)
+    return text[:1500], img
+
+
 # Dedup — if both Discord accounts happen to see the same channel, both
 # on_message handlers fire. Without this we'd double-post to Telegram.
 _mirror_seen: dict = {}  # message_id -> timestamp
@@ -113,7 +150,7 @@ _recent_pings: dict = {}
 PING_COOLDOWN = 600  # 10 minutes
 
 # Display names to ignore
-BLOCKED_NAMES = {"rickburpbot", "rick"}
+BLOCKED_NAMES = set()        ##{"rickburpbot", "rick"}
 
 from .send_ping import send_ping
 from .filtered_forward import maybe_forward
@@ -505,9 +542,18 @@ try:
             # channel into its mapped Telegram topic. Runs independently of the
             # scraper path so it fires even for image-only messages.
             mirror_topic = _DISCORD_MIRROR_MAP.get(message.channel.id, 0)
+            # Bots are NOT skipped here any more. Rick and friends are bots, so
+            # the old `not message.author.bot` guard dropped them before
+            # BLOCKED_NAMES ever got a say — emptying BLOCKED_NAMES could not
+            # bring them back. The mirror now filters on BLOCKED_NAMES only
+            # (the CA-scan path below still skips bots, so no duplicate pings).
+            _author_names = {
+                (getattr(message.author, "display_name", "") or "").lower(),
+                (getattr(message.author, "name", "") or "").lower(),
+            }
             if (
                 mirror_topic
-                and not message.author.bot
+                and not (_author_names & BLOCKED_NAMES)
                 and not _mirror_dedup(message.id)
             ):
                 try:
@@ -519,14 +565,21 @@ try:
                             break
                     # Use clean_content so <@ID>, <#ID>, <@&roleID> get resolved
                     # to @displayname / #channel / @role instead of raw IDs.
-                    asyncio.create_task(mirror_message(
-                        text=message.clean_content or "",
-                        group_name="",  # unused when topic_id is passed explicitly
-                        sender_name=sender,
-                        image_url=img_url,
-                        topic_id=mirror_topic,
-                    ))
-                    _mirror_feed_append(sender, message.clean_content or "", img_url)
+                    body = message.clean_content or ""
+                    embed_text, embed_img = _flatten_embeds(message)
+                    if embed_text:
+                        body = f"{body}\n{embed_text}".strip() if body else embed_text
+                    if not img_url and embed_img:
+                        img_url = embed_img
+                    if body or img_url:
+                        asyncio.create_task(mirror_message(
+                            text=body,
+                            group_name="",  # unused when topic_id is passed explicitly
+                            sender_name=sender,
+                            image_url=img_url,
+                            topic_id=mirror_topic,
+                        ))
+                        _mirror_feed_append(sender, body, img_url)
                 except Exception as e:
                     logger.warning(f"discord mirror failed for msg {message.id}: {e}")
 
