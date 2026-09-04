@@ -788,6 +788,105 @@ async def test_restart_catchup() -> None:
           store.get_cursor("long:fingerprint") not in (None, seeded_fp))
 
 
+async def test_explorer_backfill() -> None:
+    """The factory's history cannot come from eth_getLogs on this chain — the
+    provider refuses every window worth scanning, which is how the on-chain
+    registry sat empty while seeding reported success. Blockscout paginates by
+    (block, index) instead, so the whole history is a handful of requests."""
+    print("\n▶ factory history from the explorer")
+
+    def item(addr, name, sym, block, ts):
+        return {"topics": [S.TOPIC_DEPLOYED, "0x" + "11" * 32],
+                "data": encode_deployed(addr, name, sym),
+                "block_number": block, "block_timestamp": ts,
+                "transaction_hash": "0x" + "ab" * 32}
+
+    page1 = {"items": [item("0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+                            "Microsoft • Robinhood Token", "MSFT",
+                            4_000_200, "2026-09-04T12:00:00.000000Z")],
+             "next_page_params": {"block_number": 4_000_200, "index": 5,
+                                  "items_count": 50}}
+    page2 = {"items": [item("0x1234567890abcdef1234567890abcdef12345678",
+                            "Apple • Robinhood Token", "AAPL",
+                            4_000_100, "2026-09-04T11:00:00.000000Z")],
+             "next_page_params": None}
+
+    class FakeHttp:
+        def __init__(self):
+            self.urls = []
+
+        async def get_text(self, url, kind="", **kw):
+            self.urls.append(url)
+            return 200, json.dumps(page2 if "block_number=" in url else page1), {}
+
+    async def collect(bucket, row):
+        bucket.append(row)
+
+    http = FakeHttp()
+    rows = await S.fetch_deployed_from_explorer(http)
+    check("every page is walked", len(http.urls) == 2 and "block_number=4000200" in http.urls[1],
+          str(http.urls))
+    check("both events decode", len(rows) == 2, f"got {len(rows)}")
+    check("newest first", rows and rows[0]["symbol"] == "MSFT")
+    check("the block timestamp becomes epoch seconds",
+          isinstance(rows[0].get("chain_ts"), float))
+
+    stopped = await S.fetch_deployed_from_explorer(http, stop_at_block=4_000_100)
+    check("stop_at_block ends the walk at what we already have",
+          [r["symbol"] for r in stopped] == ["MSFT"], str([r["symbol"] for r in stopped]))
+
+    live, seeded = [], []
+    fw = S.RobinhoodFactoryWatcher(FakeHttp(), lambda r: collect(live, r),
+                                   wss_url="", rpc_url="")
+    n = await fw.backfill(emit=lambda r: collect(seeded, r))
+    check("backfill reports what it read", n == 2, f"got {n}")
+    check("SEEDING never reaches the live alert path", live == [],
+          f"{len(live)} would have been alerts")
+    check("history is replayed oldest-first, like a subscription",
+          [r["symbol"] for r in seeded] == ["AAPL", "MSFT"])
+
+    # …and a sweep whose RPC refuses the range still covers the gap.
+    class RefusingRpc:
+        url = "http://rpc.invalid"
+
+        async def block_number(self):
+            return 4_000_500
+
+        async def get_logs(self, *a):
+            raise RuntimeError("HTTP 400: {\"error\":{\"message\":\"query exceeds "
+                               "max block range\"}}")
+
+    fw2 = S.RobinhoodFactoryWatcher(FakeHttp(), lambda r: collect(live, r),
+                                    wss_url="", rpc_url="")
+    fw2.rpc = RefusingRpc()
+    swept = []
+    n2 = await fw2.sweep(span=1000, emit=lambda r: collect(swept, r))
+    check("a refused eth_getLogs finishes through the explorer instead of returning 0",
+          n2 == 2 and len(swept) == 2, f"n={n2} emitted={len(swept)}")
+
+
+def test_vercel_challenge() -> None:
+    """o1 answers 429 WITH `x-vercel-mitigated: challenge`. The status says rate
+    limit and the header says bot challenge; the header is what is true, and the
+    two want opposite responses (back off vs. change client)."""
+    print("\n▶ a 429 that is really a challenge")
+    hdr = {"x-vercel-mitigated": "challenge", "server": "Vercel",
+           "content-type": "text/html; charset=utf-8"}
+    check("a Vercel challenge counts as a bot challenge",
+          S.is_bot_challenge(429, "<!DOCTYPE html>", hdr))
+    check("but is not a CLOUDFLARE challenge",
+          not S.is_cf_challenge(429, "<!DOCTYPE html>", hdr))
+    msg = S.describe_block("https://launch.o1.exchange/", 429, "<html>", hdr)
+    check("and it is described as a challenge, not a rate limit",
+          "NOT a rate limit" in msg and "Cloudflare's WAF" not in msg, msg[:140])
+    plain = {"server": "Vercel", "retry-after": "30"}
+    check("a plain 429 is still a rate limit",
+          not S.is_bot_challenge(429, "x", plain)
+          and "rate limited" in S.describe_block("u", 429, "x", plain))
+    check("a Cloudflare challenge still classifies as one",
+          S.is_bot_challenge(403, "Just a moment", {"cf-mitigated": "challenge"}))
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="longtest_")
     store.set_db_path(os.path.join(tmp, "long.db"))
@@ -806,6 +905,8 @@ def main() -> int:
     asyncio.run(test_factory_path())
     asyncio.run(test_degraded_start())
     asyncio.run(test_restart_catchup())
+    test_vercel_challenge()
+    asyncio.run(test_explorer_backfill())
     print(f"\n{'='*54}\n  {PASS} passed, {FAIL} failed\n{'='*54}")
     return 1 if FAIL else 0
 

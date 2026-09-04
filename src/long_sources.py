@@ -179,6 +179,21 @@ def is_cf_challenge(status: int, body: str, headers: dict) -> bool:
     return any(m.lower() in (body or "").lower() for m in _CF_BODY_MARKERS)
 
 
+def is_bot_challenge(status: int, body: str, headers: dict) -> bool:
+    """True for ANY edge bot-management challenge, whoever is serving it.
+
+    Cloudflare says `cf-mitigated: challenge` with a 403; Vercel says
+    `x-vercel-mitigated: challenge` with a **429**, which is the trap — the
+    status alone reads as a rate limit and sends you off to poll less often,
+    which cannot help, because what is being judged is the client. Anything
+    that escalates transport must ask THIS question, not the Cloudflare one.
+    """
+    h = {k.lower(): v for k, v in (headers or {}).items()}
+    if (h.get("x-vercel-mitigated") or "").lower() == "challenge":
+        return True
+    return is_cf_challenge(status, body, headers)
+
+
 def describe_block(url: str, status: int, body: str, headers: dict) -> str:
     """Turn a non-200 into an actionable sentence instead of a bare status."""
     h = {k.lower(): v for k, v in (headers or {}).items()}
@@ -192,6 +207,14 @@ def describe_block(url: str, status: int, body: str, headers: dict) -> str:
             "client is rejected on any address. Fix: pip install curl_cffi "
             "(LONG_TRANSPORT=auto then impersonates Chrome). Same lesson as "
             "fomo/FOMO_API.md §1."
+        )
+    elif (h.get("x-vercel-mitigated") or "").lower() == "challenge":
+        bits.append(
+            "Vercel's bot challenge, NOT a rate limit — 429 is merely the status "
+            "it answers with. Polling less often does not help: the client is "
+            "what is being scored. curl_cffi is already tried when the process "
+            "has escalated; if it still challenges, the page cannot be read from "
+            "this address at all. See HANDOFF_LONG.md §14."
         )
     elif status == 429:
         ra = h.get("retry-after")
@@ -637,7 +660,7 @@ class Http:
         # A Cloudflare challenge means the CLIENT was judged, not the request —
         # aiohttp will never pass it, on this or any address. Switch for good,
         # do not keep paying a blocked round-trip per poll.
-        if LONG_TRANSPORT == "auto" and is_cf_challenge(status, text, hdrs):
+        if LONG_TRANSPORT == "auto" and is_bot_challenge(status, text, hdrs):
             if not Http._curl_warned:
                 Http._curl_warned = True
                 logger.warning("long: %s", describe_block(url, status, text, hdrs))
@@ -666,7 +689,7 @@ class Http:
         status, text, hdrs = 0, "", {}
         for i in range(attempts):
             status, text, hdrs = await self._curl_get(url, headers)
-            if not is_cf_challenge(status, text, hdrs):
+            if not is_bot_challenge(status, text, hdrs):
                 if i:
                     logger.info("long: cleared the Cloudflare interstitial on attempt %d",
                                 i + 1)
@@ -917,6 +940,70 @@ class VenueFrontendWatcher:
 # Source 2 — Robinhood's stock-token factory: the earliest signal that exists
 # ═══════════════════════════════════════════════════════════════════════════
 
+EXPLORER_LOG_PAGES = int(os.getenv("LONG_EXPLORER_LOG_PAGES", "12"))
+
+
+def _explorer_ts(value: Any) -> Optional[float]:
+    """Blockscout timestamps are ISO-8601 with a Z; the rest of the code works
+    in epoch seconds."""
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+async def fetch_deployed_from_explorer(
+        http: "Http", explorer: str = ROBINHOOD_EXPLORER_API,
+        max_pages: int = EXPLORER_LOG_PAGES,
+        stop_at_block: Optional[int] = None) -> list[dict]:
+    """Every `Deployed` log the factory has emitted, newest first.
+
+    **Why not eth_getLogs.** Robinhood Chain mines ~10 blocks a second, so its
+    head is past 21.7M blocks — and Alchemy refuses this call over any span
+    worth scanning (measured 2026-09-04: 5M, 500k, 50k and 5k windows all come
+    back HTTP 400). A full-history scan by RPC would be tens of thousands of
+    requests. Blockscout paginates by `(block_number, index)` instead of taking
+    a range, so the entire history is **five requests** — 203 events, oldest at
+    block 7791.
+
+    `stop_at_block` turns the same walk into a gap sweep: pagination is
+    newest-first, so it returns as soon as it reaches something already seen.
+    """
+    base = explorer.rstrip("/")
+    path = f"{base}/addresses/{RH_STOCK_FACTORY}/logs"
+    url, out, pages = path, [], 0
+    while url and pages < max_pages:
+        status, text, hdrs = await http.get_text(url)
+        if status != 200:
+            raise RuntimeError(describe_block(url, status, text, hdrs))
+        try:
+            data = json.loads(text)
+        except Exception as e:
+            raise RuntimeError(f"{url} -> unparseable explorer response: {e}") from e
+        for item in data.get("items") or []:
+            row = decode_deployed_log({
+                "topics": item.get("topics") or [],
+                "data": item.get("data") or "",
+                "blockNumber": item.get("block_number"),
+                "transactionHash": item.get("transaction_hash"),
+            })
+            if not row:
+                continue
+            if stop_at_block is not None and (row["block_number"] or 0) <= stop_at_block:
+                return out
+            row["chain_ts"] = _explorer_ts(item.get("block_timestamp"))
+            out.append(row)
+        pages += 1
+        nxt = data.get("next_page_params")
+        if not nxt:
+            break
+        from urllib.parse import urlencode
+        url = f"{path}?{urlencode(nxt)}"
+    return out
+
 class RobinhoodFactoryWatcher:
     """Push detection of a brand-new tokenised stock on Robinhood Chain.
 
@@ -944,7 +1031,7 @@ class RobinhoodFactoryWatcher:
         self.set_cursor = set_cursor or (lambda b: None)
         self.connected = False
 
-    async def _emit(self, log: dict, via: str) -> None:
+    async def _emit(self, log: dict, via: str, emit=None) -> None:
         row = decode_deployed_log(log)
         if not row:
             return
@@ -952,7 +1039,24 @@ class RobinhoodFactoryWatcher:
         # The block timestamp is what makes the latency numbers meaningful: it
         # turns "we alerted at X" into "we alerted X ms after the chain knew".
         row["chain_ts"] = await self._block_ts(log.get("blockNumber"))
-        await self.on_event(row)
+        await (emit or self.on_event)(row)
+
+    async def backfill(self, emit=None, stop_at_block: Optional[int] = None,
+                       max_pages: int = EXPLORER_LOG_PAGES) -> int:
+        """Read the factory's history from the explorer and hand each event to
+        `emit` (default: the live callback) oldest-first, so ordering matches a
+        real subscription. `emit` exists so SEEDING can record 200 historical
+        deployments without firing 200 alerts — the reason this is not simply
+        wired to `on_event`."""
+        rows = await fetch_deployed_from_explorer(
+            self.http, max_pages=max_pages, stop_at_block=stop_at_block)
+        handler = emit or self.on_event
+        for row in sorted(rows, key=lambda r: (r.get("block_number") or 0)):
+            row["source"] = "robinhood_factory:explorer"
+            await handler(row)
+        if rows:
+            self.set_cursor(max((r.get("block_number") or 0) for r in rows))
+        return len(rows)
 
     async def _block_ts(self, block: Any) -> Optional[float]:
         if block is None or not self.rpc.url:
@@ -964,33 +1068,55 @@ class RobinhoodFactoryWatcher:
         except Exception:
             return None
 
-    async def sweep(self, span: int = 200_000) -> int:
-        """Fill any gap between the last processed block and the head."""
+    async def sweep(self, span: int = 200_000, emit=None) -> int:
+        """Fill any gap between the last processed block and the head.
+
+        This is the ONLY thing covering a websocket reconnect gap, so it may not
+        quietly give up. Alchemy refuses this chain's `eth_getLogs` over any
+        useful window (see `fetch_deployed_from_explorer`), which is exactly how
+        the on-chain registry stayed empty for a day while the seeding step
+        reported success — so a refusal now shrinks the window, and if even the
+        smallest window is refused the sweep finishes through the explorer
+        rather than returning 0."""
         if not self.rpc.url:
-            return 0
+            return await self._sweep_via_explorer(None, emit, "no RPC configured")
         head = await self.rpc.block_number()
         start = self.get_cursor()
         if start is None:
             start = max(0, head - span)
         found = 0
-        # Robinhood Chain mines ~10 blocks/second, so a gap of even a few
-        # minutes is thousands of blocks. Walk it in bounded windows so one
-        # oversized eth_getLogs cannot fail the whole sweep.
-        window = int(os.getenv("LONG_SWEEP_WINDOW", "50000"))
+        window = int(os.getenv("LONG_SWEEP_WINDOW", "500"))
         cur = start
         while cur <= head:
             end = min(cur + window, head)
             try:
                 logs = await self.rpc.get_logs(RH_STOCK_FACTORY, [TOPIC_DEPLOYED], cur, end)
             except Exception as e:
-                logger.warning("long: factory sweep %s-%s failed: %s", cur, end, e)
-                break
+                if window > 100:
+                    window = max(100, window // 5)
+                    logger.info("long: factory sweep window narrowed to %d (%s)",
+                                window, str(e)[:120])
+                    continue
+                logger.warning("long: factory sweep %s-%s refused by the RPC (%s) — "
+                               "finishing through the explorer", cur, end, str(e)[:160])
+                return found + await self._sweep_via_explorer(
+                    self.get_cursor() or start, emit, "eth_getLogs refused")
             for lg in logs:
-                await self._emit(lg, "sweep")
+                await self._emit(lg, "sweep", emit=emit)
                 found += 1
             self.set_cursor(end)
             cur = end + 1
         return found
+
+    async def _sweep_via_explorer(self, since_block: Optional[int], emit,
+                                  why: str) -> int:
+        try:
+            n = await self.backfill(emit=emit, stop_at_block=since_block, max_pages=3)
+            logger.info("long: explorer sweep found %d factory events (%s)", n, why)
+            return n
+        except Exception as e:
+            logger.warning("long: explorer sweep failed too (%s): %s", why, str(e)[:160])
+            return 0
 
     async def run(self) -> None:
         """Subscribe forever, reconnecting with backoff."""

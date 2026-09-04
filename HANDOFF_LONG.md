@@ -703,3 +703,106 @@ or o1 fires tier 2 within one poll (5 s on Long and Pons, 120 s on o1), and the
 `🥇 first coin` alert then arrives later, if and when someone launches against
 it. `python3 tools/diag_long.py venues` lists what each venue currently offers,
 which is the "am I actually watching the right thing" check.
+
+---
+
+## 14. The 19:01 run: what the new headers said, and the empty registry (2026-09-04)
+
+Three things came out of one `diag_long.py venues` run.
+
+### Pons went 42 → 55 assets
+
+New on Pons: BULL, F, INDA, SHOP and nine others — and tier 3 had already fired
+for F and BULL that morning, so those listings are hours old, not days. This is
+exactly the case §13 is about. **Check whether the bot said so:**
+
+```
+grep -E "now supports|assets are new relative" /root/memecoin-bot-new/data/bot.log
+```
+
+* `🚀 Pons now supports …` lines — tier 2 worked.
+* `13 assets are new relative to the recorded set (cap 8) — absorbing silently`
+  — the catch-up cap swallowed the batch. Raise it for one run with
+  `LONG_CATCHUP_MAX_ALERTS=25` and restart if you want them announced.
+* Neither — the process was running `0c46b23` or older, which had no catch-up at
+  all; `b61cdc5` fixes it going forward.
+
+### o1 is not rate limited. It is challenged.
+
+The header added in `0c46b23` answered its own question on the first try:
+
+```
+x-vercel-mitigated=challenge   server=Vercel   HTTP 429
+```
+
+`x-vercel-mitigated: challenge` is Vercel's `cf-mitigated: challenge`. **The 429
+is the status Vercel's bot challenge answers with, not a rate limit** — so
+"poll less often", which is what the code advised and what §11 concluded, cannot
+work: the client is what is being scored. Two consequences:
+
+1. `is_bot_challenge()` now covers both vendors and is what the transport
+   escalation asks; `describe_block()` names it correctly. `is_cf_challenge()`
+   keeps its narrow Cloudflare meaning.
+2. **curl_cffi has already been tried on it and did not pass.** `_impersonating`
+   is process-wide, and Long escalates before o1 is polled, so o1's request in
+   this run was *already* an impersonated Chrome request. It still got the
+   challenge. The retry loop now applies to it (it did not before, because the
+   check was Cloudflare-only), which is worth one run to see whether the
+   clearance cookie ever lands — but a JS challenge cannot be solved by any HTTP
+   client, so expect it not to.
+
+The realistic options are unchanged and now well-founded: accept it (the factory
+event covers ~194 of o1's ~206 assets), fetch o1 from borz, or drop it from
+`LONG_VENUES`. One thing left to test: `probe_long_403.py` now also probes a
+**static** `/assets/*.js` on o1. If the chunk answers 200 while the page is
+challenged, the watcher can read o1's array straight from the remembered chunk
+URL and only needs the page when that 404s.
+
+### The on-chain registry was empty, and seeding said it was fine
+
+```
+eth_getLogs refused 5000000 blocks — retrying in 500000-block windows
+eth_getLogs refused 500000 blocks  — retrying in 50000-block windows
+eth_getLogs refused 50000 blocks   — retrying in 5000-block windows
+tokenised stocks on chain : ⚠ factory scan failed, stopped at block 0: HTTP 400
+```
+
+Robinhood Chain's head is past **21.7M blocks** (~10 blocks/second since launch),
+and Alchemy refuses `eth_getLogs` over every window down to 5k. That is not a
+diag-only problem:
+
+* `seed()` called `factory.sweep(span=60_000_000)`, which failed on its first
+  window, logged a warning, returned **0** — and then `mark_seeded("factory")`
+  ran anyway. So `store.has_rh_stock()` has been answering **False for all 203
+  tokenised stocks**, every tier-2 alert has been carrying "⚠️ not in our
+  on-chain registry", and `unlisted_rh_stocks()` (the untouched-pool query) has
+  been empty since day one.
+* `RobinhoodFactoryWatcher.sweep()` — the only cover for a websocket reconnect
+  gap — used a 50,000-block window, so it would have failed at every call too.
+
+**The fix is a different source, not a smaller window.** Blockscout paginates
+logs by `(block_number, index)` instead of taking a range:
+`/api/v2/addresses/{factory}/logs`, 50 per page, newest first. Measured from the
+browser pane: **5 requests return all 203 `Deployed` events**, oldest at block
+7791, and Blockscout even decodes them (we still decode the raw `data` ourselves
+so nothing depends on its ABI database).
+
+* `fetch_deployed_from_explorer()` — the whole history, or, with `stop_at_block`,
+  everything newer than a cursor, which is what a gap sweep actually wants.
+* `RobinhoodFactoryWatcher.backfill(emit=…)` — replays it oldest-first. The
+  `emit` override is not decoration: seeding must record 203 deployments
+  **silently**, and the live callback is what fires Discord.
+* `sweep()` now narrows its window (500 → 100) and, when the RPC still refuses,
+  finishes through the explorer instead of returning 0.
+* `seed()` uses the explorer, falls back to the RPC, and **only marks the factory
+  seeded if it actually recorded something** — otherwise it logs
+  `long[factory]: DEGRADED` and retries next start. Marking a failed seed as done
+  is what hid this for a day.
+
+After deploying, `data/long.db` will fill on the next start. The proof it worked:
+`tools/diag_long.py venues` prints a non-zero `tokenised stocks on chain` and a
+real `listed by NO venue` count — that last number is the untouched pool, i.e.
+the stocks nobody has launched against yet, which is the whole point of the
+table.
+
+150 offline checks pass.

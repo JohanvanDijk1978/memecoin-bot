@@ -53,7 +53,13 @@ TARGETS = [
     ("pons api       ", "https://www.ponsfamily.com/api/pons-launches?explore=1&sort=newest"
                         "&age=all&page=1&pageSize=1&graduatedPage=1&graduatedPageSize=1"
                         "&includeGraduated=0&version=all&v=22", ""),
-    ("o1 page        ", "https://launch.o1.exchange/token/create", "doc"),
+    ("o1 page        ", "https://launch.o1.exchange/", "doc"),
+    # Does the challenge cover STATIC assets too, or only the document? If a
+    # content-hashed chunk answers 200 while the page is challenged, the watcher
+    # can read o1's asset array straight from the remembered chunk URL and only
+    # needs the page when that 404s. The hash rots on every o1 deploy — a 404
+    # here still answers the question (404 = the edge served us, not a block).
+    ("o1 static asset", "https://launch.o1.exchange/assets/contracts-V2GJF_L9.js", "script"),
     ("o1 convex      ", "https://exciting-fox-990.convex.cloud/api/query", ""),
 ]
 

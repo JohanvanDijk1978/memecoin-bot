@@ -119,6 +119,19 @@ async def scan_deployed(rpc, head: int, limit: int = 0) -> tuple[dict, str]:
     ~101 ms blocks make 5M blocks a very large ask — so a rejected window is
     retried smaller instead of ending the scan.
     """
+    # The explorer answers this in five requests and covers the whole history;
+    # the RPC cannot (Alchemy refuses every useful eth_getLogs window on this
+    # chain). The RPC walk stays as a fallback and as the thing that PROVES the
+    # refusal, with the provider's own message printed in full.
+    try:
+        rows_x = await S.fetch_deployed_from_explorer(rpc.http)
+        if rows_x:
+            return {r["address"]: r for r in rows_x}, ""
+        print("  explorer returned no Deployed logs — falling back to eth_getLogs")
+    except Exception as e:
+        print(f"  explorer log scan failed: {str(e)[:200]}")
+        print("  falling back to eth_getLogs")
+
     rows: dict[str, dict] = {}
     window = int(os.getenv("LONG_DIAG_WINDOW", "5000000"))
     cur, err = 0, ""
@@ -132,7 +145,7 @@ async def scan_deployed(rpc, head: int, limit: int = 0) -> tuple[dict, str]:
                 print(f"  eth_getLogs refused {end - cur} blocks ({str(e)[:70]}) "
                       f"— retrying in {window}-block windows")
                 continue
-            err = f"stopped at block {cur}: {str(e)[:110]}"
+            err = f"stopped at block {cur}: {str(e)[:400]}"
             break
         for lg in logs:
             row = S.decode_deployed_log(lg)

@@ -531,11 +531,37 @@ class LongWatcher:
                                  "listing detector is dark until the fetch works. The "
                                  "factory detector still covers new stock tokens.", vid)
 
-        if not store.is_seeded("factory") and self.factory and ROBINHOOD_RPC:
-            n = await self.factory.sweep(span=60_000_000)
+        if not store.is_seeded("factory") and self.factory:
+            # The explorer, not eth_getLogs: Alchemy refuses this chain's
+            # `eth_getLogs` over any window worth scanning, which is how this
+            # step used to report success while recording NOTHING — 203 stock
+            # tokens exist and `store.has_rh_stock()` answered False for every
+            # one of them. `emit` routes the history to the recorder with
+            # seeding=True; wiring it to the live callback would fire 203 alerts.
+            n = 0
+            try:
+                n = await self.factory.backfill(
+                    emit=lambda row: self.on_stock_deployed(row, seeding=True))
+                logger.info("long: seeded %d Robinhood stock tokens from the explorer", n)
+            except Exception as e:
+                logger.error("long: explorer backfill failed: %s", str(e)[:200])
+                if ROBINHOOD_RPC:
+                    try:
+                        n = await self.factory.sweep(
+                            span=60_000_000,
+                            emit=lambda row: self.on_stock_deployed(row, seeding=True))
+                        logger.info("long: seeded %d stock tokens via the RPC instead", n)
+                    except Exception as e2:
+                        logger.error("long: RPC backfill failed too: %s", str(e2)[:200])
             result["stocks"] = n
-            store.mark_seeded("factory")
-            logger.info("long: seeded %d Robinhood stock tokens from the factory", n)
+            if n:
+                store.mark_seeded("factory")
+            else:
+                result["degraded"].append("factory")
+                logger.error("long[factory]: DEGRADED — the on-chain stock registry is "
+                             "EMPTY. Live Deployed events still alert, but every "
+                             "'already tokenised on chain' answer will be wrong until "
+                             "this seeds. It retries on the next start.")
 
         if not store.is_seeded("indexer") and self.indexer:
             try:
