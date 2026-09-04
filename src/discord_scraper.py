@@ -196,7 +196,9 @@ def _md_to_html(raw: str) -> str:
 
     txt = _MD_LINK_RE.sub(stash, raw)
     txt = _esc(txt)
-    txt = _MD_CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", txt)
+    # `value` → plain text. Wrapping every stat in <code> made the card noisy
+    # and burned the caption budget; only addresses stay tap-to-copy (below).
+    txt = _MD_CODE_RE.sub(lambda m: m.group(1), txt)
     txt = _MD_BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", txt)
     txt = _MD_UNDER_RE.sub(lambda m: f"<u>{m.group(1)}</u>", txt)
     txt = _MD_ITAL_RE.sub(lambda m: f"<i>{m.group(1)}</i>", txt)
@@ -233,14 +235,71 @@ async def _fetch_bytes(url: str, limit: int = 8_000_000):
         return None
 
 
+def _visible(html: str) -> str:
+    """The text Telegram actually counts — tags do not count toward its limits."""
+    return html_mod.unescape(re.sub(r"<[^>]+>", "", html or ""))
+
+
+def _fit_lines(lines: list, limit: int) -> str:
+    """Join lines, dropping whole lines from the end once the visible text hits
+    `limit`. Slicing raw HTML instead would cut a tag in half and make Telegram
+    reject the whole message — that is what truncated the card mid-way."""
+    out, used = [], 0
+    for line in lines:
+        n = len(_visible(line)) + 1
+        if used + n > limit:
+            break
+        out.append(line)
+        used += n
+    return "\n".join(out)
+
+
+async def _token_banner(address: str) -> str:
+    """Dexscreener's header image for a token, falling back to its logo.
+
+    Rick's embeds carry no image at all, so the card had nothing to show. The
+    token's own header is what the other alpha bots use as their banner.
+    """
+    if not address:
+        return ""
+    try:
+        from .utils import dex_wait
+        await dex_wait()
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    return ""
+                data = await resp.json()
+        pairs = data.get("pairs") or []
+        if not pairs:
+            return ""
+        best = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0))
+        info = best.get("info") or {}
+        return info.get("header") or info.get("imageUrl") or ""
+    except Exception as e:
+        logger.warning(f"token banner lookup failed: {e}")
+        return ""
+
+
 def _render_bot_card(message):
-    """Return (html_body, image_url) for an embed-carrying bot post, else None."""
+    """Return (lines, image_url, contract_address) for an embed-carrying bot
+    post, else None. Truncation is the caller's job — see _fit_lines."""
     embeds = getattr(message, "embeds", None) or []
     if not embeds:
         return None
 
     lines: list = []
     img = ""
+    content = getattr(message, "clean_content", "") or getattr(message, "content", "") or ""
+
+    # Rick puts the token name + ticker + move in the message CONTENT, above the
+    # embed — dropping it is why the card showed neither name nor ticker.
+    head_line = content.strip().split("\n")[0].strip() if content.strip() else ""
+    if head_line and not _CA_RE.fullmatch(head_line):
+        rendered = _md_to_html(head_line)
+        if rendered:
+            lines.append(f"<b>{rendered}</b>")
 
     for emb in embeds:
         try:
@@ -249,7 +308,7 @@ def _render_bot_card(message):
             # Missing this is why the card had no name or ticker.
             a_name = getattr(emb_author, "name", "") or ""
             a_url = getattr(emb_author, "url", "") or ""
-            if a_name:
+            if a_name and _visible(_md_to_html(a_name)).strip() != _visible(head_line).strip():
                 head = _md_to_html(a_name)
                 lines.append(f'<b><a href="{_esc(str(a_url)).replace("&", "&amp;")}">{head}</a></b>'
                              if a_url else f"<b>{head}</b>")
@@ -294,17 +353,21 @@ def _render_bot_card(message):
             logger.warning(f"bot card: embed render failed: {e}")
             continue
 
-    # The CA usually sits in the message the bot replied to, not in its card.
-    for m in _CA_RE.finditer(getattr(message, "content", "") or ""):
-        line = f"<code>{m.group(1)}</code>"
-        if line not in lines:
-            lines.append(line)
-        break
+    # The CA usually sits in the message the bot REPLIED TO, not in its own
+    # card — that reference is the only place to find it for most Rick posts.
+    ref = getattr(message, "reference", None)
+    ref_text = getattr(getattr(ref, "resolved", None), "content", "") or ""
+    ca = ""
+    for source in (" ".join(_visible(l) for l in lines), content, ref_text):
+        m = _CA_RE.search(source or "")
+        if m:
+            ca = m.group(1)
+            break
 
-    body = "\n".join(l for l in lines if l.strip())
-    if not body and not img:
+    lines = [l for l in lines if l.strip()]
+    if not lines and not img:
         return None
-    return body[:900], img
+    return lines, img, ca
 
 
 # Messages we saw on a mirrored channel but could not mirror because they
@@ -728,10 +791,19 @@ try:
             html_body = ""
 
             card = _render_bot_card(message) if getattr(author, "bot", False) else None
+            card_ca = ""
             if card:
                 # Bot post (Rick & co) → banner photo + formatted card.
-                card_html, card_img = card
-                html_body = f"🤖 <b>{_esc(sender)}</b>\n{card_html}"
+                card_lines, card_img, card_ca = card
+                header = f"🤖 <b>{_esc(sender)}</b>"
+                ca_line = f"<code>{card_ca}</code>" if card_ca else ""
+                # Budget is VISIBLE characters (Telegram ignores the tags): 1024
+                # for a photo caption. The CA line is added after the fit so it
+                # can never be the line that gets dropped.
+                budget = 960 - len(_visible(header)) - len(_visible(ca_line))
+                html_body = "\n".join(
+                    x for x in (header, _fit_lines(card_lines, budget), ca_line) if x
+                )
                 img_url = card_img or img_url
                 body = html_body
             else:
@@ -761,7 +833,12 @@ try:
                 return
 
             try:
-                async def _send(text_body=body, html=html_body, banner=img_url, who=sender):
+                async def _send(text_body=body, html=html_body, banner=img_url,
+                                who=sender, ca=card_ca):
+                    # No embed image (Rick never sets one) → use the token's own
+                    # Dexscreener header as the banner.
+                    if not banner and ca:
+                        banner = await _token_banner(ca)
                     # Upload the banner ourselves — Telegram's fetcher usually
                     # cannot read signed Discord CDN URLs, which is why the card
                     # arrived with no image. Fall back to the URL if that fails.

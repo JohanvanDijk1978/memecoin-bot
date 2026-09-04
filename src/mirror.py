@@ -58,6 +58,22 @@ def get_topic_id(group_name: str, chat_id: int = None) -> int:
     return GROUP_TOPIC_MAP.get(group_name.lower().strip(), TOPIC_MAIN)
 
 
+def _cap(text: str, limit: int, parse: str) -> str:
+    """Trim to Telegram's limit without cutting a tag in half.
+
+    Telegram counts the VISIBLE characters, not the markup, so an HTML body
+    normally needs no trimming at all. Slicing the raw HTML would leave a half
+    tag and get the whole message rejected — if a body really is over the
+    limit, degrade it to escaped plain text instead.
+    """
+    if parse == "HTML":
+        plain = html_mod.unescape(re.sub(r"<[^>]+>", "", text))
+        if len(plain) <= limit:
+            return text
+        return html_mod.escape(plain[:limit], quote=False)
+    return text[:limit]
+
+
 async def mirror_message(
     text: str,
     group_name: str,
@@ -141,7 +157,7 @@ async def mirror_message(
                 # found" — omit it so unmapped groups land in General instead
                 # of being dropped.
                 form.add_field("message_thread_id", str(topic_id))
-            form.add_field("caption", _body(parse)[:1024])
+            form.add_field("caption", _cap(_body(parse), 1024, parse))
             if parse:
                 form.add_field("parse_mode", parse)
             if reply_markup:
@@ -158,7 +174,7 @@ async def mirror_message(
             payload = {
                 "chat_id": MIRROR_GROUP,
                 "photo": image_url,
-                "caption": _body(parse)[:1024],
+                "caption": _cap(_body(parse), 1024, parse),
             }
             if topic_id > 1:
                 payload["message_thread_id"] = topic_id
@@ -172,7 +188,7 @@ async def mirror_message(
         def build(parse):
             payload = {
                 "chat_id": MIRROR_GROUP,
-                "text": _body(parse)[:4096],
+                "text": _cap(_body(parse), 4096, parse),
                 "disable_web_page_preview": True,
             }
             if topic_id > 1:
