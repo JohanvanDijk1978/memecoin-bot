@@ -24,6 +24,7 @@ Run:  python3 tools/test_long.py
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -358,6 +359,107 @@ async def test_factory_path() -> None:
           len(store.sightings("stock:PANW")) >= 2)
 
 
+def test_block_classifier() -> None:
+    print("\n▶ 403 classifier")
+    cf = S.describe_block(
+        "https://app.long.xyz/", 403,
+        "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title>",
+        {"cf-ray": "a35a…-AMS", "server": "cloudflare", "content-type": "text/html"})
+    check("names Cloudflare's WAF", "Cloudflare's WAF" in cf)
+    check("prescribes curl_cffi", "curl_cffi" in cf)
+    check("keeps the cf-ray for the record", "cf-ray=" in cf)
+
+    origin = S.describe_block(
+        "https://api.long.xyz/v1/assets", 403,
+        '{"message":"Forbidden resource","statusCode":403}',
+        {"content-type": "application/json", "server": "cloudflare"})
+    check("an app-level refusal is NOT called a WAF block",
+          "Cloudflare's WAF" not in origin and "origin refused" in origin)
+
+
+async def test_degraded_start() -> None:
+    """The failure that actually happened on the VPS: app.long.xyz 403s. The
+    watcher must keep the other three detectors alive rather than going dark."""
+    print("\n▶ degraded start (frontend blocked)")
+    from src import long_watcher as W
+
+    # A fresh database: the earlier tests already seeded a frontend, and this
+    # scenario is specifically "first ever start, and the source is blocked".
+    store.set_db_path(os.path.join(tempfile.mkdtemp(prefix="longblocked_"), "long.db"))
+
+    notifier = W.CollectingNotifier()
+    watcher = W.LongWatcher(notifier=notifier)
+
+    class BlockedFrontend(S.LongFrontendWatcher):
+        def __init__(self):
+            super().__init__(http=None)
+
+        async def _page_html(self, page):
+            raise RuntimeError(S.describe_block(
+                "https://app.long.xyz/create", 403, "Just a moment...",
+                {"cf-ray": "x", "content-type": "text/html"}))
+
+    watcher.frontend = BlockedFrontend()
+    store.mark_seeded("factory")
+    store.mark_seeded("indexer")
+    store.mark_seeded("feeds")
+
+    res = await watcher.seed()
+    check("seed reports the frontend as degraded", bool(res.get("frontend_degraded")))
+    check("seeding still sent nothing", len(notifier.sent) == 0)
+    known = store.known_numeraires(4663)
+    check("baseline filled the numeraire set", len(known) >= 55, f"got {len(known)}")
+    check("baseline carries real tickers",
+          any(r["symbol"] == "NVDA" for r in known.values()))
+    check("frontend is NOT marked seeded, so the loop will retry",
+          not store.is_seeded("frontend"))
+
+    # The on-chain detector must still work, and must know the stock is on Long.
+    log = {
+        "topics": [S.TOPIC_DEPLOYED, "0x" + "22" * 32],
+        "data": encode_deployed("0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+                                "NVIDIA • Robinhood Token", "NVDA"),
+        "blockNumber": "0x3000", "transactionHash": "0x" + "cc" * 32,
+    }
+    row = S.decode_deployed_log(log)
+    row["source"] = "robinhood_factory:ws"
+    row["chain_ts"] = None
+    await watcher.on_stock_deployed(row)
+    check("the factory detector still alerts while the frontend is blocked",
+          len(notifier.sent) == 1)
+    check("and it knows the stock is already on Long, thanks to the baseline",
+          "already** in Long" in notifier.sent[0]["description"])
+
+    # Recovery against a stale baseline: everything the baseline had, plus nine
+    # assets listed while we were blind. Nine is more than the cap, so it must be
+    # absorbed with a log line rather than fired as nine "Long now supports X".
+    with open(os.path.join("tools", "long_baseline.json"), encoding="utf-8") as fh:
+        base = json.load(fh)
+    live = [{"symbol": r[0], "name": r[0], "kind": r[1], "address": r[2],
+             "decimals": r[3], "feed": (r[4] or None)} for r in base["assets"]]
+    live += [{"symbol": f"NEW{i}", "name": f"New {i}", "kind": "stock",
+              "address": "0x" + f"{i:040x}", "decimals": 18, "feed": None}
+             for i in range(1, 10)]      # from 1: 0x000…0 is ETH's own address
+    before = len(notifier.sent)
+    absorbed = await watcher.on_numeraires(
+        {"fingerprint": "recovered", "chunk_url": "x", "numeraires": live},
+        max_new_alerts=5)
+    check("a 9-asset gap is absorbed, not fired",
+          len(absorbed) == 9 and len(notifier.sent) == before,
+          f"absorbed={len(absorbed)} sent={len(notifier.sent) - before}")
+
+    # ...but a realistic recovery — one asset listed while we were blind — IS
+    # the alert we actually want.
+    live2 = live[:-9] + [{"symbol": "PYPL", "name": "PayPal", "kind": "stock",
+                          "address": "0x" + "7a" * 20, "decimals": 18, "feed": None}]
+    added2 = await watcher.on_numeraires(
+        {"fingerprint": "recovered2", "chunk_url": "x", "numeraires": live2},
+        max_new_alerts=5)
+    check("one asset missed while blind still alerts on recovery",
+          len(added2) == 1 and len(notifier.sent) == before + 1,
+          f"added={len(added2)} sent={len(notifier.sent) - before}")
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="longtest_")
     store.set_db_path(os.path.join(tmp, "long.db"))
@@ -366,8 +468,10 @@ def main() -> int:
     test_fingerprint()
     test_log_decoder()
     test_store()
+    test_block_classifier()
     asyncio.run(test_end_to_end())
     asyncio.run(test_factory_path())
+    asyncio.run(test_degraded_start())
     print(f"\n{'='*54}\n  {PASS} passed, {FAIL} failed\n{'='*54}")
     return 1 if FAIL else 0
 

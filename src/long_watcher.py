@@ -277,7 +277,8 @@ class LongWatcher:
         })
 
     # ── source 1: Long's frontend ─────────────────────────────────────────
-    async def on_numeraires(self, snapshot: dict, *, seeding: bool = False) -> list[dict]:
+    async def on_numeraires(self, snapshot: dict, *, seeding: bool = False,
+                            max_new_alerts: Optional[int] = None) -> list[dict]:
         rows = snapshot["numeraires"]
         seen_now = {r["address"] for r in rows}
         before = store.known_numeraires(ROBINHOOD_CHAIN_ID)
@@ -304,6 +305,16 @@ class LongWatcher:
                 store.mark_numeraire_removed(ROBINHOOD_CHAIN_ID, addr)
                 logger.warning("long: numeraire removed from Long: %s (%s)",
                                before[addr]["symbol"], addr)
+
+        if max_new_alerts is not None and len(added) > max_new_alerts:
+            # Recovering from a blind spell against a baseline that may be months
+            # stale. A burst of "Long now supports X" for assets it has supported
+            # all along is worse than silence — absorb and say so.
+            logger.warning("long: %d assets are new relative to the recorded set "
+                           "(cap %d) — absorbing silently rather than bursting: %s",
+                           len(added), max_new_alerts,
+                           ", ".join(a["symbol"] for a in added[:20]))
+            return added
 
         for r in added:
             onchain = store.has_rh_stock(r["address"])
@@ -413,19 +424,72 @@ class LongWatcher:
         })
 
     # ── seeding ───────────────────────────────────────────────────────────
+    def _baseline_path(self) -> str:
+        return os.getenv("LONG_BASELINE_PATH") or os.path.join("tools", "long_baseline.json")
+
+    def seed_from_baseline(self) -> int:
+        """Fallback when Long's frontend is unreachable (Cloudflare, an outage).
+
+        `tools/long_baseline.json` is the asset set captured when this was built.
+        Seeding from it is strictly worse than reading the live array — it can be
+        months stale — but it lets the three detectors that do NOT depend on
+        app.long.xyz keep working, and it is what makes a stock-deploy alert able
+        to say "already on Long" or "not yet offered". The frontend loop keeps
+        retrying and re-seeds from the live source the moment it gets through.
+        """
+        path = self._baseline_path()
+        if not os.path.exists(path):
+            logger.error("long: no baseline at %s — the on-chain detectors will run "
+                         "but cannot say whether a stock is already on Long", path)
+            return 0
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        n = 0
+        for row in data.get("assets", []):
+            symbol, kind, address, decimals, feed = (row + [None] * 5)[:5]
+            store.upsert_numeraire(ROBINHOOD_CHAIN_ID, {
+                "symbol": symbol, "name": symbol, "kind": kind, "address": address,
+                "decimals": decimals, "feed": feed or None,
+            })
+            n += 1
+        for lev in data.get("leverage_tokens", []):
+            ticker, name, address, underlying = (list(lev) + [None] * 4)[:4]
+            store.upsert_numeraire(ROBINHOOD_CHAIN_ID, {
+                "symbol": ticker, "name": name, "kind": "leverage",
+                "address": (address or "").lower(), "decimals": 18, "feed": None,
+                "extra": {"underlying": underlying},
+            })
+            n += 1
+        store.set_cursor("frontend:seeded_from", f"baseline {data.get('captured_at_cest', '?')}")
+        return n
+
     async def seed(self) -> dict:
         """Record the world as it is, silently. Runs once; the flag lives in the
         DB so a restart never re-seeds and never re-announces."""
         result = {"numeraires": 0, "stocks": 0, "numeraire_uses": 0}
 
         if not store.is_seeded("frontend"):
-            snap = await self.frontend.snapshot()
-            await self.on_numeraires(snap, seeding=True)
-            result["numeraires"] = len(snap["numeraires"])
-            store.set_cursor("frontend:fingerprint", snap["fingerprint"])
-            store.mark_seeded("frontend")
-            logger.info("long: seeded %d pairable assets from build %s",
-                        result["numeraires"], snap["fingerprint"])
+            try:
+                snap = await self.frontend.snapshot()
+                await self.on_numeraires(snap, seeding=True)
+                result["numeraires"] = len(snap["numeraires"])
+                store.set_cursor("frontend:fingerprint", snap["fingerprint"])
+                store.set_cursor("frontend:seeded_from", f"live {snap['fingerprint']}")
+                store.mark_seeded("frontend")
+                logger.info("long: seeded %d pairable assets from build %s",
+                            result["numeraires"], snap["fingerprint"])
+            except Exception as e:
+                # NOT fatal. Three of the four detectors never touch app.long.xyz,
+                # and the first-coin detector alone still catches a listing within
+                # minutes. Going dark entirely because one source is blocked would
+                # be the worse failure.
+                result["frontend_degraded"] = str(e)
+                n = self.seed_from_baseline()
+                logger.error("long: could not read Long's pairable-asset array: %s", e)
+                logger.error("long: FRONTEND DETECTOR DEGRADED — seeded %d assets from "
+                             "the baseline file instead. The factory, indexer and feed "
+                             "detectors are unaffected and the frontend loop keeps "
+                             "retrying. See HANDOFF_LONG.md §9.", n)
 
         if not store.is_seeded("factory") and self.factory and ROBINHOOD_RPC:
             n = await self.factory.sweep(span=60_000_000)
@@ -463,6 +527,20 @@ class LongWatcher:
         while True:
             try:
                 self.stats["frontend_polls"] += 1
+                if not store.is_seeded("frontend"):
+                    # Deferred seeding: the source was blocked at startup and has
+                    # just answered. Reconcile against whatever is recorded, but
+                    # capped, so a stale baseline cannot produce a burst.
+                    snap = await self.frontend.snapshot()
+                    added = await self.on_numeraires(snap, max_new_alerts=5)
+                    store.set_cursor("frontend:fingerprint", snap["fingerprint"])
+                    store.set_cursor("frontend:seeded_from", f"live {snap['fingerprint']}")
+                    store.mark_seeded("frontend")
+                    logger.warning("long: frontend detector RECOVERED — read %d assets "
+                                   "from build %s, %d new vs the recorded set",
+                                   len(snap["numeraires"]), snap["fingerprint"], len(added))
+                    await asyncio.sleep(FRONTEND_POLL_SECONDS)
+                    continue
                 fp = await self.frontend.build_changed()
                 if fp:
                     self.stats["builds_seen"] += 1
@@ -513,11 +591,13 @@ class LongWatcher:
                                "Deploy fomo/.env to the box (see reference_vps_setup).")
 
             try:
-                await self.seed()
+                seeded = await self.seed()
             except Exception as e:
-                logger.error("long: seeding failed — refusing to start rather than "
-                             "alerting on a world we never recorded: %s", e)
+                logger.error("long: seeding failed outright — refusing to start rather "
+                             "than alerting on a world we never recorded: %s", e)
                 return
+            if seeded.get("frontend_degraded"):
+                logger.warning("long: starting DEGRADED — 3 of 4 detectors live")
 
             logger.info("✅ long watcher up — frontend %.0fs, indexer %.0fs, factory %s, "
                         "feeds %s", FRONTEND_POLL_SECONDS, INDEXER_POLL_SECONDS,

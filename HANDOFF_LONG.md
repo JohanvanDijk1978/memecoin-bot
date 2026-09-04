@@ -5,40 +5,45 @@ unless it says otherwise. Read this before re-deriving anything about Long.
 
 ---
 
-## 0. State at handoff — what is done, what is yours
+## 0. State at handoff — read this first
 
-**Done and committed locally as `5b52579`** (9 files, +2889 lines). `git rev-list
---left-right --count origin/main...HEAD` reports `0 1`, i.e. **one commit ahead
-and NOT pushed** — Cowork has no GitHub credentials. Nothing is deployed yet.
+**2026-09-04, on the VPS: `app.long.xyz` returns 403.** The risk called out in §7
+item 1 is the one that landed. What that does and does not mean:
 
-**Four things stand between this and a live watcher, in order:**
+* The **frontend detector is blocked** — the pairable-asset array cannot be read.
+* **Nothing else is affected.** The factory, indexer and feed detectors never
+  touch `app.long.xyz`. In particular the *first-coin-per-numeraire* detector
+  still catches a new listing within minutes of the first launch against it.
+* The watcher no longer refuses to start over this (it did, in `5b52579` — that
+  was wrong and is fixed). It seeds the numeraire set from
+  `tools/long_baseline.json`, logs `FRONTEND DETECTOR DEGRADED`, runs the other
+  three, and keeps retrying the frontend. See §9.
 
-1. **Push.** From VS Code, `cd C:\Users\mzshu\Downloads\memebot` first — a
-   `git push` from `fomo/` is the trap that has already cost a debugging round.
-2. **Create the Discord channel and its webhook**, paste the URL into the
-   `LONG_DISCORD_WEBHOOK=` line already waiting at the bottom of `.env`, then
-   `scp C:\Users\mzshu\Downloads\memebot\.env root@209.250.245.16:/root/memecoin-bot-new/.env`.
-   `.env` is not in git, so the push alone does nothing for it.
-3. **Confirm the box actually took the commit.** A clean `deploy.log` proves
-   nothing — `deploy.sh` restarts even when the pull aborted:
-   `cd /root/memecoin-bot-new && git log --oneline -1 && grep -c run_long main.py`
-   (expect `5b52579…` and `2`).
-4. **Run `python3 tools/diag_long.py` on the box** and read §7. That is the only
-   thing that closes the five unverified items — above all whether Cloudflare
-   serves a non-browser HTTP client at all.
+**Next steps, in order:**
 
-**If the watcher never speaks:** in order of likelihood — Cloudflare 403 on the
-frontend poll (the log line is `long: frontend poll failed`), `LONG_DISCORD_WEBHOOK`
-empty (`long: LONG_DISCORD_WEBHOOK unset — alert not delivered`), `fomo/.env`
-missing so the on-chain detectors are off (`long: ROBINHOOD_RPC unset`), or
-seeding failing, which by design stops the watcher rather than letting it alert
-against a world it never recorded (`long: seeding failed — refusing to start`).
-Silence with none of those lines is the correct behaviour: Long listed nothing.
+1. ```bash
+   cd /root/memecoin-bot-new && git pull && python3 tools/probe_long_403.py
+   ```
+   One run, four HTTP clients × every host the watcher needs. It ends in a
+   VERDICT block that names the fix. Do not guess before reading it.
+2. If it asks for it (most likely outcome):
+   ```bash
+   pip install curl_cffi --break-system-packages && systemctl restart memebot
+   ```
+   No code change — `LONG_TRANSPORT=auto` picks curl_cffi up by itself.
+3. Confirm the box took the commit — a clean `deploy.log` proves nothing,
+   `deploy.sh` restarts even when the pull aborted:
+   `git log --oneline -1 && grep -c run_long main.py` (expect `2`).
+4. `python3 tools/diag_long.py` for the rest of §7, and
+   `python3 tools/diag_long.py simulate PYPL --send` once the frontend is back.
 
-**Expected alert volume:** near zero. Long lists a stock rarely, Robinhood
-deployed its last batch of stock tokens on 2026-07-28, and coin-launch alerts
-fire only on the first-ever coin against a numeraire. If this channel is noisy,
-something is wrong.
+`.env` already has the webhook (`LONG_DISCORD_WEBHOOK` is set on the box — the
+diag output confirmed it). `fomo/.env` is supplying `ROBINHOOD_RPC`/`WSS`.
+
+**If the channel stays silent:** near-silence is correct. Long lists a stock
+rarely, Robinhood's last stock-token batch was 2026-07-28, and coin alerts fire
+only on the first-ever coin against a numeraire. A noisy channel means something
+is broken, not a working one.
 
 ---
 
@@ -146,6 +151,7 @@ and it is the difference between 5 s and 5 min.
 | `main.py` | `run_long()` added to the `asyncio.gather` |
 | `tools/test_long.py` | 70 offline checks, no network |
 | `tools/diag_long.py` | live diagnostics, run on the box |
+| `tools/probe_long_403.py` | four HTTP clients × every host, to name the Cloudflare fix from evidence (§9) |
 | `tools/long_baseline.json` | the 57-asset snapshot as of 2026-09-04 |
 
 ### Design decisions worth not relitigating
@@ -213,7 +219,8 @@ long: subscribed to Robinhood stock factory 0x4783C6…
 ## 6. How to test it
 
 ```bash
-python3 tools/test_long.py            # 70 offline checks, no network at all
+python3 tools/probe_long_403.py       # WHY app.long.xyz 403s, and which client gets through
+python3 tools/test_long.py            # 83 offline checks, no network at all
 python3 tools/diag_long.py            # everything live, read-only
 python3 tools/diag_long.py frontend   # the pairable-asset table + poll timing
 python3 tools/diag_long.py gap        # on-chain stocks Long does NOT list yet
@@ -242,17 +249,16 @@ miss a real listing.
 * the Chainlink feed deployer, and that feed proxies are `EACAggregatorProxy`
 * Cloudflare's cache headers on `app.long.xyz`
 
-**Verified offline:** all 70 checks in `tools/test_long.py`, including the
+**Verified offline:** all 83 checks in `tools/test_long.py`, including the
 end-to-end simulation (seed silent → one new ticker → exactly one alert → silent
-on re-read and on restart).
+on re-read and on restart), and the blocked-frontend start from §9.
 
 **NOT verified, and Johan must run `tools/diag_long.py` on the box to close these:**
-1. **That Cloudflare serves a non-browser HTTP client at all.** The cloud
-   container is proxy-blocked (403) so this could not be tested from here. If the
-   VPS gets a 403 or a challenge page, `snapshot()` will raise and the watcher
-   will refuse to start — which is the correct failure, and the fix is a browser
-   `User-Agent` (already sent) plus, if needed, `Accept`/`Accept-Language`
-   headers. **This is the single most likely thing to be wrong.**
+1. ~~That Cloudflare serves a non-browser HTTP client at all.~~ **ANSWERED, and
+   the answer was no** — the VPS gets 403 on every `app.long.xyz` page. Full
+   Chrome headers, a curl_cffi escalation path and a degraded-mode fallback were
+   added in response; run `tools/probe_long_403.py` to find out which client gets
+   through. See **§9**, which supersedes this item.
 2. That Alchemy's Robinhood websocket accepts a `logs` subscription filtered on
    the factory address (the multi-wallet watcher's EVM subscriptions work on the
    same endpoint, so this is likely, not certain).
@@ -290,3 +296,83 @@ on re-read and on restart).
   `prediction_tokens` / `residency_tokens` — all empty at build time. If Long
   ever starts populating those server-side, that is a config channel that could
   move before a frontend deploy. Worth a cheap periodic check.
+
+---
+
+## 9. The Cloudflare block on `app.long.xyz` (2026-09-04)
+
+### What happened
+`tools/diag_long.py` on the VPS:
+
+```
+long: page /create failed: https://app.long.xyz/create -> HTTP 403
+long: page /       failed: https://app.long.xyz/       -> HTTP 403
+RuntimeError: no chunk URLs found on any Long page
+```
+
+The same fetch succeeds from a browser on borz, and succeeded through the
+browser pane during the research. So it is the **client** being judged, not the
+address — the identical conclusion the FOMO work reached on 2026-08-18
+(`fomo/FOMO_API.md` §1): Cloudflare scores the **TLS/JA3 fingerprint** and the
+`sec-ch-ua` / `sec-fetch-*` header set, and a bare `aiohttp` client has neither.
+A residential IP does not fix it and a datacentre IP is not the cause.
+
+### What was changed in response
+
+**1. Browser-shaped headers, and a transport that can escalate.**
+`Http.get_text(url, kind="doc"|"script")` now sends the full Chrome document or
+script header set. `LONG_TRANSPORT` (default `auto`) controls what happens on a
+403/503: `auto` logs the classified reason once, retries through **curl_cffi**
+(which reproduces Chrome's TLS fingerprint), and if that works, sticks with it
+for the rest of the process rather than paying a blocked round-trip per poll.
+`LONG_TRANSPORT=aiohttp` or `curl_cffi` force one. `LONG_IMPERSONATE` (default
+`chrome`) picks the profile.
+
+curl_cffi is an **optional** dependency, deliberately not in `requirements.txt`
+until the probe proves it is the fix — a failed wheel build there would break the
+whole install:
+
+```bash
+pip install curl_cffi --break-system-packages
+```
+
+**2. `describe_block()`** — ported from `fomo_api.describe_403()`, and for the
+same reason: a WAF block and an app-level refusal need opposite fixes. It reads
+`cf-mitigated`, the content type and the body markers, and says which one you
+have plus the `cf-ray` for the record. Every non-200 on a Long page or chunk now
+raises that sentence instead of `HTTP 403`.
+
+**3. The watcher degrades instead of dying.** Seeding failure on the frontend is
+no longer fatal:
+
+* `seed_from_baseline()` loads `tools/long_baseline.json` (57 assets + 2 leverage
+  tokens, captured 2026-09-04) so the other detectors can still answer "is this
+  already on Long?"
+* `store` is *not* marked seeded for the frontend, so `_frontend_loop` retries
+  forever with its existing backoff, and performs the deferred seeding the moment
+  it gets through — logging `frontend detector RECOVERED`.
+* Recovery is **capped at 5 new assets** (`max_new_alerts`). One or two assets
+  listed while we were blind are exactly the alerts we want; nine of them mean
+  the baseline has gone stale, and a burst of "Long now supports X" for things it
+  has supported all along is worse than a log line.
+
+`tools/test_long.py` covers all of this — 83 checks now, including a simulated
+blocked start that asserts the factory detector still alerts *and* still knows
+the stock is on Long from the baseline.
+
+### If the probe says every client is blocked
+Options, cheapest first:
+
+1. **Live with the degraded mode.** The first-coin detector catches a listing
+   within minutes of the first launch against it, which in practice is minutes
+   after the listing. This is genuinely close to good enough.
+2. **Fetch the page from borz** (residential IP, and Chrome is already there for
+   fomo) and have it POST the parsed asset list to the VPS, or write it to a file
+   the VPS pulls. `fomo/fomo_browser.py` is the working pattern — a persistent
+   Chrome profile driven by Playwright, whose page context supplies the Origin,
+   the cf_clearance cookie and a real TLS fingerprint at once.
+3. **A residential proxy for that one request.** Least appealing: a recurring
+   cost and another dependency, for one small GET every few seconds.
+
+Do not add a headless-Chrome dependency to the VPS before trying 1 and 2 —
+memebot has no browser stack today and that is worth keeping.

@@ -107,8 +107,88 @@ LONG_CONFIG_PAGES = [p.strip() for p in os.getenv(
 USER_AGENT = os.getenv(
     "LONG_USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
 )
+
+# `auto` = try aiohttp, and if Cloudflare's WAF rejects it, fall back to
+# curl_cffi's Chrome impersonation for the rest of the process. `aiohttp` and
+# `curl_cffi` force one. See the Cloudflare section in HANDOFF_LONG.md.
+LONG_TRANSPORT = os.getenv("LONG_TRANSPORT", "auto").strip().lower()
+
+# A document request from Chrome. Cloudflare's bot score reads all of these,
+# and the fomo work (2026-08-18) proved that headers alone are not always
+# enough — CF also scores the TLS/JA3 fingerprint, which only a real browser
+# stack or curl_cffi can supply. Headers are the cheap half; try them first.
+_BROWSERISH_DOC = {
+    "User-Agent": USER_AGENT,
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,image/apng,*/*;q=0.8,"
+               "application/signed-exchange;v=b3;q=0.7"),
+    "Accept-Language": "en-US,en;q=0.9",
+    "sec-ch-ua": '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# Same idea for a script fetched by that document.
+_BROWSERISH_SCRIPT = {
+    "User-Agent": USER_AGENT,
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": LONG_APP_BASE + "/",
+    "sec-ch-ua": _BROWSERISH_DOC["sec-ch-ua"],
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Sec-Fetch-Dest": "script",
+    "Sec-Fetch-Mode": "no-cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+# Cloudflare fingerprints in a 403 body — same list the fomo client uses, for
+# the same reason: an app-level 403 and a WAF block need opposite fixes.
+_CF_BODY_MARKERS = (
+    "cf-error-details", "cf-browser-verification", "__cf_chl",
+    "Attention Required", "Just a moment", "Enable JavaScript and cookies",
+    "cloudflare",
+)
+
+
+def describe_block(url: str, status: int, body: str, headers: dict) -> str:
+    """Turn a 403/503 into an actionable sentence instead of a bare status.
+
+    The whole of long.xyz sits behind Cloudflare, so `server: cloudflare` and
+    `cf-ray` appear on ordinary responses too — only an HTML challenge page or
+    an explicit `cf-mitigated` means the WAF ate the request.
+    """
+    h = {k.lower(): v for k, v in (headers or {}).items()}
+    ctype = (h.get("content-type") or "").lower()
+    body_looks_cf = any(m.lower() in (body or "").lower() for m in _CF_BODY_MARKERS)
+    is_cf = bool(h.get("cf-mitigated")) or "html" in ctype or body_looks_cf
+
+    bits = [f"HTTP {status} from {url}"]
+    if is_cf:
+        bits.append(
+            "blocked by Cloudflare's WAF, not by the app. CF scores the TLS/JA3 "
+            "fingerprint and sec-* headers as well as the IP, so a bare aiohttp "
+            "client is rejected on any address. Fix: pip install curl_cffi "
+            "(LONG_TRANSPORT=auto then impersonates Chrome). Same lesson as "
+            "fomo/FOMO_API.md §1."
+        )
+    else:
+        bits.append("origin refused it (no Cloudflare challenge markers found)")
+    detail = [f"{k}={h[k]}" for k in
+              ("cf-ray", "cf-mitigated", "cf-cache-status", "server", "content-type")
+              if h.get(k)]
+    if detail:
+        bits.append("[" + " ".join(detail) + "]")
+    if body:
+        bits.append(f"body: {body[:160].strip()!r}")
+    return " — ".join(bits)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -310,9 +390,63 @@ class Http:
         assert self._session is not None, "Http used outside its context manager"
         return self._session
 
-    async def get_text(self, url: str, **kw) -> tuple[int, str, dict]:
-        async with self.session.get(url, **kw) as r:
-            return r.status, await r.text(), dict(r.headers)
+    # ── transport with a Cloudflare fallback ──────────────────────────────
+    # `_impersonating` is sticky: once the WAF has rejected aiohttp we do not
+    # keep paying a blocked round-trip on every poll.
+    _impersonating = False
+    _curl_session = None
+    _curl_warned = False
+
+    async def _curl_get(self, url: str, headers: dict) -> tuple[int, str, dict]:
+        """Fetch through curl_cffi, which reproduces Chrome's TLS/JA3 fingerprint
+        as well as its headers. Optional dependency: without it we simply cannot
+        get past a bot-score block from a server."""
+        try:
+            from curl_cffi.requests import AsyncSession  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "Cloudflare rejected the plain HTTP client and curl_cffi is not "
+                "installed. Fix: pip install curl_cffi --break-system-packages"
+            ) from e
+        if Http._curl_session is None:
+            Http._curl_session = AsyncSession(
+                impersonate=os.getenv("LONG_IMPERSONATE", "chrome"), timeout=25)
+        r = await Http._curl_session.get(url, headers=headers)
+        return r.status_code, r.text, dict(r.headers)
+
+    async def get_text(self, url: str, kind: str = "", **kw) -> tuple[int, str, dict]:
+        """GET with browser-shaped headers. `kind` picks the Sec-Fetch set:
+        "doc" for a page, "script" for a chunk, "" for a plain API call."""
+        headers = dict(kw.pop("headers", {}) or {})
+        if kind == "doc":
+            headers = {**_BROWSERISH_DOC, **headers}
+        elif kind == "script":
+            headers = {**_BROWSERISH_SCRIPT, **headers}
+
+        if LONG_TRANSPORT == "curl_cffi" or Http._impersonating:
+            return await self._curl_get(url, headers)
+
+        async with self.session.get(url, headers=headers, **kw) as r:
+            status, text, hdrs = r.status, await r.text(), dict(r.headers)
+
+        # A 403/503 on a page we know is public means the client was judged, not
+        # the request. Switch transports once and retry, rather than reporting a
+        # dead source for the rest of the process.
+        if status in (403, 503) and LONG_TRANSPORT == "auto":
+            if not Http._curl_warned:
+                Http._curl_warned = True
+                logger.warning("long: %s", describe_block(url, status, text, hdrs))
+                logger.warning("long: retrying through curl_cffi (Chrome impersonation)")
+            try:
+                status2, text2, hdrs2 = await self._curl_get(url, headers)
+            except RuntimeError as e:
+                logger.error("long: %s", e)
+                return status, text, hdrs
+            if status2 < 400:
+                Http._impersonating = True
+                logger.warning("long: curl_cffi got through — using it for this process")
+            return status2, text2, hdrs2
+        return status, text, hdrs
 
     async def post_json(self, url: str, payload: dict, **kw) -> Any:
         async with self.session.post(url, json=payload, **kw) as r:
@@ -393,20 +527,21 @@ class LongFrontendWatcher:
     async def _page_html(self, page: str) -> str:
         url = f"{self.base}{page}"
         sep = "&" if "?" in url else "?"
-        status, text, _ = await self.http.get_text(
-            f"{url}{sep}_lw={int(time.time() * 1000)}",
+        full = f"{url}{sep}_lw={int(time.time() * 1000)}"
+        status, text, hdrs = await self.http.get_text(
+            full, kind="doc",
             headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
         )
         if status != 200:
-            raise RuntimeError(f"{url} -> HTTP {status}")
+            raise RuntimeError(describe_block(full, status, text, hdrs))
         return text
 
     async def _chunk_text(self, url: str) -> str:
         # Chunk URLs are immutable (content hash in the name), so they may be
         # served from any cache without risk.
-        status, text, _ = await self.http.get_text(url)
+        status, text, hdrs = await self.http.get_text(url, kind="script")
         if status != 200:
-            raise RuntimeError(f"{url} -> HTTP {status}")
+            raise RuntimeError(describe_block(url, status, text, hdrs))
         return text
 
     async def snapshot(self) -> dict:
