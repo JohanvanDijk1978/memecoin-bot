@@ -98,6 +98,33 @@ def _migrate(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (chain_id, address)
         );
 
+        CREATE TABLE IF NOT EXISTS venue_assets (
+            venue        TEXT    NOT NULL,
+            chain_id     INTEGER NOT NULL,
+            address      TEXT    NOT NULL,
+            symbol       TEXT,
+            name         TEXT,
+            kind         TEXT,
+            decimals     INTEGER,
+            feed_address TEXT,
+            extra        TEXT,
+            first_seen   REAL    NOT NULL,
+            last_seen    REAL    NOT NULL,
+            removed_at   REAL,
+            PRIMARY KEY (venue, chain_id, address)
+        );
+
+        CREATE TABLE IF NOT EXISTS venue_first_use (
+            venue         TEXT NOT NULL,
+            numeraire     TEXT NOT NULL,
+            token_address TEXT,
+            token_symbol  TEXT,
+            token_name    TEXT,
+            created_ts    REAL,
+            first_seen    REAL NOT NULL,
+            PRIMARY KEY (venue, numeraire)
+        );
+
         CREATE TABLE IF NOT EXISTS rh_stocks (
             address      TEXT PRIMARY KEY,
             symbol       TEXT,
@@ -149,11 +176,35 @@ def _migrate(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (subject, source)
         );
 
+        CREATE INDEX IF NOT EXISTS idx_venue_assets ON venue_assets(venue, chain_id);
         CREATE INDEX IF NOT EXISTS idx_latency_subject ON long_latency(subject);
         CREATE INDEX IF NOT EXISTS idx_alerts_sent ON long_alerts(sent_at);
         """
     )
     conn.commit()
+
+    # One-time carry-over from the single-venue schema. `long_numeraires` and
+    # `long_numeraire_use` were written before Pons and o1 existed here; their
+    # rows are Long's by definition. Copied rather than dropped so a rollback to
+    # the previous commit still finds its data.
+    try:
+        have = conn.execute("SELECT COUNT(*) AS n FROM venue_assets").fetchone()["n"]
+        legacy = conn.execute("SELECT COUNT(*) AS n FROM long_numeraires").fetchone()["n"]
+        if legacy and not have:
+            conn.execute(
+                "INSERT OR IGNORE INTO venue_assets(venue, chain_id, address, symbol, "
+                "name, kind, decimals, feed_address, extra, first_seen, last_seen, removed_at) "
+                "SELECT 'long', chain_id, address, symbol, name, kind, decimals, "
+                "feed_address, extra, first_seen, last_seen, removed_at FROM long_numeraires")
+            conn.execute(
+                "INSERT OR IGNORE INTO venue_first_use(venue, numeraire, token_address, "
+                "token_symbol, token_name, created_ts, first_seen) "
+                "SELECT 'long', numeraire, token_address, token_symbol, token_name, "
+                "created_ts, first_seen FROM long_numeraire_use")
+            conn.commit()
+            logger.info("long: migrated %d single-venue rows into venue_assets", legacy)
+    except sqlite3.Error as e:
+        logger.warning("long: venue migration skipped: %s", e)
 
 
 # ── cursors ───────────────────────────────────────────────────────────────────
@@ -184,59 +235,80 @@ def mark_seeded(scope: str) -> None:
     set_cursor(f"seeded:{scope}", "1")
 
 
-# ── numeraires (what Long offers) ─────────────────────────────────────────────
-def known_numeraires(chain_id: int) -> dict[str, sqlite3.Row]:
+# ── venue asset lists (what each launchpad offers) ───────────────────────────
+def known_numeraires(chain_id: int, venue: str = "long") -> dict[str, sqlite3.Row]:
+    """Everything `venue` currently offers as a pairing asset, by address."""
     with _lock:
         rows = _connect().execute(
-            "SELECT * FROM long_numeraires WHERE chain_id = ? AND removed_at IS NULL",
-            (chain_id,),
+            "SELECT * FROM venue_assets WHERE venue = ? AND chain_id = ? "
+            "AND removed_at IS NULL", (venue, chain_id),
         ).fetchall()
     return {r["address"].lower(): r for r in rows}
 
 
-def upsert_numeraire(chain_id: int, n: dict, *, now: Optional[float] = None) -> bool:
-    """Insert or refresh one numeraire. Returns True when the row is NEW."""
+def all_venue_assets(venue: str) -> list[sqlite3.Row]:
+    with _lock:
+        return _connect().execute(
+            "SELECT * FROM venue_assets WHERE venue = ? AND removed_at IS NULL "
+            "ORDER BY kind, symbol", (venue,)).fetchall()
+
+
+def venues_offering(address: str) -> list[str]:
+    """Which venues list this asset. Turns a stock-deploy alert from 'not on
+    Long' into 'already on o1 and Pons, not on Long', which is the actually
+    useful sentence."""
+    with _lock:
+        rows = _connect().execute(
+            "SELECT DISTINCT venue FROM venue_assets WHERE address = ? "
+            "AND removed_at IS NULL ORDER BY venue", (address.lower(),)).fetchall()
+    return [r["venue"] for r in rows]
+
+
+def upsert_numeraire(chain_id: int, n: dict, venue: str = "long",
+                     *, now: Optional[float] = None) -> bool:
+    """Insert or refresh one asset for one venue. True when the row is NEW."""
     now = now if now is not None else time.time()
     addr = (n.get("address") or "").lower()
     with _lock:
         c = _connect()
         cur = c.execute(
-            "SELECT address, removed_at FROM long_numeraires WHERE chain_id = ? AND address = ?",
-            (chain_id, addr),
+            "SELECT address FROM venue_assets WHERE venue = ? AND chain_id = ? AND address = ?",
+            (venue, chain_id, addr),
         ).fetchone()
         is_new = cur is None
         if is_new:
             c.execute(
-                "INSERT INTO long_numeraires(chain_id, address, symbol, name, kind, "
+                "INSERT INTO venue_assets(venue, chain_id, address, symbol, name, kind, "
                 "decimals, feed_address, extra, first_seen, last_seen) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    chain_id, addr, n.get("symbol"), n.get("name"), n.get("kind"),
+                    venue, chain_id, addr, n.get("symbol"), n.get("name"), n.get("kind"),
                     n.get("decimals"), (n.get("feed") or None),
                     json.dumps(n.get("extra") or {}), now, now,
                 ),
             )
         else:
             c.execute(
-                "UPDATE long_numeraires SET symbol=?, name=?, kind=?, decimals=?, "
+                "UPDATE venue_assets SET symbol=?, name=?, kind=?, decimals=?, "
                 "feed_address=COALESCE(?, feed_address), last_seen=?, removed_at=NULL "
-                "WHERE chain_id=? AND address=?",
+                "WHERE venue=? AND chain_id=? AND address=?",
                 (
                     n.get("symbol"), n.get("name"), n.get("kind"), n.get("decimals"),
-                    (n.get("feed") or None), now, chain_id, addr,
+                    (n.get("feed") or None), now, venue, chain_id, addr,
                 ),
             )
         c.commit()
     return is_new
 
 
-def mark_numeraire_removed(chain_id: int, address: str, *, now: Optional[float] = None) -> None:
+def mark_numeraire_removed(chain_id: int, address: str, venue: str = "long",
+                           *, now: Optional[float] = None) -> None:
     now = now if now is not None else time.time()
     with _lock:
         c = _connect()
         c.execute(
-            "UPDATE long_numeraires SET removed_at=? WHERE chain_id=? AND address=?",
-            (now, chain_id, address.lower()),
+            "UPDATE venue_assets SET removed_at=? WHERE venue=? AND chain_id=? AND address=?",
+            (now, venue, chain_id, address.lower()),
         )
         c.commit()
 
@@ -277,14 +349,25 @@ def all_rh_stocks() -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def unlisted_rh_stocks(chain_id: int) -> list[sqlite3.Row]:
-    """Stock tokens that exist on Robinhood Chain but are NOT offered by Long."""
+def unlisted_rh_stocks(chain_id: int, venue: Optional[str] = None) -> list[sqlite3.Row]:
+    """Stock tokens that exist on Robinhood Chain but are not offered.
+
+    With `venue`, "not offered by that venue". Without, "not offered by ANY
+    venue we watch" — the genuinely untouched pool.
+    """
     with _lock:
+        if venue:
+            return _connect().execute(
+                "SELECT s.* FROM rh_stocks s LEFT JOIN venue_assets v "
+                "  ON v.address = s.address AND v.venue = ? AND v.chain_id = ? "
+                "  AND v.removed_at IS NULL "
+                "WHERE v.address IS NULL ORDER BY s.block_number DESC",
+                (venue, chain_id),
+            ).fetchall()
         return _connect().execute(
-            "SELECT s.* FROM rh_stocks s "
-            "LEFT JOIN long_numeraires n "
-            "  ON n.address = s.address AND n.chain_id = ? AND n.removed_at IS NULL "
-            "WHERE n.address IS NULL ORDER BY s.block_number DESC",
+            "SELECT s.* FROM rh_stocks s LEFT JOIN venue_assets v "
+            "  ON v.address = s.address AND v.chain_id = ? AND v.removed_at IS NULL "
+            "WHERE v.address IS NULL ORDER BY s.block_number DESC",
             (chain_id,),
         ).fetchall()
 
@@ -316,24 +399,26 @@ def known_feed_addresses() -> set[str]:
 
 
 # ── first coin per numeraire ──────────────────────────────────────────────────
-def numeraire_first_use(numeraire: str) -> Optional[sqlite3.Row]:
+def numeraire_first_use(numeraire: str, venue: str = "long") -> Optional[sqlite3.Row]:
     with _lock:
         return _connect().execute(
-            "SELECT * FROM long_numeraire_use WHERE numeraire = ?", (numeraire.lower(),)
+            "SELECT * FROM venue_first_use WHERE venue = ? AND numeraire = ?",
+            (venue, numeraire.lower()),
         ).fetchone()
 
 
-def record_numeraire_use(u: dict, *, now: Optional[float] = None) -> bool:
-    """Returns True when this numeraire had never been used before."""
+def record_numeraire_use(u: dict, venue: str = "long", *,
+                         now: Optional[float] = None) -> bool:
+    """True when this numeraire had never been used on this venue before."""
     now = now if now is not None else time.time()
     with _lock:
         c = _connect()
         try:
             c.execute(
-                "INSERT INTO long_numeraire_use(numeraire, token_address, token_symbol, "
-                "token_name, created_ts, first_seen) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO venue_first_use(venue, numeraire, token_address, "
+                "token_symbol, token_name, created_ts, first_seen) VALUES(?,?,?,?,?,?,?)",
                 (
-                    (u.get("numeraire") or "").lower(), u.get("token_address"),
+                    venue, (u.get("numeraire") or "").lower(), u.get("token_address"),
                     u.get("token_symbol"), u.get("token_name"), u.get("created_ts"), now,
                 ),
             )

@@ -138,6 +138,147 @@ def test_parsers() -> None:
     check("empty chunk yields nothing", S.parse_numeraires("") == [])
 
 
+# ── Pons and o1 fixtures, shaped like their real minified bundles ────────────
+PONS_STOCKS = [
+    ("NVDA", "NVIDIA", "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC"),
+    ("SPCX", "SpaceX Class A", "0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa"),
+    ("GOOGL", "Alphabet Class A", "0x2e0847E8910a9732eB3fb1bb4b70a580ADAD4FE3"),
+    ("TSLA", "Tesla", "0x322F0929c4625eD5bAd873c95208D54E1c003b2d"),
+    ("GME", "GameStop", "0x1b0E319c6A659F002271B69dB8A7df2F911c153E"),
+    ("AAPL", "Apple", "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9"),
+    ("SPY", "SPDR S&P 500", "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C"),
+    ("MSFT", "Microsoft", "0xe93237C50D904957Cf27E7B1133b510C669c2e74"),
+    ("META", "Meta", "0xc0D6457C16Cc70d6790Dd43521C899C87ce02f35"),
+    ("COIN", "Coinbase", "0x6330D8C3178a418788dF01a47479c0ce7CCF450b"),
+    ("MU", "Micron", "0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD"),
+    ("PLTR", "Palantir", "0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A"),
+    ("RIVN", "Rivian", "0x1111111111111111111111111111111111111111"),
+    ("PFE", "Pfizer", "0x2222222222222222222222222222222222222222"),
+    ("JNJ", "Johnson & Johnson", "0x3333333333333333333333333333333333333333"),
+    ("MRVL", "Marvell", "0x4444444444444444444444444444444444444444"),
+]
+
+
+def make_pons_chunk(extra: str = "") -> str:
+    entries = ",".join(
+        f'{{address:"{a}",symbol:"{s}",name:"{n}",decimals:18,isNative:!1,assetClass:"equity"}}'
+        for s, n, a in PONS_STOCKS)
+    return (
+        'let r={address:i.zeroAddress,symbol:"ETH",name:"Ether",decimals:18,'
+        'isNative:!0,assetClass:"native"},o=new Map([r,'
+        '{address:s.ROBINHOOD_WETH_ADDRESS,symbol:"WETH",name:"Wrapped Ether",'
+        'decimals:18,isNative:!1,assetClass:"native"},'
+        '{address:"0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",symbol:"USDG",'
+        'name:"Global Dollar",decimals:6,isNative:!1,assetClass:"stablecoin"},'
+        + entries + extra + ']);'
+    )
+
+
+def make_o1_chunk(extra: str = "") -> str:
+    # 48 distinct entries so the count clears o1's min_assets=40 guard; the
+    # addresses must be unique or they collapse into one another.
+    rows = [(f"{s}{i}" if i else s, n, a if not i else f"0x{i:02x}" + a[4:])
+            for i in range(3) for s, n, a in PONS_STOCKS]
+    stocks = ",".join(
+        f'E({{symbol:`{s}`,name:`{n}`,address:`{a.lower()}`,decimals:18}})'
+        for s, n, a in rows)
+    return (
+        '{symbol:`ETH`,label:`ETH`,name:`Ether`,address:d,decimals:18,'
+        'icon:`/icons/crypto/eth.png`,priceAddress:a,priceNetworkId:t,'
+        'creationRoute:c.STANDARD,category:T.CRYPTO_NATIVE,'
+        'suiteId:`robinhood-mainnet-launchpad-v4-minimal`},'
+        '{symbol:`cbBTC`,label:`cbBTC`,name:`Coinbase Wrapped BTC`,'
+        'address:`0x5555555555555555555555555555555555555555`,decimals:8,'
+        'priceNetworkId:8453,category:T.CRYPTO_MAJOR},'
+        'k=[' + stocks + extra + ']'
+    )
+
+
+def test_venue_parsers() -> None:
+    print("\n▶ Pons and o1 parsers")
+    pons = S.parse_assets_pons(make_pons_chunk())
+    by = {r["symbol"]: r for r in pons}
+    check("pons parses every entry", len(pons) == len(PONS_STOCKS) + 2,
+          f"got {len(pons)}")
+    check("pons drops the identifier-address WETH rather than colliding on ETH",
+          "WETH" not in {r["symbol"] for r in pons})
+    check("pons maps assetClass=equity onto kind=stock", by["NVDA"]["kind"] == "stock")
+    check("pons maps stablecoin", by["USDG"]["kind"] == "stable" and by["USDG"]["decimals"] == 6)
+    check("pons identifier address falls back to zero", by["ETH"]["address"] == S.ZERO_ADDRESS)
+    check("pons lowercases addresses",
+          by["NVDA"]["address"] == "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec")
+    check("pons chunk passes the config-chunk guard",
+          S.looks_like_config_chunk(pons, S.VENUES["pons"].min_assets))
+
+    o1 = S.parse_assets_o1(make_o1_chunk())
+    o1by = {r["symbol"]: r for r in o1}
+    check("o1 parses the stock entries", len(o1) >= 40, f"got {len(o1)}")
+    check("o1 treats a category-less entry as a stock", o1by["NVDA"]["kind"] == "stock")
+    check("o1 reads an explicit crypto category", o1by["cbBTC"]["kind"] == "crypto")
+    check("o1 keeps the chain id when present",
+          o1by["cbBTC"]["extra"]["chain_id"] == 8453)
+    check("o1 skips entries whose address is an identifier (ETH/USDG)",
+          "ETH" not in o1by)
+    check("o1 chunk passes its own guard",
+          S.looks_like_config_chunk(o1, S.VENUES["o1"].min_assets))
+
+    check("a Long chunk is not mistaken for a Pons one",
+          S.parse_assets_pons(make_chunk()) == [])
+    check("a Pons chunk is not mistaken for a Long one",
+          not S.looks_like_config_chunk(S.parse_numeraires(make_pons_chunk()),
+                                        S.VENUES["long"].min_assets))
+
+
+def test_venue_registry() -> None:
+    print("\n▶ venue registry")
+    check("three venues registered", set(S.VENUES) == {"long", "pons", "o1"})
+    check("each venue has a parser and a chunk pattern",
+          all(v.parser and v.chunk_re for v in S.VENUES.values()))
+    check("all three settle on Robinhood Chain",
+          all(v.chain_id == S.ROBINHOOD_CHAIN_ID for v in S.VENUES.values()))
+
+    nx = '<script src="/_next/static/chunks/abc123.js"></script>'
+    pons_html = '<script src="/_next/static/immutable/chunks/1inl5h6g6dsdt.js"></script>'
+    vite = ('<link rel="modulepreload" href="/assets/pairedAsset-DftLG667.js">'
+            '<script src="/assets/index-BOhafeTy.js"></script>')
+    check("long pattern matches Next.js chunks",
+          len(S.chunk_urls_from_html(nx, "https://x", S.VENUES["long"].chunk_re)) == 1)
+    check("pons pattern matches the immutable path",
+          len(S.chunk_urls_from_html(pons_html, "https://x", S.VENUES["pons"].chunk_re)) == 1)
+    check("long pattern does NOT match the immutable path",
+          len(S.chunk_urls_from_html(pons_html, "https://x", S.VENUES["long"].chunk_re)) == 0)
+    check("o1 pattern matches Vite assets incl. modulepreload",
+          len(S.chunk_urls_from_html(vite, "https://x", S.VENUES["o1"].chunk_re)) == 2)
+
+    import os as _os
+    _os.environ["LONG_VENUES"] = "long,o1"
+    check("LONG_VENUES selects a subset",
+          [v.id for v in S.enabled_venues()] == ["long", "o1"])
+    _os.environ.pop("LONG_VENUES")
+
+
+def test_pons_feed_normalise() -> None:
+    print("\n▶ pons launch feed")
+    item = {
+        "version": "v2", "token": "0xAADB7a2dB2A3f59113188eF26Fd7B245964aaFA2",
+        "symbol": "WICK", "name": "LmfaoWick", "logo": "",
+        "transactionHash": "0xc762", "blockNumber": 54054117,
+        "launchedAt": "2026-09-04T06:32:26.000Z",
+        "quoteAsset": {"address": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+                       "symbol": "NVDA", "name": "NVIDIA", "decimals": 18,
+                       "isNative": False, "assetClass": "equity"},
+    }
+    n = S.PonsLaunchWatcher.normalise(item)
+    check("venue tagged", n["venue"] == "pons")
+    check("token lowercased", n["token_address"].startswith("0xaadb"))
+    check("numeraire pulled from quoteAsset",
+          n["token_numeraire_address"] == "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec")
+    check("numeraire symbol carried through", n["numeraire_symbol"] == "NVDA")
+    check("assetClass mapped to our kind", n["numeraire_kind"] == "stock")
+    check("timestamp preserved", n["token_creation_timestamp"].startswith("2026-09-04"))
+    check("empty logo becomes None", n["token_image_public_url"] is None)
+
+
 def test_fingerprint() -> None:
     print("\n▶ build fingerprint")
     a = S.chunk_urls_from_html(make_html(["aaa111", "bbb222"]))
@@ -246,10 +387,12 @@ async def test_end_to_end() -> None:
                 return make_chunk(NEW_TICKER_ENTRY)
             return "console.log('vendor');"
 
-    watcher.frontend = FakeFrontend()
+    watcher.frontends = {"long": FakeFrontend()}
+    watcher.frontend = watcher.frontends["long"]
     store.mark_seeded("factory")
     store.mark_seeded("indexer")
     store.mark_seeded("feeds")
+    store.mark_seeded("pons_feed")
 
     await watcher.seed()
     check("seeding sends nothing", len(notifier.sent) == 0, f"sent {len(notifier.sent)}")
@@ -301,7 +444,8 @@ async def test_end_to_end() -> None:
                 return make_chunk()[:400]      # truncated build → most assets gone
             return "console.log('vendor');"
 
-    watcher.frontend = BrokenFrontend()
+    watcher.frontends["long"] = BrokenFrontend()
+    watcher.frontend = watcher.frontends["long"]
     try:
         broken = await watcher.frontend.snapshot()
         res = await watcher.on_numeraires(broken)
@@ -332,8 +476,8 @@ async def test_factory_path() -> None:
     check("new stock token alerts once", len(notifier.sent) == 1)
     await watcher.on_stock_deployed(row)
     check("the same deploy never alerts twice", len(notifier.sent) == 1)
-    check("alert says it is not on Long yet",
-          "Not yet offered by Long" in notifier.sent[0]["description"])
+    check("alert says no venue offers it yet",
+          "Not yet offered by any venue we watch" in notifier.sent[0]["description"])
     check("high confidence for a decoded chain event",
           notifier.sent[0]["confidence"].startswith("high"))
 
@@ -399,13 +543,16 @@ async def test_degraded_start() -> None:
                 "https://app.long.xyz/create", 403, "Just a moment...",
                 {"cf-ray": "x", "content-type": "text/html"}))
 
-    watcher.frontend = BlockedFrontend()
+    watcher.frontends = {"long": BlockedFrontend()}
+    watcher.frontend = watcher.frontends["long"]
     store.mark_seeded("factory")
     store.mark_seeded("indexer")
     store.mark_seeded("feeds")
+    store.mark_seeded("pons_feed")
 
     res = await watcher.seed()
-    check("seed reports the frontend as degraded", bool(res.get("frontend_degraded")))
+    check("seed reports the frontend as degraded", res.get("degraded") == ["long"],
+          f"got {res.get('degraded')}")
     check("seeding still sent nothing", len(notifier.sent) == 0)
     known = store.known_numeraires(4663)
     check("baseline filled the numeraire set", len(known) >= 55, f"got {len(known)}")
@@ -427,8 +574,9 @@ async def test_degraded_start() -> None:
     await watcher.on_stock_deployed(row)
     check("the factory detector still alerts while the frontend is blocked",
           len(notifier.sent) == 1)
-    check("and it knows the stock is already on Long, thanks to the baseline",
-          "already** in Long" in notifier.sent[0]["description"])
+    check("and it names the venues that already offer it, thanks to the baseline",
+          "Already offered by: Long.xyz" in notifier.sent[0]["description"],
+          notifier.sent[0]["description"][:160])
 
     # Recovery against a stale baseline: everything the baseline had, plus nine
     # assets listed while we were blind. Nine is more than the cap, so it must be
@@ -469,6 +617,9 @@ def main() -> int:
     test_log_decoder()
     test_store()
     test_block_classifier()
+    test_venue_parsers()
+    test_venue_registry()
+    test_pons_feed_normalise()
     asyncio.run(test_end_to_end())
     asyncio.run(test_factory_path())
     asyncio.run(test_degraded_start())

@@ -49,6 +49,12 @@ TARGETS = [
     ("api /config    ", "https://api.long.xyz/v1/config", ""),
     ("api /assets    ", "https://api.long.xyz/v1/assets", ""),
     ("blockscout     ", "https://robinhoodchain.blockscout.com/api/v2/stats", ""),
+    ("pons page      ", "https://www.ponsfamily.com/launchpad", "doc"),
+    ("pons api       ", "https://www.ponsfamily.com/api/pons-launches?explore=1&sort=newest"
+                        "&age=all&page=1&pageSize=1&graduatedPage=1&graduatedPageSize=1"
+                        "&includeGraduated=0&version=all&v=22", ""),
+    ("o1 page        ", "https://launch.o1.exchange/token/create", "doc"),
+    ("o1 convex      ", "https://exciting-fox-990.convex.cloud/api/query", ""),
 ]
 
 INTERESTING = ("cf-ray", "cf-mitigated", "cf-cache-status", "server",
@@ -208,6 +214,14 @@ async def main() -> None:
         print("    and feed detectors are unaffected. See HANDOFF_LONG.md §9 for the")
         print("    remaining options (proxy the page fetch through borz, or run the")
         print("    page fetch under the Chrome profile fomo already uses).")
+    pons_ok = any(v and v < 400 for k, r in verdict.items() if k.startswith("pons")
+                  for v in r.values())
+    o1_ok = any(v and v < 400 for k, r in verdict.items() if k.startswith("o1")
+                for v in r.values())
+    print(f"\n  Pons reachable: {'yes' if pons_ok else 'NO'}   "
+          f"o1 reachable: {'yes' if o1_ok else 'NO'}")
+    print("  (both are on Vercel with no Cloudflare bot-scoring, so these are expected")
+    print("   to work from the VPS even while app.long.xyz does not.)")
     if not have_curl_cffi:
         print("\n  Run `pip install curl_cffi --break-system-packages` and re-run this")
         print("  probe — the most likely fix has not actually been tested yet.")

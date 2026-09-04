@@ -6,7 +6,8 @@ cannot do: it talks to the real sources. Run it on the VPS (or any machine with
 crypto-API egress) — a Cowork session cannot reach any of these hosts.
 
     python3 tools/diag_long.py                # everything, read-only
-    python3 tools/diag_long.py frontend       # just Long's pairable-asset array
+    python3 tools/diag_long.py frontend       # every venue's pairable-asset array
+    python3 tools/diag_long.py venues         # which stocks each venue lists, side by side
     python3 tools/diag_long.py chain          # just Robinhood Chain / the factory
     python3 tools/diag_long.py graphql        # just Long's indexer (+ websocket probe)
     python3 tools/diag_long.py gap            # on-chain stocks Long does NOT list
@@ -41,7 +42,7 @@ def hr(title: str) -> None:
 def env_report() -> None:
     hr("configuration")
     rows = [
-        ("LONG_APP_BASE", S.LONG_APP_BASE),
+        ("venues", ", ".join(f"{v.id}={v.base}" for v in S.enabled_venues())),
         ("LONG_GRAPHQL_URL", S.LONG_GRAPHQL_URL),
         ("stock factory", S.RH_STOCK_FACTORY),
         ("Deployed topic0", S.TOPIC_DEPLOYED),
@@ -66,8 +67,17 @@ def _mask(url: str) -> str:
 
 
 async def diag_frontend(http: S.Http) -> None:
-    hr("Long frontend — the authoritative pairable-asset array")
-    fw = S.LongFrontendWatcher(http)
+    for venue in S.enabled_venues():
+        try:
+            await _diag_one_venue(http, venue)
+        except Exception as e:
+            hr(f"{venue.label} frontend")
+            print(f"  ❌ {type(e).__name__}: {e}")
+
+
+async def _diag_one_venue(http: S.Http, venue) -> None:
+    hr(f"{venue.label} frontend — the authoritative pairable-asset array")
+    fw = S.VenueFrontendWatcher(http, venue)
     t0 = time.time()
     snap = await fw.snapshot()
     ms = int((time.time() - t0) * 1000)
@@ -94,6 +104,55 @@ async def diag_frontend(http: S.Http) -> None:
           f"{W.FRONTEND_POLL_SECONDS:.0f}s; the chunk fetch above only happens on a deploy")
 
 
+async def diag_venues(http: S.Http) -> None:
+    """The comparison that says where the opportunity is: which tokenised stocks
+    each venue lists, and which exist on chain but nobody lists yet."""
+    hr("venue comparison")
+    lists: dict[str, dict] = {}
+    for venue in S.enabled_venues():
+        try:
+            snap = await S.VenueFrontendWatcher(http, venue).snapshot()
+            lists[venue.id] = {r["address"]: r for r in snap["numeraires"]}
+            print(f"  {venue.label:<16} {len(snap['numeraires']):>4} assets   "
+                  f"build {snap['fingerprint']}")
+        except Exception as e:
+            print(f"  {venue.label:<16} ❌ {str(e)[:90]}")
+
+    if len(lists) < 2:
+        return
+    everywhere = set.intersection(*[set(v) for v in lists.values()])
+    union = set().union(*[set(v) for v in lists.values()])
+    print(f"\n  listed by all {len(lists)} venues : {len(everywhere)}")
+    print(f"  listed by at least one     : {len(union)}")
+    for vid, rows in lists.items():
+        only = set(rows) - set().union(*[set(v) for k, v in lists.items() if k != vid])
+        syms = sorted(rows[a]["symbol"] for a in only)
+        print(f"  only on {vid:<10} {len(only):>4}   {', '.join(syms[:24])}"
+              + (" …" if len(syms) > 24 else ""))
+
+    if not S.ROBINHOOD_RPC:
+        return
+    rpc = S.JsonRpc(http, S.ROBINHOOD_RPC)
+    head = await rpc.block_number()
+    onchain: dict[str, dict] = {}
+    cur, window = 0, 5_000_000
+    while cur <= head:
+        end = min(cur + window, head)
+        try:
+            for lg in await rpc.get_logs(S.RH_STOCK_FACTORY, [S.TOPIC_DEPLOYED], cur, end):
+                row = S.decode_deployed_log(lg)
+                if row:
+                    onchain[row["address"]] = row
+        except Exception:
+            break
+        cur = end + 1
+    nowhere = [r for a, r in onchain.items() if a not in union]
+    print(f"\n  tokenised stocks on chain  : {len(onchain)}")
+    print(f"  listed by NO venue         : {len(nowhere)}   ← untouched pool")
+    for r in sorted(nowhere, key=lambda x: x["block_number"] or 0, reverse=True)[:20]:
+        print(f"    {r['symbol']:<10} {r['address']}  {r['name']}")
+
+
 async def diag_graphql(http: S.Http) -> None:
     hr("Long indexer — https://api.long.xyz/v1/graphql")
     iw = S.LongIndexerWatcher(http, _noop)
@@ -116,6 +175,33 @@ async def diag_graphql(http: S.Http) -> None:
     used = await iw.used_numeraires()
     print(f"\n  distinct numeraires already used by a coin: {len(used)}")
 
+    hr("Pons launch feed — /api/pons-launches")
+    try:
+        pw = S.PonsLaunchWatcher(http, _noop)
+        items = await pw.fetch(limit=5)
+        print(f"  returned {len(items)} active launches")
+        for i in items[:5]:
+            n = S.PonsLaunchWatcher.normalise(i)
+            print(f"    {n['token_creation_timestamp']}  {str(n['token_symbol']):<12} "
+                  f"→ {n['numeraire_symbol']} ({n['numeraire_kind']})")
+    except Exception as e:
+        print(f"  ❌ {type(e).__name__}: {e}")
+
+    hr("o1 Convex backend — POST /api/query, unauthenticated")
+    try:
+        o1 = S.O1ConvexClient(http)
+        rows = await o1.recent_launches(limit=5)
+        print(f"  {S.O1_CONVEX_URL}")
+        print(f"  udf `{S.O1_LAUNCH_UDF}` returned {len(rows)} launches on chain "
+              f"{S.ROBINHOOD_CHAIN_ID}")
+        for r in rows[:5]:
+            print(f"    {str(r.get('symbol')):<14} {r.get('tokenAddress')}")
+        print("  note: this udf carries no numeraire, so o1 has no first-coin "
+              "detector — see HANDOFF_LONG.md §10")
+    except Exception as e:
+        print(f"  ❌ {type(e).__name__}: {e}")
+
+    hr("Long GraphQL websocket probe")
     print("\n  websocket subscription probe:")
     res = await iw.try_websocket()
     if res.get("ok"):
@@ -327,6 +413,11 @@ async def main() -> None:
                 await diag_gap(http)
         except Exception as e:
             print(f"\n  ❌ gap: {type(e).__name__}: {e}")
+        try:
+            if what in ("all", "venues"):
+                await diag_venues(http)
+        except Exception as e:
+            print(f"\n  ❌ venues: {type(e).__name__}: {e}")
 
     if what == "all":
         diag_latency()

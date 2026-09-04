@@ -59,6 +59,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
@@ -196,6 +197,8 @@ def describe_block(url: str, status: int, body: str, headers: dict) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 _CHUNK_RE = re.compile(r'/_next/static/chunks/[A-Za-z0-9._-]+\.js')
+_CHUNK_RE_PONS = re.compile(r'/_next/static/immutable/chunks/[A-Za-z0-9._-]+\.js')
+_CHUNK_RE_VITE = re.compile(r'/assets/[A-Za-z0-9._-]+\.js')
 
 # The array entries are emitted through a helper whose name the minifier picks
 # fresh on every build, so the entry is matched by SHAPE, never by identifier:
@@ -217,13 +220,19 @@ _LEVERAGE_RE = re.compile(
 ZERO_ADDRESS = "0x" + "0" * 40
 
 
-def chunk_urls_from_html(html: str, base: str = LONG_APP_BASE) -> list[str]:
-    """Every `_next/static/chunks/*.js` referenced by a page, de-duped, sorted.
+def chunk_urls_from_html(html: str, base: str = LONG_APP_BASE,
+                        pattern: Optional[re.Pattern] = None) -> list[str]:
+    """Every content-hashed JS asset referenced by a page, de-duped and sorted.
 
-    Sorted so the fingerprint is stable against Next.js reordering its
-    preloads — we want to react to a DEPLOY, not to a shuffled tag order.
+    Sorted so the fingerprint is stable against the framework reordering its
+    preloads — we want to react to a DEPLOY, not to a shuffled tag order. The
+    pattern differs per venue (`_next/static/chunks` on Long, the `immutable`
+    variant on Pons, plain `/assets` for Vite on o1) but the property that makes
+    this work is the same everywhere: the filename contains a content hash, so
+    the sorted list changes if and only if something shipped.
     """
-    return sorted({base.rstrip("/") + m for m in set(_CHUNK_RE.findall(html))})
+    rx = pattern or _CHUNK_RE
+    return sorted({base.rstrip("/") + m for m in set(rx.findall(html))})
 
 
 def chunk_fingerprint(urls: list[str]) -> str:
@@ -271,6 +280,87 @@ def parse_leverage_tokens(js: str) -> list[dict]:
     return out
 
 
+# ── Pons (ponsfamily.com) ────────────────────────────────────────────────────
+# Its array is object literals rather than a helper call, and it classifies with
+# `assetClass` instead of `kind`:
+#   {address:"0xd060…",symbol:"NVDA",name:"NVIDIA",decimals:18,isNative:!1,assetClass:"equity"}
+# ETH and WETH use identifiers for the address (i.zeroAddress,
+# s.ROBINHOOD_WETH_ADDRESS), so the address group is optional here too.
+_PONS_ASSET_RE = re.compile(
+    r'\{\s*address\s*:\s*(?:"(0x[0-9a-fA-F]{40})"|[A-Za-z_$][\w$.]*)\s*,'
+    r'\s*symbol\s*:\s*"([A-Z0-9.\-]{1,12})"\s*,'
+    r'\s*name\s*:\s*"([^"]{1,70})"\s*,'
+    r'\s*decimals\s*:\s*(\d{1,2})\s*,'
+    r'\s*isNative\s*:\s*!([01])\s*,'
+    r'\s*assetClass\s*:\s*"([a-z]+)"'
+)
+
+# Pons's own words map onto the same three kinds the rest of this module uses.
+_PONS_KIND = {"equity": "stock", "native": "native", "stablecoin": "stable",
+              "etf": "etf", "crypto": "crypto"}
+
+
+def parse_assets_pons(js: str) -> list[dict]:
+    out: dict[str, dict] = {}
+    for m in _PONS_ASSET_RE.finditer(js):
+        address, symbol, name, decimals, is_native, cls = m.groups()
+        if not address:
+            # The address is an identifier the minifier resolves elsewhere
+            # (i.zeroAddress, s.ROBINHOOD_WETH_ADDRESS). ETH is the zero address
+            # by convention on these chains so it can be kept; anything else
+            # would collide on that same key and silently overwrite it, so it is
+            # dropped instead. Only wrapped-native entries land here, never a
+            # stock — the equities are always emitted as literals.
+            if symbol != "ETH":
+                continue
+        addr = (address or ZERO_ADDRESS).lower()
+        out[addr] = {
+            "symbol": symbol, "name": name,
+            "kind": _PONS_KIND.get(cls, cls),
+            "address": addr, "decimals": int(decimals), "feed": None,
+        }
+    return sorted(out.values(), key=lambda r: (r["kind"], r["symbol"]))
+
+
+# ── o1 (launch.o1.exchange) ──────────────────────────────────────────────────
+# A Vite bundle emitted with backtick string literals. The stock entries are
+# bare `{symbol,name,address,decimals}`; the crypto ones carry extra keys
+# (label, icon, category, suiteId) in a different order, so this walks small
+# brace-blocks and pulls the fields out individually rather than trying to
+# write one regex for every shape.
+_BLOCK_RE = re.compile(r"\{[^{}]{20,500}\}")
+_F_SYM = re.compile(r"symbol\s*:\s*[`\"']([A-Za-z0-9.\-]{1,12})[`\"']")
+_F_ADDR = re.compile(r"address\s*:\s*[`\"'](0x[0-9a-fA-F]{40})[`\"']")
+_F_NAME = re.compile(r"name\s*:\s*[`\"']([^`\"']{1,70})[`\"']")
+_F_DEC = re.compile(r"decimals\s*:\s*(\d{1,2})")
+_F_CAT = re.compile(r"category\s*:\s*[A-Za-z_$][\w$]*\.([A-Z_]+)")
+_F_CHAIN = re.compile(r"priceNetworkId\s*:\s*(\d{1,7})")
+
+_O1_KIND = {"CRYPTO_NATIVE": "native", "CRYPTO_MAJOR": "crypto", "STOCK": "stock"}
+
+
+def parse_assets_o1(js: str) -> list[dict]:
+    out: dict[str, dict] = {}
+    for m in _BLOCK_RE.finditer(js):
+        b = m.group(0)
+        sym, addr, dec = _F_SYM.search(b), _F_ADDR.search(b), _F_DEC.search(b)
+        if not (sym and addr and dec):
+            continue
+        name, cat, chain = _F_NAME.search(b), _F_CAT.search(b), _F_CHAIN.search(b)
+        address = addr.group(1).lower()
+        # An entry with no explicit category is a stock: o1's crypto assets all
+        # carry `category:`, the equities are emitted through a helper that
+        # fills it in. Confirmed against the live bundle 2026-09-04.
+        kind = _O1_KIND.get(cat.group(1), "crypto") if cat else "stock"
+        out[address] = {
+            "symbol": sym.group(1), "name": name.group(1) if name else sym.group(1),
+            "kind": kind, "address": address, "decimals": int(dec.group(1)),
+            "feed": None,
+            "extra": {"chain_id": int(chain.group(1))} if chain else {},
+        }
+    return sorted(out.values(), key=lambda r: (r["kind"], r["symbol"]))
+
+
 def looks_like_config_chunk(rows: list[dict], min_stocks: int = 8) -> bool:
     """Guard against a regex that matched something unrelated. The real array
     always carries many `stock` entries; anything less is not it."""
@@ -282,6 +372,77 @@ def clean_stock_name(name: str) -> str:
     if not name:
         return ""
     return re.split(r"\s*[•·|]\s*", name)[0].strip()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Venue registry
+# ═══════════════════════════════════════════════════════════════════════════
+# All three launchpads ship their supported-asset list the same way — a
+# hardcoded array inside a content-hashed frontend bundle — so one detector
+# serves all of them and only the parser and the asset-URL pattern differ.
+#
+# What they do NOT share is how much they list. Long offers 57 assets and Pons
+# 43, both curated subsets of the ~206 tokenised stocks that exist on Robinhood
+# Chain; o1 lists ~194 of them, i.e. very nearly everything. That changes which
+# signal matters per venue: for Long and Pons the array diff is the news, for o1
+# the on-chain factory event effectively IS the listing.
+#
+# o1 is also the only one pairing against stock tokens on **Base** (chain 8453),
+# a different issuer on a different chain — see HANDOFF_LONG.md §10.
+
+@dataclass(frozen=True)
+class Venue:
+    id: str
+    label: str
+    base: str
+    pages: tuple
+    chunk_re: Any
+    parser: Any
+    chain_id: int
+    min_assets: int = 8
+    token_url: str = ""          # format string with {address}
+    enabled: bool = True
+
+
+VENUES: dict[str, Venue] = {
+    "long": Venue(
+        id="long", label="Long.xyz", base=LONG_APP_BASE,
+        pages=tuple(LONG_CONFIG_PAGES), chunk_re=_CHUNK_RE,
+        parser=lambda js: parse_numeraires(js) + [
+            r for r in parse_leverage_tokens(js)
+            if r["address"] not in {x["address"] for x in parse_numeraires(js)}],
+        chain_id=ROBINHOOD_CHAIN_ID, min_assets=8,
+        token_url=LONG_APP_BASE + "/token/{address}",
+    ),
+    "pons": Venue(
+        id="pons", label="Pons", base=os.getenv("PONS_APP_BASE", "https://www.ponsfamily.com"),
+        pages=("/launchpad", "/launchpad/create"), chunk_re=_CHUNK_RE_PONS,
+        parser=parse_assets_pons, chain_id=ROBINHOOD_CHAIN_ID, min_assets=15,
+        token_url="https://www.ponsfamily.com/launchpad/{address}",
+    ),
+    "o1": Venue(
+        id="o1", label="o1 Launchpad",
+        base=os.getenv("O1_APP_BASE", "https://launch.o1.exchange"),
+        pages=("/token/create", "/"), chunk_re=_CHUNK_RE_VITE,
+        parser=parse_assets_o1, chain_id=ROBINHOOD_CHAIN_ID, min_assets=40,
+        token_url="https://launch.o1.exchange/token/{address}",
+    ),
+}
+
+
+def enabled_venues() -> list[Venue]:
+    """`LONG_VENUES=long,pons,o1` (default: all) — so one bad venue can be
+    switched off from the env without a deploy."""
+    want = [v.strip() for v in os.getenv("LONG_VENUES", "long,pons,o1").split(",") if v.strip()]
+    return [VENUES[v] for v in want if v in VENUES]
+
+
+# Pons and o1 launch feeds. Long's is the GraphQL query further down.
+PONS_LAUNCHES_PATH = ("/api/pons-launches?explore=1&sort=newest&age=all&page=1"
+                      "&pageSize={limit}&graduatedPage=1&graduatedPageSize=1"
+                      "&includeGraduated=0&version=all&v=22")
+O1_CONVEX_URL = os.getenv("O1_CONVEX_URL", "https://exciting-fox-990.convex.cloud")
+O1_LAUNCH_UDF = os.getenv("O1_LAUNCH_UDF", "dashboard:recentLaunchSnapshots")
 
 
 # ── minimal ABI decoding (no eth-abi dependency in this repo) ────────────────
@@ -494,7 +655,7 @@ class JsonRpc:
 # Source 1 — Long's frontend: the authoritative "Long supports this" signal
 # ═══════════════════════════════════════════════════════════════════════════
 
-class LongFrontendWatcher:
+class VenueFrontendWatcher:
     """Detect a change to Long's pairable-asset array.
 
     Cost model, which is the whole design:
@@ -515,14 +676,19 @@ class LongFrontendWatcher:
     and the request reach the origin, which is why every poll carries `?_lw=`.
     """
 
-    def __init__(self, http: Http, pages: Optional[list[str]] = None,
-                 base: str = LONG_APP_BASE):
+    def __init__(self, http: Http, venue: Optional[Venue] = None,
+                 pages: Optional[list[str]] = None, base: str = ""):
+        self.venue = venue or VENUES["long"]
         self.http = http
-        self.base = base.rstrip("/")
-        self.pages = pages or LONG_CONFIG_PAGES
+        self.base = (base or self.venue.base).rstrip("/")
+        self.pages = list(pages or self.venue.pages)
         self._seen_chunks: set[str] = set()
         self._config_chunk: Optional[str] = None
         self._last_fingerprint: Optional[str] = None
+
+    @property
+    def venue_id(self) -> str:
+        return self.venue.id
 
     async def _page_html(self, page: str) -> str:
         url = f"{self.base}{page}"
@@ -551,9 +717,10 @@ class LongFrontendWatcher:
         urls: list[str] = []
         for page in self.pages:
             try:
-                urls.extend(chunk_urls_from_html(await self._page_html(page), self.base))
+                urls.extend(chunk_urls_from_html(
+                    await self._page_html(page), self.base, self.venue.chunk_re))
             except Exception as e:
-                logger.warning("long: page %s failed: %s", page, e)
+                logger.warning("long[%s]: page %s failed: %s", self.venue.id, page, e)
         urls = sorted(set(urls))
         if not urls:
             raise RuntimeError("no chunk URLs found on any Long page")
@@ -574,22 +741,25 @@ class LongFrontendWatcher:
             except Exception:
                 continue
             self._seen_chunks.add(url)
-            rows = parse_numeraires(js)
-            if looks_like_config_chunk(rows):
-                rows += [r for r in parse_leverage_tokens(js)
-                         if r["address"] not in {x["address"] for x in rows}]
+            try:
+                rows = self.venue.parser(js)
+            except Exception:
+                continue
+            if looks_like_config_chunk(rows, self.venue.min_assets):
                 self._config_chunk = url
                 self._last_fingerprint = fingerprint
                 self._seen_chunks.update(urls)
                 return {
+                    "venue": self.venue.id,
                     "fingerprint": fingerprint,
                     "chunk_url": url,
                     "numeraires": rows,
                     "chunk_count": len(urls),
                 }
         raise RuntimeError(
-            f"pairable-asset array not found in any of {len(urls)} chunks "
-            f"(build {fingerprint}) — Long may have changed how it ships config"
+            f"{self.venue.label}: pairable-asset array not found in any of "
+            f"{len(urls)} chunks (build {fingerprint}) — the venue may have "
+            f"changed how it ships config"
         )
 
     async def build_changed(self) -> Optional[str]:
@@ -598,9 +768,11 @@ class LongFrontendWatcher:
         urls: list[str] = []
         for page in self.pages:
             try:
-                urls.extend(chunk_urls_from_html(await self._page_html(page), self.base))
+                urls.extend(chunk_urls_from_html(
+                    await self._page_html(page), self.base, self.venue.chunk_re))
             except Exception as e:
-                logger.debug("long: build check on %s failed: %s", page, e)
+                logger.debug("long[%s]: build check on %s failed: %s",
+                             self.venue.id, page, e)
         if not urls:
             return None
         fp = chunk_fingerprint(sorted(set(urls)))
@@ -874,6 +1046,112 @@ def _iso_minutes_ago(minutes: int) -> str:
         "%Y-%m-%dT%H:%M:%S+00:00")
 
 
+class PonsLaunchWatcher:
+    """Pons's own launch feed — `/api/pons-launches`, public, no auth.
+
+    Richer than Long's indexer for this purpose: each item carries a nested
+    `quoteAsset` ({address, symbol, name, decimals, isNative, assetClass}), so
+    "the first coin ever launched against asset X" is answerable directly from
+    the feed with no extra lookup. Volume is enormous (4.2M launches lifetime,
+    ~212k active), which is exactly why only the FIRST use of a numeraire is
+    ever alerted.
+    """
+
+    def __init__(self, http: Http, on_event: Callable[[dict], Awaitable[None]],
+                 base: str = "", get_cursor: Optional[Callable[[], Optional[str]]] = None,
+                 set_cursor: Optional[Callable[[str], None]] = None):
+        self.http = http
+        self.base = (base or VENUES["pons"].base).rstrip("/")
+        self.on_event = on_event
+        self.get_cursor = get_cursor or (lambda: None)
+        self.set_cursor = set_cursor or (lambda v: None)
+
+    async def fetch(self, limit: int = 50) -> list[dict]:
+        url = self.base + PONS_LAUNCHES_PATH.format(limit=limit)
+        status, text, hdrs = await self.http.get_text(url)
+        if status != 200:
+            raise RuntimeError(describe_block(url, status, text, hdrs))
+        data = json.loads(text)
+        return ((data.get("active") or {}).get("items")) or []
+
+    @staticmethod
+    def normalise(item: dict) -> dict:
+        quote = item.get("quoteAsset") or {}
+        return {
+            "venue": "pons",
+            "token_address": (item.get("token") or "").lower(),
+            "token_symbol": item.get("symbol"),
+            "token_name": item.get("name"),
+            "token_numeraire_address": (quote.get("address") or "").lower(),
+            "numeraire_symbol": quote.get("symbol"),
+            "numeraire_name": quote.get("name"),
+            "numeraire_kind": _PONS_KIND.get(quote.get("assetClass") or "", quote.get("assetClass")),
+            "token_creation_timestamp": item.get("launchedAt"),
+            "token_image_public_url": item.get("logo") or None,
+            "block_number": item.get("blockNumber"),
+            "tx_hash": item.get("transactionHash"),
+            "source": "pons_feed:poll",
+        }
+
+    async def poll_once(self, limit: int = 50) -> list[dict]:
+        rows = [self.normalise(i) for i in await self.fetch(limit)]
+        rows = [r for r in rows if r["token_numeraire_address"]]
+        rows.sort(key=lambda r: r["token_creation_timestamp"] or "")
+        for r in rows:
+            await self.on_event(r)
+        if rows:
+            self.set_cursor(rows[-1]["token_creation_timestamp"] or "")
+        return rows
+
+    async def run(self, interval: float = 5.0) -> None:
+        backoff = interval
+        while True:
+            try:
+                await self.poll_once()
+                backoff = interval
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("long[pons]: launch feed failed: %s", e)
+                backoff = min(backoff * 2, 120.0)
+            await asyncio.sleep(backoff)
+
+
+class O1ConvexClient:
+    """o1's backend is a Convex deployment, and its queries answer unauthenticated.
+
+    Two ways in, both confirmed 2026-09-04:
+      * HTTP  — POST {convex}/api/query {path, args, format:"json"}
+      * WS    — wss://{convex}/api/{version}/sync, the reactive protocol the app
+                itself uses (`{"type":"ModifyQuerySet",...,"udfPath":"..."}`).
+                That is a genuine push channel and the one real subscription
+                available across all three venues; see HANDOFF_LONG.md §10 for
+                why it is not wired into alerting yet.
+
+    Known udfPaths, captured off the live app: `dashboard:recentLaunchSnapshots`
+    ({chainId, limit, marketScope}) and `quotePrices:byQuotes`.
+    """
+
+    def __init__(self, http: Http, url: str = O1_CONVEX_URL):
+        self.http = http
+        self.url = url.rstrip("/")
+
+    async def query(self, path: str, args: Optional[dict] = None) -> Any:
+        res = await self.http.post_json(
+            f"{self.url}/api/query",
+            {"path": path, "args": args or {}, "format": "json"},
+            headers={"content-type": "application/json"},
+        )
+        if isinstance(res, dict) and res.get("status") == "error":
+            raise RuntimeError(f"convex {path}: {str(res.get('errorMessage'))[:200]}")
+        return (res or {}).get("value")
+
+    async def recent_launches(self, chain_id: int = ROBINHOOD_CHAIN_ID,
+                              limit: int = 20) -> list[dict]:
+        return await self.query(O1_LAUNCH_UDF, {
+            "chainId": chain_id, "limit": limit, "marketScope": "all"}) or []
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Source 4 — Chainlink feeds: the speculative "Long is prepping this" tell
 # ═══════════════════════════════════════════════════════════════════════════
@@ -962,3 +1240,11 @@ class FeedWatcher:
             except Exception as e:
                 logger.warning("long: feed watcher failed: %s", e)
             await asyncio.sleep(interval)
+
+
+class LongFrontendWatcher(VenueFrontendWatcher):
+    """Backwards-compatible alias: the Long venue specifically."""
+
+    def __init__(self, http: Http, pages: Optional[list[str]] = None,
+                 base: str = LONG_APP_BASE):
+        super().__init__(http, VENUES["long"], pages, base)

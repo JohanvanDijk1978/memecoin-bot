@@ -49,6 +49,11 @@ from src import long_store as store
 from src.long_sources import (
     Http,
     LongFrontendWatcher,
+    VenueFrontendWatcher,
+    PonsLaunchWatcher,
+    O1ConvexClient,
+    VENUES,
+    enabled_venues,
     LongIndexerWatcher,
     RobinhoodFactoryWatcher,
     FeedWatcher,
@@ -70,6 +75,7 @@ LONG_ENABLED = os.getenv("LONG_WATCHER_ENABLED", "1") not in ("0", "false", "Fal
 FRONTEND_POLL_SECONDS = float(os.getenv("LONG_FRONTEND_POLL_SECONDS", "5"))
 INDEXER_POLL_SECONDS = float(os.getenv("LONG_INDEXER_POLL_SECONDS", "2"))
 FEED_POLL_SECONDS = float(os.getenv("LONG_FEED_POLL_SECONDS", "300"))
+PONS_POLL_SECONDS = float(os.getenv("LONG_PONS_POLL_SECONDS", "5"))
 FEED_WATCHER_ENABLED = os.getenv("LONG_FEED_WATCHER", "1") not in ("0", "false", "False")
 
 EXPLORER_WEB = ROBINHOOD_EXPLORER_API.replace("/api/v2", "")
@@ -165,6 +171,7 @@ def build_embed(a: dict) -> dict:
     add("Ticker", f"`{a['ticker']}`" if a.get("ticker") else None)
     add("Company", a.get("company"))
     add("Kind", a.get("kind"))
+    add("Venue", a.get("venue"))
     add("Token address", f"`{a['address']}`" if a.get("address") else None, inline=False)
     add("Paired stock", a.get("paired_stock"))
     add("Confidence", a.get("confidence"))
@@ -205,7 +212,10 @@ class LongWatcher:
     def __init__(self, notifier: Optional[Notifier] = None, http: Optional[Http] = None):
         self.http = http
         self.notifier = notifier
-        self.frontend: Optional[LongFrontendWatcher] = None
+        self.frontend: Optional[VenueFrontendWatcher] = None
+        self.frontends: dict[str, VenueFrontendWatcher] = {}
+        self.pons_feed: Optional[PonsLaunchWatcher] = None
+        self.o1: Optional[O1ConvexClient] = None
         self.indexer: Optional[LongIndexerWatcher] = None
         self.factory: Optional[RobinhoodFactoryWatcher] = None
         self.feeds: Optional[FeedWatcher] = None
@@ -250,16 +260,18 @@ class LongWatcher:
         if seeding or not is_new:
             return
 
-        listed = store.known_numeraires(ROBINHOOD_CHAIN_ID)
-        already_on_long = addr in listed
+        on_venues = store.venues_offering(addr)
         await self._fire(f"stock_deploy:{addr}", {
             "title": f"🆕 New Robinhood stock token: {row.get('symbol')}",
             "description": (
                 f"**{row.get('name') or row.get('symbol')}** was just deployed on Robinhood "
-                f"Chain. This is upstream of Long — the token now exists, and Long can list "
-                f"it as a pairing asset at any time."
-                + ("\n\nIt is **already** in Long's pairable set." if already_on_long else
-                   "\n\nNot yet offered by Long.")
+                f"Chain. This is upstream of every launchpad — the token now exists, "
+                f"and any of them can list it as a pairing asset at any time."
+                + (f"\n\nAlready offered by: "
+                   f"{', '.join(VENUES[v].label for v in on_venues if v in VENUES)}."
+                   if on_venues else
+                   "\n\n**Not yet offered by any venue we watch** — this is the "
+                   "earliest anyone could know about it.")
             ),
             "ticker": row.get("symbol"),
             "company": row.get("name"),
@@ -279,15 +291,17 @@ class LongWatcher:
     # ── source 1: Long's frontend ─────────────────────────────────────────
     async def on_numeraires(self, snapshot: dict, *, seeding: bool = False,
                             max_new_alerts: Optional[int] = None) -> list[dict]:
+        venue_id = snapshot.get("venue", "long")
+        venue = VENUES.get(venue_id, VENUES["long"])
         rows = snapshot["numeraires"]
         seen_now = {r["address"] for r in rows}
-        before = store.known_numeraires(ROBINHOOD_CHAIN_ID)
+        before = store.known_numeraires(venue.chain_id, venue_id)
         added: list[dict] = []
 
         for r in rows:
             subject = self._subject(r.get("symbol"), r["address"])
-            is_new = store.upsert_numeraire(ROBINHOOD_CHAIN_ID, r)
-            store.record_sighting(subject, "long_frontend",
+            is_new = store.upsert_numeraire(venue.chain_id, r, venue_id)
+            store.record_sighting(subject, f"{venue_id}_frontend",
                                   f"build {snapshot.get('fingerprint')}")
             if is_new and not seeding:
                 added.append(r)
@@ -298,13 +312,14 @@ class LongWatcher:
         removed = [a for a in before if a not in seen_now]
         if removed and not seeding:
             if len(removed) > max(3, len(before) // 4):
-                logger.error("long: %d numeraires vanished from build %s — refusing to "
-                             "trust this parse", len(removed), snapshot.get("fingerprint"))
+                logger.error("long[%s]: %d assets vanished from build %s — refusing to "
+                             "trust this parse", venue_id, len(removed),
+                             snapshot.get("fingerprint"))
                 return []
             for addr in removed:
-                store.mark_numeraire_removed(ROBINHOOD_CHAIN_ID, addr)
-                logger.warning("long: numeraire removed from Long: %s (%s)",
-                               before[addr]["symbol"], addr)
+                store.mark_numeraire_removed(venue.chain_id, addr, venue_id)
+                logger.warning("long[%s]: asset delisted: %s (%s)",
+                               venue_id, before[addr]["symbol"], addr)
 
         if max_new_alerts is not None and len(added) > max_new_alerts:
             # Recovering from a blind spell against a baseline that may be months
@@ -318,11 +333,14 @@ class LongWatcher:
 
         for r in added:
             onchain = store.has_rh_stock(r["address"])
-            await self._fire(f"long_listing:{r['address']}", {
-                "title": f"🚀 Long now supports {r['symbol']}",
+            elsewhere = [v for v in store.venues_offering(r["address"]) if v != venue_id]
+            await self._fire(f"{venue_id}_listing:{r['address']}", {
+                "title": f"🚀 {venue.label} now supports {r['symbol']}",
                 "description": (
-                    f"**{r['name']}** ({r['symbol']}) is now offered as a pairing asset on "
-                    f"Long. You can launch a coin against it."
+                    f"**{r['name']}** ({r['symbol']}) is now offered as a pairing asset "
+                    f"on {venue.label}. You can launch a coin against it."
+                    + (f"\n\nAlso listed on: {', '.join(VENUES[v].label for v in elsewhere)}."
+                       if elsewhere else "\n\nNot offered by any other venue we watch.")
                     + ("" if onchain else
                        "\n\n⚠️ The token was not in our on-chain registry — either it "
                        "predates seeding or the factory watcher missed it.")
@@ -331,13 +349,16 @@ class LongWatcher:
                 "company": r["name"],
                 "kind": r["kind"],
                 "address": r["address"],
-                "source": "long_frontend",
+                "venue": venue.label,
+                "source": f"{venue_id}_frontend",
                 "subject": self._subject(r["symbol"], r["address"]),
-                "confidence": ("high — appeared in Long's own pairable-asset array"
+                "confidence": (f"high — appeared in {venue.label}'s own asset array"
                                if onchain else
-                               "medium — in Long's array but unknown to the on-chain registry"),
+                               f"medium — in {venue.label}'s array but unknown to the "
+                               f"on-chain registry"),
                 "evidence": f"build `{snapshot.get('fingerprint')}` · chunk `"
                             f"{(snapshot.get('chunk_url') or '').rsplit('/', 1)[-1]}`",
+                "long_url": venue.token_url.format(address=r["address"]) if venue.token_url else None,
                 "color": COLOR_LISTED,
                 "content": "@here" if os.getenv("LONG_PING_HERE") == "1" else None,
             })
@@ -348,46 +369,53 @@ class LongWatcher:
         num = (t.get("token_numeraire_address") or "").lower()
         if not num:
             return
+        venue_id = t.get("venue", "long")
+        venue = VENUES.get(venue_id, VENUES["long"])
         created = _parse_iso(t.get("token_creation_timestamp"))
         first = store.record_numeraire_use({
             "numeraire": num, "token_address": t.get("token_address"),
             "token_symbol": t.get("token_symbol"), "token_name": t.get("token_name"),
             "created_ts": created,
-        })
+        }, venue_id)
         if not first or seeding:
             return
 
-        listed = store.known_numeraires(ROBINHOOD_CHAIN_ID)
+        listed = store.known_numeraires(venue.chain_id, venue_id)
         meta = listed.get(num)
         onchain = [s for s in store.all_rh_stocks() if s["address"] == num]
-        ticker = (meta["symbol"] if meta else None) or (onchain[0]["symbol"] if onchain else None)
-        company = (meta["name"] if meta else None) or (onchain[0]["name"] if onchain else None)
+        ticker = ((meta["symbol"] if meta else None) or t.get("numeraire_symbol")
+                  or (onchain[0]["symbol"] if onchain else None))
+        company = ((meta["name"] if meta else None) or t.get("numeraire_name")
+                   or (onchain[0]["name"] if onchain else None))
         subject = self._subject(ticker, num)
-        store.record_sighting(subject, "long_indexer",
+        store.record_sighting(subject, f"{venue_id}_launchfeed",
                               f"first coin {t.get('token_symbol')} {t.get('token_address')}")
 
-        await self._fire(f"first_coin:{num}", {
-            "title": f"🥇 First coin ever launched against {ticker or num[:10]}",
+        await self._fire(f"first_coin:{venue_id}:{num}", {
+            "title": f"🥇 First {venue.label} coin ever launched against "
+                     f"{ticker or num[:10]}",
             "description": (
                 f"**{t.get('token_name')}** (`{t.get('token_symbol')}`) is the first coin "
-                f"paired with {ticker or num}. Nobody had used this pairing asset before, "
-                f"which means Long enabled it — independently of whether we caught the "
-                f"frontend change."
+                f"on {venue.label} paired with {ticker or num}. Nobody had used this "
+                f"pairing asset there before, which means {venue.label} enabled it — "
+                f"independently of whether we caught the frontend change."
             ),
             "ticker": ticker,
             "company": company,
-            "kind": (meta["kind"] if meta else "unknown"),
+            "kind": (meta["kind"] if meta else t.get("numeraire_kind") or "unknown"),
             "address": num,
+            "venue": venue.label,
             "paired_stock": f"{t.get('token_symbol')} → {ticker or num}",
-            "source": t.get("source", "long_indexer"),
+            "source": t.get("source", f"{venue_id}_launchfeed"),
             "subject": subject,
-            "confidence": ("high — a coin cannot be launched against an asset Long does "
-                           "not accept"),
+            "confidence": (f"high — a coin cannot be launched against an asset "
+                           f"{venue.label} does not accept"),
             "evidence": f"Token `{t.get('token_address')}` created "
                         f"{t.get('token_creation_timestamp')}",
             "chain_time_cest": cest(created) if created else None,
             "lag_ms": int((time.time() - created) * 1000) if created else None,
-            "long_url": f"{LONG_APP_BASE}/token/{t.get('token_address')}",
+            "long_url": (venue.token_url.format(address=t.get("token_address"))
+                         if venue.token_url else None),
             "image": t.get("token_image_public_url"),
             "color": COLOR_FIRST_COIN,
         })
@@ -399,7 +427,10 @@ class LongWatcher:
         if not is_new or seeding:
             return
         sym = f.get("symbol")
-        listed_syms = {r["symbol"] for r in store.known_numeraires(ROBINHOOD_CHAIN_ID).values()}
+        listed_syms = set()
+        for v in VENUES:
+            listed_syms |= {r["symbol"] for r in
+                            store.known_numeraires(VENUES[v].chain_id, v).values()}
         if sym and sym in listed_syms:
             logger.info("long: feed for already-listed %s, no alert", sym)
             return
@@ -464,32 +495,38 @@ class LongWatcher:
         return n
 
     async def seed(self) -> dict:
-        """Record the world as it is, silently. Runs once; the flag lives in the
-        DB so a restart never re-seeds and never re-announces."""
-        result = {"numeraires": 0, "stocks": 0, "numeraire_uses": 0}
+        """Record the world as it is, silently. Per venue, and per source, with
+        the flags in the DB so a restart never re-seeds and never re-announces."""
+        result: dict[str, Any] = {"venues": {}, "stocks": 0, "numeraire_uses": 0,
+                                  "degraded": []}
 
-        if not store.is_seeded("frontend"):
+        for vid, fw in self.frontends.items():
+            scope = f"frontend:{vid}"
+            if store.is_seeded(scope):
+                continue
             try:
-                snap = await self.frontend.snapshot()
+                snap = await fw.snapshot()
                 await self.on_numeraires(snap, seeding=True)
-                result["numeraires"] = len(snap["numeraires"])
-                store.set_cursor("frontend:fingerprint", snap["fingerprint"])
-                store.set_cursor("frontend:seeded_from", f"live {snap['fingerprint']}")
-                store.mark_seeded("frontend")
-                logger.info("long: seeded %d pairable assets from build %s",
-                            result["numeraires"], snap["fingerprint"])
+                result["venues"][vid] = len(snap["numeraires"])
+                store.set_cursor(f"{vid}:fingerprint", snap["fingerprint"])
+                store.set_cursor(f"{vid}:seeded_from", f"live {snap['fingerprint']}")
+                store.mark_seeded(scope)
+                logger.info("long[%s]: seeded %d pairable assets from build %s",
+                            vid, len(snap["numeraires"]), snap["fingerprint"])
             except Exception as e:
-                # NOT fatal. Three of the four detectors never touch app.long.xyz,
-                # and the first-coin detector alone still catches a listing within
-                # minutes. Going dark entirely because one source is blocked would
-                # be the worse failure.
-                result["frontend_degraded"] = str(e)
-                n = self.seed_from_baseline()
-                logger.error("long: could not read Long's pairable-asset array: %s", e)
-                logger.error("long: FRONTEND DETECTOR DEGRADED — seeded %d assets from "
-                             "the baseline file instead. The factory, indexer and feed "
-                             "detectors are unaffected and the frontend loop keeps "
-                             "retrying. See HANDOFF_LONG.md §9.", n)
+                # NOT fatal, and now not even fatal for the venue: the other
+                # venues and the on-chain detectors are independent. Long is the
+                # only one with a committed baseline to fall back on.
+                result["degraded"].append(vid)
+                logger.error("long[%s]: could not read the asset array: %s", vid, e)
+                if vid == "long":
+                    n = self.seed_from_baseline()
+                    logger.error("long[long]: DEGRADED — seeded %d assets from the "
+                                 "baseline file instead. See HANDOFF_LONG.md §9.", n)
+                else:
+                    logger.error("long[%s]: DEGRADED — no baseline for this venue; its "
+                                 "listing detector is dark until the fetch works. The "
+                                 "factory detector still covers new stock tokens.", vid)
 
         if not store.is_seeded("factory") and self.factory and ROBINHOOD_RPC:
             n = await self.factory.sweep(span=60_000_000)
@@ -498,16 +535,34 @@ class LongWatcher:
             logger.info("long: seeded %d Robinhood stock tokens from the factory", n)
 
         if not store.is_seeded("indexer") and self.indexer:
-            for t in await self.indexer.used_numeraires():
-                await self.on_token({
-                    "token_numeraire_address": t.get("token_numeraire_address"),
-                    "token_address": t.get("token_address"),
-                    "token_symbol": t.get("token_symbol"),
-                    "token_creation_timestamp": t.get("token_creation_timestamp"),
-                }, seeding=True)
-                result["numeraire_uses"] += 1
-            store.mark_seeded("indexer")
-            logger.info("long: seeded %d numeraires already in use", result["numeraire_uses"])
+            try:
+                for t in await self.indexer.used_numeraires():
+                    await self.on_token({
+                        "venue": "long",
+                        "token_numeraire_address": t.get("token_numeraire_address"),
+                        "token_address": t.get("token_address"),
+                        "token_symbol": t.get("token_symbol"),
+                        "token_creation_timestamp": t.get("token_creation_timestamp"),
+                    }, seeding=True)
+                    result["numeraire_uses"] += 1
+                store.mark_seeded("indexer")
+                logger.info("long[long]: seeded %d numeraires already in use",
+                            result["numeraire_uses"])
+            except Exception as e:
+                logger.error("long[long]: indexer seeding failed: %s", e)
+
+        if not store.is_seeded("pons_feed") and self.pons_feed:
+            # Pons has 4.2M launches lifetime, so "every numeraire ever used"
+            # cannot be enumerated from the feed. Seed from what Pons currently
+            # offers instead: an asset it lists has, in practice, been used.
+            try:
+                for r in store.all_venue_assets("pons"):
+                    store.record_numeraire_use({"numeraire": r["address"],
+                                                "token_symbol": None}, "pons")
+                store.mark_seeded("pons_feed")
+                logger.info("long[pons]: seeded first-use from the listed asset set")
+            except Exception as e:
+                logger.warning("long[pons]: first-use seeding failed: %s", e)
 
         if not store.is_seeded("feeds") and self.feeds and ROBINHOOD_RPC:
             try:
@@ -522,35 +577,38 @@ class LongWatcher:
         return result
 
     # ── loops ─────────────────────────────────────────────────────────────
-    async def _frontend_loop(self) -> None:
+    async def _frontend_loop(self, venue_id: str = "long") -> None:
+        fw = self.frontends[venue_id]
+        scope = f"frontend:{venue_id}"
         consecutive_errors = 0
         while True:
             try:
                 self.stats["frontend_polls"] += 1
-                if not store.is_seeded("frontend"):
-                    # Deferred seeding: the source was blocked at startup and has
-                    # just answered. Reconcile against whatever is recorded, but
+                if not store.is_seeded(scope):
+                    # Deferred seeding: the source was unreachable at startup and
+                    # has just answered. Reconcile against whatever is recorded,
                     # capped, so a stale baseline cannot produce a burst.
-                    snap = await self.frontend.snapshot()
+                    snap = await fw.snapshot()
                     added = await self.on_numeraires(snap, max_new_alerts=5)
-                    store.set_cursor("frontend:fingerprint", snap["fingerprint"])
-                    store.set_cursor("frontend:seeded_from", f"live {snap['fingerprint']}")
-                    store.mark_seeded("frontend")
-                    logger.warning("long: frontend detector RECOVERED — read %d assets "
-                                   "from build %s, %d new vs the recorded set",
+                    store.set_cursor(f"{venue_id}:fingerprint", snap["fingerprint"])
+                    store.set_cursor(f"{venue_id}:seeded_from", f"live {snap['fingerprint']}")
+                    store.mark_seeded(scope)
+                    logger.warning("long[%s]: frontend RECOVERED — read %d assets from "
+                                   "build %s, %d new vs the recorded set", venue_id,
                                    len(snap["numeraires"]), snap["fingerprint"], len(added))
                     await asyncio.sleep(FRONTEND_POLL_SECONDS)
                     continue
-                fp = await self.frontend.build_changed()
+                fp = await fw.build_changed()
                 if fp:
                     self.stats["builds_seen"] += 1
-                    logger.info("long: new frontend build %s — re-reading pairable assets", fp)
-                    snap = await self.frontend.snapshot()
-                    store.set_cursor("frontend:fingerprint", snap["fingerprint"])
+                    logger.info("long[%s]: new build %s — re-reading the asset array",
+                                venue_id, fp)
+                    snap = await fw.snapshot()
+                    store.set_cursor(f"{venue_id}:fingerprint", snap["fingerprint"])
                     added = await self.on_numeraires(snap)
                     if not added:
-                        logger.info("long: build %s shipped, pairable set unchanged (%d assets)",
-                                    fp, len(snap["numeraires"]))
+                        logger.info("long[%s]: build %s shipped, asset set unchanged (%d)",
+                                    venue_id, fp, len(snap["numeraires"]))
                 consecutive_errors = 0
                 delay = FRONTEND_POLL_SECONDS
             except asyncio.CancelledError:
@@ -559,8 +617,8 @@ class LongWatcher:
                 consecutive_errors += 1
                 self.stats["errors"] += 1
                 delay = min(FRONTEND_POLL_SECONDS * (2 ** min(consecutive_errors, 6)), 300)
-                logger.warning("long: frontend poll failed (%d in a row): %s — next in %.0fs",
-                               consecutive_errors, e, delay)
+                logger.warning("long[%s]: frontend poll failed (%d in a row): %s — "
+                               "next in %.0fs", venue_id, consecutive_errors, e, delay)
             await asyncio.sleep(delay)
 
     async def run(self) -> None:
@@ -573,12 +631,21 @@ class LongWatcher:
             if self.notifier is None:
                 self.notifier = DiscordWebhookNotifier(LONG_DISCORD_WEBHOOK, http)
 
-            self.frontend = LongFrontendWatcher(http)
+            venues = enabled_venues()
+            self.frontends = {v.id: VenueFrontendWatcher(http, v) for v in venues}
+            self.frontend = self.frontends.get("long")
+
             self.indexer = LongIndexerWatcher(
                 http, self.on_token,
                 get_cursor=lambda: store.get_cursor("indexer:after"),
                 set_cursor=lambda v: store.set_cursor("indexer:after", v),
-            )
+            ) if "long" in self.frontends else None
+            self.pons_feed = PonsLaunchWatcher(
+                http, self.on_token,
+                get_cursor=lambda: store.get_cursor("pons:after"),
+                set_cursor=lambda v: store.set_cursor("pons:after", v),
+            ) if "pons" in self.frontends else None
+            self.o1 = O1ConvexClient(http) if "o1" in self.frontends else None
             self.factory = RobinhoodFactoryWatcher(
                 http, self.on_stock_deployed,
                 get_cursor=lambda: (int(store.get_cursor("factory:block") or 0) or None),
@@ -596,44 +663,41 @@ class LongWatcher:
                 logger.error("long: seeding failed outright — refusing to start rather "
                              "than alerting on a world we never recorded: %s", e)
                 return
-            if seeded.get("frontend_degraded"):
-                logger.warning("long: starting DEGRADED — 3 of 4 detectors live")
+            if seeded.get("degraded"):
+                logger.warning("long: starting with DEGRADED venues: %s",
+                               ", ".join(seeded["degraded"]))
 
-            logger.info("✅ long watcher up — frontend %.0fs, indexer %.0fs, factory %s, "
-                        "feeds %s", FRONTEND_POLL_SECONDS, INDEXER_POLL_SECONDS,
-                        "ws" if ROBINHOOD_WSS else "sweep-only",
-                        "on" if (FEED_WATCHER_ENABLED and ROBINHOOD_RPC) else "off")
+            logger.info("✅ long watcher up — venues %s, frontend %.0fs, feeds %.0fs, "
+                        "factory %s", ",".join(self.frontends), FRONTEND_POLL_SECONDS,
+                        INDEXER_POLL_SECONDS, "ws" if ROBINHOOD_WSS else "sweep-only")
 
-            tasks = [
-                asyncio.create_task(self._frontend_loop(), name="long_frontend"),
-                asyncio.create_task(self.indexer.run(INDEXER_POLL_SECONDS), name="long_indexer"),
-            ]
+            builders: dict[str, Any] = {}
+            for vid in self.frontends:
+                builders[f"frontend:{vid}"] = (lambda v=vid: self._frontend_loop(v))
+            if self.indexer:
+                builders["long_indexer"] = lambda: self.indexer.run(INDEXER_POLL_SECONDS)
+            if self.pons_feed:
+                builders["pons_feed"] = lambda: self.pons_feed.run(PONS_POLL_SECONDS)
             if ROBINHOOD_RPC or ROBINHOOD_WSS:
-                tasks.append(asyncio.create_task(self.factory.run(), name="long_factory"))
+                builders["long_factory"] = lambda: self.factory.run()
             if FEED_WATCHER_ENABLED and ROBINHOOD_RPC:
-                tasks.append(asyncio.create_task(
-                    self.feeds.run(store.known_feed_addresses, FEED_POLL_SECONDS),
-                    name="long_feeds"))
+                builders["long_feeds"] = lambda: self.feeds.run(
+                    store.known_feed_addresses, FEED_POLL_SECONDS)
+
+            tasks = [asyncio.create_task(fn(), name=name) for name, fn in builders.items()]
 
             # Supervise: a task that dies takes its reason to the log and is
             # restarted, rather than silently leaving a detector dark.
             while True:
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for t in done:
                     name = t.get_name()
                     exc = t.exception() if not t.cancelled() else None
                     logger.error("long: task %s exited (%s) — restarting in 10s", name, exc)
                     tasks.remove(t)
                     await asyncio.sleep(10)
-                    factory_map = {
-                        "long_frontend": lambda: self._frontend_loop(),
-                        "long_indexer": lambda: self.indexer.run(INDEXER_POLL_SECONDS),
-                        "long_factory": lambda: self.factory.run(),
-                        "long_feeds": lambda: self.feeds.run(
-                            store.known_feed_addresses, FEED_POLL_SECONDS),
-                    }
-                    if name in factory_map:
-                        tasks.append(asyncio.create_task(factory_map[name](), name=name))
+                    if name in builders:
+                        tasks.append(asyncio.create_task(builders[name](), name=name))
 
     # ── health ────────────────────────────────────────────────────────────
     def health(self) -> dict:
@@ -641,7 +705,9 @@ class LongWatcher:
             "uptime_s": int(time.time() - self.started_at),
             "stats": dict(self.stats),
             "factory_ws_connected": bool(self.factory and self.factory.connected),
-            "numeraires_known": len(store.known_numeraires(ROBINHOOD_CHAIN_ID)),
+            "venues": {vid: len(store.all_venue_assets(vid)) for vid in self.frontends},
+            "venues_degraded": [vid for vid in self.frontends
+                                if not store.is_seeded(f"frontend:{vid}")],
             "rh_stocks_known": len(store.all_rh_stocks()),
             "alerts_sent": store.alert_count(),
             "now_cest": cest(),
