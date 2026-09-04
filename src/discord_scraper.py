@@ -145,6 +145,21 @@ def _mirror_dedup(msg_id: int) -> bool:
     return False
 
 
+# Messages we saw on a mirrored channel but could not mirror because they
+# arrived with no text, no embed and no image. Bots (Rick & co) sometimes post
+# an empty shell first and fill it in with an edit a second later — on_message_edit
+# below mirrors exactly these, and nothing else, so there is no duplicate risk.
+_mirror_skipped_empty: dict = {}  # message_id -> timestamp
+_MIRROR_EMPTY_TTL = 300
+
+
+def _note_skipped_empty(msg_id: int):
+    now = import_time.time()
+    for k in [k for k, ts in _mirror_skipped_empty.items() if ts < now - _MIRROR_EMPTY_TTL]:
+        _mirror_skipped_empty.pop(k, None)
+    _mirror_skipped_empty[msg_id] = now
+
+
 # Track pinged addresses: address -> {time, groups: dict}
 _recent_pings: dict = {}
 PING_COOLDOWN = 600  # 10 minutes
@@ -521,6 +536,83 @@ try:
                     f"limit={DISCORD_BACKFILL_LIMIT}/channel"
                 )
 
+        async def _mirror_to_topic(self, message, from_edit: bool = False):
+            """Forward one Discord message into its mapped Telegram topic.
+
+            Bots are NOT skipped here. Rick and friends are bots, so the old
+            `not message.author.bot` guard dropped them before BLOCKED_NAMES ever
+            got a say — emptying BLOCKED_NAMES could not bring them back. The
+            mirror filters on BLOCKED_NAMES only; the CA-scan path in on_message
+            still skips bots, so pings stay single.
+            """
+            mirror_topic = _DISCORD_MIRROR_MAP.get(message.channel.id, 0)
+            if not mirror_topic:
+                return
+
+            author = message.author
+            names = {
+                (getattr(author, "display_name", "") or "").lower(),
+                (getattr(author, "name", "") or "").lower(),
+            }
+            sender = getattr(author, "display_name", "") or getattr(author, "name", "") or "Unknown"
+
+            img_url = ""
+            for att in (getattr(message, "attachments", None) or []):
+                if (getattr(att, "content_type", "") or "").startswith("image/"):
+                    img_url = att.url
+                    break
+            # clean_content resolves <@ID>, <#ID>, <@&roleID> to @name / #channel / @role.
+            body = getattr(message, "clean_content", "") or getattr(message, "content", "") or ""
+            embed_text, embed_img = _flatten_embeds(message)
+            if embed_text:
+                body = f"{body}\n{embed_text}".strip() if body else embed_text
+            if not img_url and embed_img:
+                img_url = embed_img
+
+            blocked = bool(names & BLOCKED_NAMES)
+            logger.info(
+                f"🪞 MIRRORDBG msg={message.id} chan={message.channel.id} topic={mirror_topic} "
+                f"author={sender!r} bot={getattr(author, 'bot', None)} edit={from_edit} "
+                f"blocked={blocked} content_len={len(getattr(message, 'content', '') or '')} "
+                f"embeds={len(getattr(message, 'embeds', None) or [])} "
+                f"atts={len(getattr(message, 'attachments', None) or [])} body_len={len(body)}"
+            )
+
+            if blocked:
+                return
+            if not (body or img_url):
+                # Nothing to send yet — remember it so an edit can complete it.
+                _note_skipped_empty(message.id)
+                return
+            if _mirror_dedup(message.id):
+                return
+
+            try:
+                asyncio.create_task(mirror_message(
+                    text=body,
+                    group_name="",  # unused when topic_id is passed explicitly
+                    sender_name=sender,
+                    image_url=img_url,
+                    topic_id=mirror_topic,
+                ))
+                _mirror_feed_append(sender, body, img_url)
+            except Exception as e:
+                logger.warning(f"discord mirror failed for msg {message.id}: {e}")
+
+        async def on_message_edit(self, before, after):
+            """Mirror only messages that arrived empty and were filled in by an edit.
+
+            Anything already mirrored is skipped by _mirror_skipped_empty, so a
+            normal edit (or a link-preview embed hydrating) never double-posts.
+            """
+            try:
+                if getattr(after, "id", None) not in _mirror_skipped_empty:
+                    return
+                _mirror_skipped_empty.pop(after.id, None)
+                await self._mirror_to_topic(after, from_edit=True)
+            except Exception as e:
+                logger.warning(f"discord mirror (edit) failed: {e}")
+
         async def on_message(self, message):
             # Dedup at the door: the same message can arrive via WebSocket
             # (on_message) and via _backfill_loop. Whoever gets here first wins;
@@ -541,47 +633,7 @@ try:
             # Mirror path: forward EVERY message from any configured Discord
             # channel into its mapped Telegram topic. Runs independently of the
             # scraper path so it fires even for image-only messages.
-            mirror_topic = _DISCORD_MIRROR_MAP.get(message.channel.id, 0)
-            # Bots are NOT skipped here any more. Rick and friends are bots, so
-            # the old `not message.author.bot` guard dropped them before
-            # BLOCKED_NAMES ever got a say — emptying BLOCKED_NAMES could not
-            # bring them back. The mirror now filters on BLOCKED_NAMES only
-            # (the CA-scan path below still skips bots, so no duplicate pings).
-            _author_names = {
-                (getattr(message.author, "display_name", "") or "").lower(),
-                (getattr(message.author, "name", "") or "").lower(),
-            }
-            if (
-                mirror_topic
-                and not (_author_names & BLOCKED_NAMES)
-                and not _mirror_dedup(message.id)
-            ):
-                try:
-                    sender = message.author.display_name or message.author.name or "Unknown"
-                    img_url = ""
-                    for att in (message.attachments or []):
-                        if (att.content_type or "").startswith("image/"):
-                            img_url = att.url
-                            break
-                    # Use clean_content so <@ID>, <#ID>, <@&roleID> get resolved
-                    # to @displayname / #channel / @role instead of raw IDs.
-                    body = message.clean_content or ""
-                    embed_text, embed_img = _flatten_embeds(message)
-                    if embed_text:
-                        body = f"{body}\n{embed_text}".strip() if body else embed_text
-                    if not img_url and embed_img:
-                        img_url = embed_img
-                    if body or img_url:
-                        asyncio.create_task(mirror_message(
-                            text=body,
-                            group_name="",  # unused when topic_id is passed explicitly
-                            sender_name=sender,
-                            image_url=img_url,
-                            topic_id=mirror_topic,
-                        ))
-                        _mirror_feed_append(sender, body, img_url)
-                except Exception as e:
-                    logger.warning(f"discord mirror failed for msg {message.id}: {e}")
+            await self._mirror_to_topic(message)
 
             if message.channel.id not in self._channel_ids:
                 return
