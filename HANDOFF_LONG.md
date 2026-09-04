@@ -2,8 +2,25 @@
 
 *(Long.xyz, Pons and o1. Named `long_*` because Long came first.)*
 
-Built 2026-09-04. Everything below was verified against the live app that day
-unless it says otherwise. Read this before re-deriving anything about Long.
+Built 2026-09-04. Everything below was verified against the live apps that day
+unless it says otherwise. Read this before re-deriving anything.
+
+**Read order if you are picking this up cold:** §0 (where it stands) → §1–2 (how
+these launchpads work and what the earliest signal is) → §11 (what the first live
+run taught, which is the most transferable part). §3–8 are reference. §9 is the
+Cloudflare story, §10 is Pons and o1.
+
+**Commits, all local until Johan pushes:**
+
+| commit | what |
+|---|---|
+| `5b52579` | the watcher — four detectors, dedup, latency instrumentation |
+| `3f71b95` | handoff §0 |
+| `26dc209` | Cloudflare transport, degraded mode, `probe_long_403.py` |
+| `c1598e5` | Pons and o1 — venue registry, venue-scoped store |
+| `a554cf0` | interstitial retry, required primary page, strict 403/429 classification |
+
+`tools/test_long.py` — **123 checks, all passing offline.**
 
 ---
 
