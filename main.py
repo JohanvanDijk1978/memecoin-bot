@@ -11,6 +11,8 @@ Entrypoint — runs all the bot's async loops concurrently:
   7. Milestone tracker replying to dex-update posts at 2x/3x/5x/10x/+5x
   8. Multi-wallet buy watcher — alerts when several monitored wallets buy the
      same token inside the configured window (Solana + EVM, own channel)
+  9. Long.xyz watcher — alerts the moment a new stock becomes pairable on
+     Long, and when Robinhood deploys a new tokenised stock upstream of it
 """
 
 import asyncio
@@ -65,6 +67,12 @@ async def run_multiwallet():
     await run_multiwallet_watcher()
 
 
+async def run_long():
+    """Start the Long.xyz new-stock watcher (own Discord webhook)."""
+    from src.long_watcher import run_long_watcher
+    await run_long_watcher()
+
+
 async def run_bot():
     """Start the Telegram bot that handles /status, /leaderboard, /pump."""
     from src.bot import build_bot_app, register_commands
@@ -112,12 +120,13 @@ async def main():
         run_dex_watcher_evm(),
         run_milestone_tracker(),
         run_multiwallet(),
+        run_long(),
         return_exceptions=True,
     )
 
     for name, result in zip(
         ["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher",
-         "dex_watcher_evm", "milestone_tracker", "multiwallet"],
+         "dex_watcher_evm", "milestone_tracker", "multiwallet", "long_watcher"],
         results,
     ):
         if isinstance(result, Exception):

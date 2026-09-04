@@ -9,3 +9,7 @@ memory.md
 
 # Runtime state the VPS mutates — tracking these makes deploy.sh fail to pull
 fomo/wallet_cache.json
+
+# Long.xyz watcher state
+data/long.db
+data/long.db-*
