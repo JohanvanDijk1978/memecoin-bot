@@ -4,4 +4,8 @@ dashboard/data/
 src/__pycache__/
 __pycache__/
 *.pyc
-*.sessionmemory.md
+*.session
+memory.md
+
+# Runtime state the VPS mutates — tracking these makes deploy.sh fail to pull
+fomo/wallet_cache.json
