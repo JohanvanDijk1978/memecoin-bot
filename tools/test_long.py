@@ -493,9 +493,13 @@ async def test_end_to_end() -> None:
     check("alert states confidence", "confidence" in a and a["confidence"])
     check("alert cites the build as evidence", "build" in a["evidence"])
     embed = W.build_embed(a)
-    check("embed renders", embed["title"].startswith("🚀") and len(embed["fields"]) > 3)
-    check("embed links to the explorer",
-          any("Explorer" in (f["value"] or "") for f in embed["fields"]))
+    check("embed renders", embed["title"] == "Long.xyz now supports PYPL", embed["title"])
+    check("embed is title + description + colour only",
+          set(embed) == {"title", "description", "color"}, str(sorted(embed)))
+    check("embed description is the one-liner",
+          embed["description"] == "PayPal (PYPL) is now offered as a pairing asset on "
+                                  "Long.xyz. You can launch a coin against it.",
+          embed["description"])
 
     # The same build again, and a restart, must both stay silent.
     snap2 = await watcher.frontend.snapshot()
@@ -547,7 +551,7 @@ async def test_factory_path() -> None:
     await watcher.on_stock_deployed(row)
     check("the same deploy never alerts twice", len(notifier.sent) == 1)
     check("alert says no venue offers it yet",
-          "Not yet offered by any venue we watch" in notifier.sent[0]["description"])
+          "No venue offers it as a pairing asset yet." in notifier.sent[0]["description"])
     check("high confidence for a decoded chain event",
           notifier.sent[0]["confidence"].startswith("high"))
 

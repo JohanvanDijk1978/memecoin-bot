@@ -81,8 +81,6 @@ FEED_WATCHER_ENABLED = os.getenv("LONG_FEED_WATCHER", "1") not in ("0", "false",
 # More than this and the gap is too wide to be news — absorb it and say so.
 CATCHUP_MAX_ALERTS = int(os.getenv("LONG_CATCHUP_MAX_ALERTS", "8"))
 
-EXPLORER_WEB = ROBINHOOD_EXPLORER_API.replace("/api/v2", "")
-
 # Discord embed colours, by how much the alert should make you move.
 COLOR_LISTED = 0x2ECC71      # Long now supports it — act
 COLOR_DEPLOYED = 0x3498DB    # exists on-chain, not listed yet
@@ -165,45 +163,17 @@ class CollectingNotifier(Notifier):
 
 # ── alert rendering ───────────────────────────────────────────────────────────
 def build_embed(a: dict) -> dict:
-    fields = []
+    """One title, one line of plain English, one colour. Nothing else.
 
-    def add(name, value, inline=True):
-        if value:
-            fields.append({"name": name, "value": str(value)[:1024], "inline": inline})
-
-    add("Ticker", f"`{a['ticker']}`" if a.get("ticker") else None)
-    add("Company", a.get("company"))
-    add("Kind", a.get("kind"))
-    add("Venue", a.get("venue"))
-    add("Token address", f"`{a['address']}`" if a.get("address") else None, inline=False)
-    add("Paired stock", a.get("paired_stock"))
-    add("Confidence", a.get("confidence"))
-    add("Source", f"`{a['source']}`")
-    add("Detected", a.get("detected_at_cest"), inline=False)
-    if a.get("chain_time_cest"):
-        add("On-chain time", a["chain_time_cest"], inline=False)
-    if a.get("lag_ms") is not None:
-        add("Detection lag", f"{a['lag_ms']} ms after the on-chain event")
-    add("Evidence", a.get("evidence"), inline=False)
-
-    links = []
-    if a.get("address"):
-        links.append(f"[Explorer]({EXPLORER_WEB}/address/{a['address']})")
-    if a.get("tx_hash"):
-        links.append(f"[Tx]({EXPLORER_WEB}/tx/{a['tx_hash']})")
-    links.append(f"[Long]({LONG_APP_BASE})")
-    if a.get("long_url"):
-        links.append(f"[Coin]({a['long_url']})")
-    add("Links", " · ".join(links), inline=False)
-
+    Everything an alert knows — address, source, confidence, evidence, lag — is
+    still on the alert dict and still goes to the store and to `/longlatency`.
+    It just does not belong in the message: the message exists to tell you, at a
+    glance, that a thing happened.
+    """
     return {
         "title": a.get("title", "Long update")[:256],
         "description": (a.get("description") or "")[:2048],
         "color": a.get("color", COLOR_LISTED),
-        "fields": fields[:25],
-        "footer": {"text": f"long_watcher · {a.get('source', '?')}"},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        **({"thumbnail": {"url": a["image"]}} if a.get("image") else {}),
     }
 
 
@@ -265,16 +235,14 @@ class LongWatcher:
 
         on_venues = store.venues_offering(addr)
         await self._fire(f"stock_deploy:{addr}", {
-            "title": f"🆕 New Robinhood stock token: {row.get('symbol')}",
+            "title": f"New Robinhood stock token: {row.get('symbol')}",
             "description": (
-                f"**{row.get('name') or row.get('symbol')}** was just deployed on Robinhood "
-                f"Chain. This is upstream of every launchpad — the token now exists, "
-                f"and any of them can list it as a pairing asset at any time."
-                + (f"\n\nAlready offered by: "
+                f"{clean_stock_name(row.get('name')) or row.get('symbol')} "
+                f"({row.get('symbol')}) was deployed on Robinhood Chain."
+                + (f" Already offered by: "
                    f"{', '.join(VENUES[v].label for v in on_venues if v in VENUES)}."
                    if on_venues else
-                   "\n\n**Not yet offered by any venue we watch** — this is the "
-                   "earliest anyone could know about it.")
+                   " No venue offers it as a pairing asset yet.")
             ),
             "ticker": row.get("symbol"),
             "company": row.get("name"),
@@ -336,17 +304,11 @@ class LongWatcher:
 
         for r in added:
             onchain = store.has_rh_stock(r["address"])
-            elsewhere = [v for v in store.venues_offering(r["address"]) if v != venue_id]
             await self._fire(f"{venue_id}_listing:{r['address']}", {
-                "title": f"🚀 {venue.label} now supports {r['symbol']}",
+                "title": f"{venue.label} now supports {r['symbol']}",
                 "description": (
-                    f"**{r['name']}** ({r['symbol']}) is now offered as a pairing asset "
+                    f"{r['name']} ({r['symbol']}) is now offered as a pairing asset "
                     f"on {venue.label}. You can launch a coin against it."
-                    + (f"\n\nAlso listed on: {', '.join(VENUES[v].label for v in elsewhere)}."
-                       if elsewhere else "\n\nNot offered by any other venue we watch.")
-                    + ("" if onchain else
-                       "\n\n⚠️ The token was not in our on-chain registry — either it "
-                       "predates seeding or the factory watcher missed it.")
                 ),
                 "ticker": r["symbol"],
                 "company": r["name"],
@@ -395,13 +357,11 @@ class LongWatcher:
                               f"first coin {t.get('token_symbol')} {t.get('token_address')}")
 
         await self._fire(f"first_coin:{venue_id}:{num}", {
-            "title": f"🥇 First {venue.label} coin ever launched against "
-                     f"{ticker or num[:10]}",
+            "title": f"First {venue.label} coin against {ticker or num[:10]}",
             "description": (
-                f"**{t.get('token_name')}** (`{t.get('token_symbol')}`) is the first coin "
-                f"on {venue.label} paired with {ticker or num}. Nobody had used this "
-                f"pairing asset there before, which means {venue.label} enabled it — "
-                f"independently of whether we caught the frontend change."
+                f"{t.get('token_name')} ({t.get('token_symbol')}) is the first coin "
+                f"launched against {ticker or num} on {venue.label}, so {venue.label} "
+                f"now supports it."
             ),
             "ticker": ticker,
             "company": company,
@@ -440,12 +400,11 @@ class LongWatcher:
         subject = self._subject(sym, None) if sym else f"feed:{addr}"
         store.record_sighting(subject, "chainlink_feed", addr)
         await self._fire(f"feed:{addr}", {
-            "title": f"📡 Price feed deployed for {sym or 'an unknown ticker'}",
+            "title": f"Price feed deployed for {sym or 'an unknown ticker'}",
             "description": (
-                f"A Chainlink aggregator (`{f.get('description') or '?'}`) was deployed on "
-                f"Robinhood Chain for a ticker Long does not currently list. About half of "
-                f"Long's listed stocks carry a feed, so this *may* precede a listing — "
-                f"treat as a heads-up, not a confirmation."
+                f"A Chainlink price feed appeared on Robinhood Chain for "
+                f"{sym or 'a ticker'}, which Long.xyz does not list yet. A feed often "
+                f"precedes a listing, but not always."
             ),
             "ticker": sym,
             "address": addr,
