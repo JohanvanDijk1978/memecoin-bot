@@ -134,6 +134,57 @@ class MentionStore:
             )
             self._mentions[addr].append(mention)
 
+    def backfill_market_cap(self, address: str, group_name: str = "",
+                            market_cap: float = 0.0, ticker: str = "",
+                            chain_id: str = "") -> int:
+        """Fill in the price a call was recorded without. Returns rows touched.
+
+        A CA pinged before Dexscreener indexed it is stored with market_cap 0,
+        which reads as "N/A" in every later alert and makes the call
+        un-scoreable on the leaderboard (`first_mc <= 0` is skipped there).
+        When the re-check loop finally gets a quote, this writes it back.
+
+        Deliberately not `add_message`: that would also bump `scan_count` and
+        inflate "scanned Nx". Only rows still sitting at zero are touched, so
+        a real later scan is never overwritten. `first_mc` becomes the price at
+        re-check time, which is minutes after the call rather than at it — an
+        approximation, but a far better one than zero.
+        """
+        if market_cap <= 0:
+            return 0
+        entries = self._ca_history.get(address, [])
+        if not entries:
+            return 0
+
+        targets = [e for e in entries if e.get("group_name") == group_name] if group_name else []
+        if not targets:
+            targets = entries
+
+        touched = 0
+        for entry in targets:
+            changed = False
+            if not entry.get("market_cap"):
+                entry["market_cap"] = market_cap
+                changed = True
+            if not entry.get("first_mc"):
+                entry["first_mc"] = market_cap
+                changed = True
+            if market_cap > entry.get("peak_mc", 0):
+                entry["peak_mc"] = market_cap
+                changed = True
+            if ticker and not entry.get("ticker"):
+                entry["ticker"] = ticker
+                changed = True
+            if chain_id and not entry.get("chain_id"):
+                entry["chain_id"] = chain_id
+                changed = True
+            touched += 1 if changed else 0
+
+        if touched:
+            self._save_history()
+            logger.info(f"📈 Backfilled {touched} history row(s) for {address} at {market_cap:.0f}")
+        return touched
+
     def get_scan_stats(self, address: str) -> tuple:
         """Return (total_scans, unique_groups) for a CA."""
         entries = self._ca_history.get(address, [])

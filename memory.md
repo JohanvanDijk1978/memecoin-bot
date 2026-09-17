@@ -265,3 +265,41 @@
   websocket and the EVM chains have no endpoint at all.
 - Verify: `python3 tools/test_multiwallet.py` (offline, no keys) and
   `python3 tools/diag_multiwallet.py [wallet]` (live, on the box).
+
+## CA pings: address classification and the re-check loop
+
+- The problem: a ping whose Dexscreener lookup came back empty printed a flat
+  `Ξ EVM Contract` with no ticker, mcap or scan line, and was never revisited.
+  Dexscreener answers `"pairs": null` identically for a pre-pool token, a
+  wallet, a pool address and a 429, so the alert could not tell them apart.
+- `src/ca_probe.py` asks the chains instead. `eth_getCode` empty everywhere is
+  a wallet; code starting `0xef0100` is an EIP-7702 delegated wallet (this is
+  what `0xbee5…3174a` turned out to be on BSC); code answering 2 of
+  symbol()/decimals()/totalSupply() is a token and gives us ticker, name and
+  supply with no indexer; anything else is a contract. Nothing answering is
+  `unknown` and is NOT cached. Verdicts are cached 6h, unknown 60s.
+- Endpoints come from `multiwallet_sources.evm_rpc()` (so the same fomo/.env
+  keys) with a public RPC fallback per chain, so a box missing fomo/.env still
+  classifies. Chains are probed concurrently and the whole call is capped at
+  `CA_PROBE_TIMEOUT` (8s) — a slow RPC costs the classification, never the ping.
+- `src/ca_enrich.py` now owns `fetch_token_quick`, `fetch_ath` and the alert
+  body; both scrapers had their own near-identical copy of all three.
+  `telegram_scraper.fetch_token_quick` is re-exported because
+  `high_wr_notifier` imports it from there.
+- The re-check queue lives in the same module: a bare ping is queued and
+  re-fetched at `CA_RECHECK_DELAYS` (45,180,600,1800s), and on the first hit
+  the ORIGINAL Telegram message is edited into the full alert. Wallets and
+  non-ERC-20 contracts are never queued — no data is ever coming. `send_ping`
+  now returns `{chat_id, message_id}` and `edit_ping` was added to make that
+  possible. `main.py` runs `run_ca_recheck()` in its gather.
+- `store.backfill_market_cap()` fixes the history row a bare ping wrote with
+  market_cap 0 (a permanent `N/A` and an un-scoreable leaderboard call). It
+  only touches rows still at zero and never bumps `scan_count`.
+- Known gap: the copy `filtered_forward` sends to the filtered channel is not
+  edited by the re-check — only the main alert is.
+- Still open, deliberately not fixed here: `fetch_ath` hardcodes GeckoTerminal
+  network `eth` for every EVM chain, so BSC/Base tokens never get an ATH
+  suffix even when Dexscreener enrichment worked.
+- Verify: `python3 tools/test_ca.py` (offline, no keys, 54 checks) and
+  `python3 tools/diag_ca.py <address>` (live — prints what Dexscreener said,
+  what each chain said, and the alert that results).

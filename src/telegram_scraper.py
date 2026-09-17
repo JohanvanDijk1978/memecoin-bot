@@ -53,84 +53,12 @@ from .send_ping import send_ping
 from .mirror import mirror_message, get_group_link
 from .filtered_forward import maybe_forward
 from .high_wr_notifier import notify_high_wr_scan
-
-
-async def fetch_token_quick(address: str, chain: str) -> dict:
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
-            from .utils import dex_wait
-            await dex_wait()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status != 200:
-                    return {}
-                data = await resp.json()
-
-            pairs = data.get("pairs", [])
-            if not pairs:
-                return {}
-
-            # If the scraper detected the address as SOL (base58), restrict to
-            # solana pairs. If it was detected as ETH (0x...), let Dexscreener
-            # return whichever EVM chain actually has the token — could be
-            # ethereum, bsc, base, robinhood, arbitrum, etc. We pick the pair
-            # with the most liquidity and use ITS chainId as the source of truth.
-            if chain == "SOL":
-                filtered = [p for p in pairs if p.get("chainId", "").lower() == "solana"] or pairs
-            else:
-                filtered = pairs
-            best = max(filtered, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
-            actual_chain_id = (best.get("chainId") or "").lower()
-            dex_id          = (best.get("dexId") or "").lower()
-
-            base = best.get("baseToken", {})
-            vol  = best.get("volume", {})
-            chg  = best.get("priceChange", {})
-
-            image_url = ""
-            info = best.get("info", {})
-            if info.get("imageUrl"):
-                image_url = info["imageUrl"]
-
-            # Calculate age
-            created_at = best.get("pairCreatedAt", 0) or 0
-            if created_at:
-                import time as _t2
-                age_secs = _t2.time() - created_at / 1000
-                if age_secs < 3600:
-                    age_str = f"{int(age_secs/60)} minutes"
-                elif age_secs < 86400:
-                    age_str = f"{int(age_secs/3600)} hours"
-                elif age_secs < 2592000:
-                    age_str = f"{int(age_secs/86400)} days"
-                else:
-                    age_str = f"{int(age_secs/2592000)} months"
-            else:
-                age_str = "?"
-
-            # Fetch true ATH from GeckoTerminal (inside same session)
-            price_usd = float(best.get("priceUsd", 0) or 0)
-            fdv_usd   = float(best.get("marketCap", 0) or 0)
-            ath_mc, ath_time = await fetch_ath(address, chain, price_usd, fdv_usd, session)
-
-            return {
-                "name":       base.get("name", "Unknown"),
-                "symbol":     base.get("symbol", "???"),
-                "price":      float(best.get("priceUsd", 0) or 0),
-                "volume_24h": float(vol.get("h24", 0) or 0),
-                "change_24h": float(chg.get("h24", 0) or 0),
-                "market_cap": float(best.get("marketCap", 0) or 0),
-                "url":        best.get("url", ""),
-                "image_url":  image_url,
-                "age":        age_str,
-                "ath_mc":     ath_mc,
-                "ath_time":   ath_time,
-                "chain_id":   actual_chain_id,   # e.g. "ethereum" / "bsc" / "base" / "robinhood" / "solana"
-                "dex_id":     dex_id,            # e.g. "uniswap", "pancakeswap", "raydium"
-            }
-    except Exception as e:
-        logger.warning(f"Quick fetch failed for {address}: {e}")
-        return {}
+# fetch_token_quick / fetch_ath / the alert body live in ca_enrich now —
+# the Discord scraper had its own copy of all three. Re-exported here
+# because high_wr_notifier imports fetch_token_quick from this module.
+from .ca_enrich import (PENDING_NOTE, build_ca_message, fetch_ath,
+                        fetch_token_quick, schedule_recheck)
+from .ca_probe import classify_evm
 
 
 async def fetch_token_age(address: str, chain: str, session: aiohttp.ClientSession) -> str:
@@ -184,50 +112,6 @@ async def fetch_token_age(address: str, chain: str, session: aiohttp.ClientSessi
     return "?"
 
 
-async def fetch_ath(address: str, chain: str, current_price: float, current_fdv: float, session: aiohttp.ClientSession) -> tuple:
-    """Fetch ATH market cap and time from GeckoTerminal. Returns (ath_mc, ath_time)."""
-    try:
-        network = "solana" if chain == "SOL" else "eth"
-        # Get pools for this token
-        url = f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{address}/pools?page=1"
-        headers = {"Accept": "application/json;version=20230302"}
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-            if resp.status != 200:
-                return 0, 0
-            data = await resp.json()
-            pools = data.get("data", [])
-            if not pools:
-                return 0, 0
-            pool_id = pools[0].get("id", "").replace(f"{network}_", "")
-
-        # Get OHLCV data for the top pool
-        ohlcv_url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_id}/ohlcv/hour?limit=1000&currency=usd&token=base"
-        async with session.get(ohlcv_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-            if resp.status != 200:
-                return 0, 0
-            data = await resp.json()
-            candles = data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
-            if not candles:
-                return 0, 0
-
-            ath_candle = max(candles, key=lambda c: c[2])
-            ath_price = ath_candle[2]
-            ath_time  = ath_candle[0]
-
-            # Calculate ATH MC
-            if current_price > 0 and current_fdv > 0:
-                ath_mc = (ath_price / current_price) * current_fdv
-            else:
-                ath_mc = 0
-
-            return ath_mc, ath_time
-    except Exception as e:
-        logger.warning(f"ATH fetch failed for {address}: {e}")
-        return 0, 0
-
-
-import time as import_time
-
 async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_messages, mirror_link="", sender_id=""):
     found = []
     for m in SOL_ADDRESS_RE.finditer(text):
@@ -243,8 +127,6 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
 
     import time
     now = time.time()
-
-    chain_emoji = {"SOL": "◎", "ETH": "Ξ"}
 
     for address, chain in found:
         # High-WR caller notification — has its own persistent dedup, so it
@@ -272,7 +154,7 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
 
         # Resolve chain from Dexscreener's response when available. Fallback
         # to the regex-detected chain if the token lookup failed.
-        from .utils import build_trading_links, chain_display_name
+        from .utils import build_trading_links
         actual_chain = (token or {}).get("chain_id") or ("solana" if chain == "SOL" else "ethereum")
         trading_links = build_trading_links(actual_chain, address)
 
@@ -283,7 +165,6 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
 
         mc = token.get("market_cap", 0) if token else 0
         mc_str = fmt(mc) if mc else "N/A"
-        group_with_mc = f"{group_name}({mc_str})"
 
         if existing and now - existing["time"] < PING_COOLDOWN:
             if group_name not in existing["groups"]:
@@ -306,130 +187,34 @@ async def handle_ca_ping(text, sender_name, sender_username, group_name, prev_me
             store.add_message(f"CA:{address}", source="telegram", group_name=group_name, sender_name=sender_name, market_cap=mc, ticker=token.get("symbol", "") if token else "", sender_id=sender_id)
             _recent_pings[address] = {"time": now, "groups": {group_name: mc_str}}
 
-        icon   = chain_emoji.get(chain, "🔗")
         sender = f"*{sender_name}*" if not sender_username else f"*{sender_name}* (@{sender_username})"
+        header = f"👤 {sender} in [{group_name}]({mirror_link or get_group_link(group_name)})"
 
-        context_block = ""
+        # No market data. Ask the chains what this address even is, so the
+        # alert can say "wallet" rather than "Contract", and so the trading
+        # links point at the chain the thing is actually on instead of
+        # defaulting to Ethereum.
+        probe = None
+        if not token and chain == "ETH":
+            probe = await classify_evm(address)
+            if probe.get("chain"):
+                actual_chain = probe["chain"]
+                trading_links = build_trading_links(actual_chain, address)
 
-        # Get ATH from token data (fetched from GeckoTerminal)
-        ath_mc   = token.get("ath_mc", 0) if token else 0
-        ath_time = token.get("ath_time", 0) if token else 0
+        # A token whose pool has not indexed yet is worth another look. A
+        # wallet or a non-ERC-20 contract never will be, so it is not queued.
+        will_recheck = not token and (probe or {}).get("kind", "unknown") in ("token", "unknown")
 
-        def fmt2(n):
-            if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
-            if n >= 1_000: return f"{n/1_000:.1f}K"
-            return str(n)
+        msg, image_url = build_ca_message(
+            header=header, address=address, chain=chain, token=token,
+            trading_links=trading_links, probe=probe,
+            pending_note=PENDING_NOTE if will_recheck else "",
+        )
 
-        # Pre-compute ATH suffix for FDV line
-        if ath_mc > mc * 1.05 and ath_time:
-            ago_secs = import_time.time() - ath_time
-            if ago_secs < 3600:
-                ath_ago = f"{int(ago_secs/60)}m"
-            elif ago_secs < 86400:
-                ath_ago = f"{int(ago_secs/3600)}h"
-            else:
-                ath_ago = f"{int(ago_secs/86400)}d"
-            fdv_ath_suffix = f" ⇨ {fmt2(ath_mc)} ATH[{ath_ago}]"
-        else:
-            fdv_ath_suffix = " ATH" if ath_mc > 0 else ""
-
-        # Get scan stats
-        scan_total, scan_groups = store.get_scan_stats(address)
-        if scan_total == 0:
-            scan_total, scan_groups = 1, 1
-        if scan_total <= 1:
-            scan_line = "👥 *First scan!*\n"
-        else:
-            grp_word = "groups" if scan_groups != 1 else "group"
-            scan_line = f"👥 Scanned *{scan_total}x* in *{scan_groups}* {grp_word}\n"
-
-        # Build top 3 scanner history
-        history = store.get_ca_history(address, limit=3)
-        if history:
-            medals = ["🥇", "🥈", "🥉"]
-            current_mc = token.get("market_cap", 0) if token else 0
-            context_block += "\n\n━━━━━━━━━━━━━━━"
-            for i, mention in enumerate(history):
-                import time as _time
-                ago_secs = _time.time() - mention.timestamp
-                ago_mins = int(ago_secs / 60)
-                if ago_mins < 60:
-                    ts = f"{ago_mins}m ago"
-                elif ago_mins < 1440:
-                    ts = f"{ago_mins // 60}h ago"
-                else:
-                    ts = f"{ago_mins // 1440}d ago"
-                grp = mention.group_name or mention.source
-                who = mention.sender_name or "Unknown"
-                mc  = mention.market_cap
-                if mc >= 1_000_000:
-                    mc_str = f"${mc/1_000_000:.1f}M"
-                elif mc > 0:
-                    mc_str = f"${mc/1_000:.0f}K"
-                else:
-                    mc_str = "N/A"
-                # Calculate multiplier using peak_mc from store
-                stored_entries = store._ca_history.get(address, [])
-                peak_mc_stored = 0
-                for e in stored_entries:
-                    peak_mc_stored = max(peak_mc_stored, e.get("peak_mc", 0))
-                best_mc = peak_mc_stored if peak_mc_stored > 0 else current_mc
-                if mc > 0 and best_mc > 0:
-                    mult = best_mc / mc
-                    mult_str = f"({mult:.1f}x)" if mult >= 1.1 else ""
-                else:
-                    mult_str = ""
-                medal = medals[i] if i < len(medals) else "•"
-                # Skip entries with no useful data
-                if mc_str == "N/A" and who == "Unknown" and grp in ("discord", "telegram"):
-                    continue
-                context_block += f"\n{medal} *{grp}* — *{who}* — *{mc_str}{mult_str}* — *{ts}*"
-
-        if token:
-            vol    = token["volume_24h"]
-            mc     = token["market_cap"]
-            chg    = token["change_24h"]
-            price  = token["price"]
-            ticker = f"${token['symbol']}" if token.get("symbol") else ""
-            name   = token["name"]
-
-            def fmt2(n):
-                if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
-                if n >= 1_000: return f"{n/1_000:.1f}K"
-                return str(n)
-
-            chg_icon = "📈" if chg >= 0 else "📉"
-            dex_id   = token.get("dex_id") or ""
-            platform_label = dex_id.title() if dex_id else chain_display_name(actual_chain)
-
-            msg = (
-                f"👤 {sender} in [{group_name}]({mirror_link or get_group_link(group_name)})\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"🪙 *{name}*  | *{fmt2(mc)}* | *{ticker}*\n"
-                f"💊 {chain_display_name(actual_chain)} @ {platform_label}\n"
-                f"🕐 Age: {token.get('age', '?')}\n"
-                f"💵 USD: `{price:.8f}`\n"
-                f"💎 FDV: *{fmt2(mc)}{fdv_ath_suffix}*\n"
-                f"{scan_line}"
-                f"\n`{address}`\n"
-                f"\n🔗 {trading_links}"
-                f"{context_block}"
-            )
-            image_url = token.get("image_url", "")
-        else:
-            # No token data — best-effort chain guess from the regex label.
-            chain_lbl = "◎ SOL" if chain == "SOL" else "Ξ EVM"
-            msg = (
-                f"👤 {sender} in *{group_name}*\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"{chain_lbl} Contract\n"
-                f"\n`{address}`\n"
-                f"\n🔗 {trading_links}"
-                f"{context_block}"
-            )
-            image_url = ""
-
-        await send_ping(msg, image_url)
+        sent = await send_ping(msg, image_url)
+        if will_recheck:
+            schedule_recheck(address, chain, header, sent,
+                             source="telegram", group_name=group_name)
         # Side-channel: forward to filtered channel if group + mc match. Fire-and-forget.
         asyncio.create_task(maybe_forward(msg, image_url, group_name, mc, address))
 

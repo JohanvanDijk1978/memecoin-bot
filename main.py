@@ -13,6 +13,8 @@ Entrypoint — runs all the bot's async loops concurrently:
      same token inside the configured window (Solana + EVM, own channel)
   9. Long.xyz watcher — alerts the moment a new stock becomes pairable on
      Long, and when Robinhood deploys a new tokenised stock upstream of it
+ 10. CA re-check loop — re-enriches pings that went out before Dexscreener
+     had the token, and edits the original alert in place
 """
 
 import asyncio
@@ -73,6 +75,12 @@ async def run_long():
     await run_long_watcher()
 
 
+async def run_ca_recheck():
+    """Re-enrich CA pings that had no market data when they were sent."""
+    from src.ca_enrich import run_recheck_loop
+    await run_recheck_loop()
+
+
 async def run_bot():
     """Start the Telegram bot that handles /status, /leaderboard, /pump."""
     from src.bot import build_bot_app, register_commands
@@ -121,12 +129,14 @@ async def main():
         run_milestone_tracker(),
         run_multiwallet(),
         run_long(),
+        run_ca_recheck(),
         return_exceptions=True,
     )
 
     for name, result in zip(
         ["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher",
-         "dex_watcher_evm", "milestone_tracker", "multiwallet", "long_watcher"],
+         "dex_watcher_evm", "milestone_tracker", "multiwallet", "long_watcher",
+         "ca_recheck"],
         results,
     ):
         if isinstance(result, Exception):
