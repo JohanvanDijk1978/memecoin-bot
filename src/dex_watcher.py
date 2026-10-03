@@ -9,7 +9,7 @@ channel whenever a project pays for either:
   2. Community Takeover (CTO) claim
      → https://api.dexscreener.com/community-takeovers/latest/v1
 
-Only Solana tokens older than DEX_WATCHER_MIN_AGE_HOURS (default 24) are alerted.
+Only Solana tokens older than DEX_WATCHER_MIN_AGE_HOURS (default 3) are alerted.
 Every qualifying token is alerted — no filter by whether the token was seen
 by the group scrapers.
 
@@ -47,7 +47,7 @@ CHANNEL_ID          = os.getenv("DEX_UPDATES_CHANNEL_ID", "")
 COMBINED_CHANNEL_ID = os.getenv("DEX_UPDATES_COMBINED_CHANNEL_ID", "")
 DISCORD_WEBHOOK     = os.getenv("DEX_UPDATES_DISCORD_WEBHOOK", "")
 POLL_SECONDS        = int(os.getenv("DEX_WATCHER_POLL_SECONDS", "30"))
-MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_MIN_AGE_HOURS", "24"))
+MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_MIN_AGE_HOURS", "3"))
 # If a token was alerted more than REALERT_HOURS ago and reappears in the
 # Dexscreener feed, treat it as a new paid update and alert again. Keeps
 # dedup for the "same paid update still visible in the feed" case while
@@ -115,34 +115,52 @@ async def _fetch_feed(session: aiohttp.ClientSession, url: str) -> list:
         return []
 
 
-# pump.fun API — used as a fallback when Dexscreener doesn't populate
-# `pairCreatedAt` (common for bonding-curve tokens). Cache successful lookups
-# for the process lifetime — token creation times don't change.
-PUMPFUN_URL = "https://frontend-api-v3.pump.fun/coins/{address}"
-_pumpfun_cache: dict = {}
+# On-chain mint age — the mint's oldest transaction. Dexscreener's
+# `pairCreatedAt` is the age of a POOL: a pump.fun coin from 2024 that migrates
+# to PumpSwap today shows one pair 30 minutes old and a bonding-curve pair with
+# no timestamp at all, so the pairs alone call it brand new. (The pump.fun
+# coins API this used to ask now 404s for every mint.) Cached for the process
+# lifetime — creation times don't change.
+SOLANA_RPC = os.getenv("SOLANA_RPC", "") or "https://api.mainnet-beta.solana.com"
+# ponytail: 20 pages = the newest 20k transactions. A coin busier than that
+# since its first trade reads younger than it is; an indexer is the upgrade.
+MINT_AGE_MAX_PAGES = 20
+_mint_created_cache: dict = {}
 
 
-async def _fetch_pumpfun_created(session: aiohttp.ClientSession, address: str) -> int:
-    """Return the pump.fun creation timestamp in ms, or 0 if unavailable.
-    Silent on 404 (not a pump.fun mint) — those are expected for non-pumpfun tokens."""
-    cached = _pumpfun_cache.get(address)
+async def _fetch_mint_created(session: aiohttp.ClientSession, address: str) -> int:
+    """Return the block time (ms) of the oldest transaction found for the mint,
+    or 0 if unavailable. Walks getSignaturesForAddress backwards."""
+    cached = _mint_created_cache.get(address)
     if cached:
         return cached
+    oldest, before = 0, None
     try:
-        async with session.get(
-            PUMPFUN_URL.format(address=address),
-            timeout=aiohttp.ClientTimeout(total=8),
-        ) as resp:
-            if resp.status != 200:
-                return 0
-            data = await resp.json()
-        ts = int(data.get("created_timestamp") or 0)
-        if ts:
-            _pumpfun_cache[address] = ts
-        return ts
+        for _ in range(MINT_AGE_MAX_PAGES):
+            opts = {"limit": 1000}
+            if before:
+                opts["before"] = before
+            async with session.post(
+                SOLANA_RPC,
+                json={"jsonrpc": "2.0", "id": 1,
+                      "method": "getSignaturesForAddress", "params": [address, opts]},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    break
+                rows = (await resp.json()).get("result") or []
+            if not rows:
+                break
+            oldest = int(rows[-1].get("blockTime") or 0) or oldest
+            before = rows[-1]["signature"]
+            if len(rows) < 1000:
+                break
+            await asyncio.sleep(0.3)
     except Exception as e:
-        logger.warning(f"dex_watcher: pump.fun fetch failed for {address}: {e}")
-        return 0
+        logger.warning(f"dex_watcher: mint age fetch failed for {address}: {e!r}")
+    if oldest:
+        _mint_created_cache[address] = oldest * 1000
+    return oldest * 1000
 
 
 async def _fetch_pair_data(session: aiohttp.ClientSession, address: str) -> Optional[dict]:
@@ -166,11 +184,13 @@ async def _fetch_pair_data(session: aiohttp.ClientSession, address: str) -> Opti
         created_times = [int(p.get("pairCreatedAt") or 0) for p in pairs if p.get("pairCreatedAt")]
         oldest_pair_ms = min(created_times) if created_times else int(best.get("pairCreatedAt") or 0)
 
-        # Fallback: bonding-curve pump.fun pairs often have no pairCreatedAt.
-        # Ask pump.fun directly. This covers pre-graduation tokens and post-
-        # graduation tokens whose Dex metadata is incomplete.
-        if oldest_pair_ms == 0:
-            oldest_pair_ms = await _fetch_pumpfun_created(session, address)
+        # The pairs say "too young" (or nothing): ask the chain before
+        # believing it. Only then — a token the pairs already clear costs no RPC.
+        pair_age_h = _age_hours(oldest_pair_ms)
+        if pair_age_h is None or pair_age_h < MIN_AGE_HOURS:
+            mint_ms = await _fetch_mint_created(session, address)
+            if mint_ms and (not oldest_pair_ms or mint_ms < oldest_pair_ms):
+                oldest_pair_ms = mint_ms
 
         return {
             "symbol":         (best.get("baseToken") or {}).get("symbol") or "?",
