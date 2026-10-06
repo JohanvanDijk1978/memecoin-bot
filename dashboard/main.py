@@ -766,6 +766,22 @@ def mirror_feed(limit: int = 40):
         return {"messages": [], "error": str(e)}
 
 
+PADRE_FEED = Path(os.environ.get("PADRE_FEED", BASE_DIR.parent / "data" / "padre_feed.jsonl"))
+
+
+@app.get("/api/padre-feed")
+def padre_feed(limit: int = 40):
+    """Latest bot events for the Padre browser extension, one JSON object per line
+    as the bot wrote them (today: milestone pumps). Oldest first."""
+    if not PADRE_FEED.exists():
+        return {"events": []}
+    try:
+        lines = PADRE_FEED.read_text(encoding="utf-8").strip().splitlines()[-limit:]
+        return {"events": [json.loads(ln) for ln in lines if ln.strip()]}
+    except Exception as e:
+        return {"events": [], "error": str(e)}
+
+
 @app.get("/api/health")
 def health():
     with db() as c:

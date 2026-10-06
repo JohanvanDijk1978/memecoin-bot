@@ -40,6 +40,7 @@ BOT_TOKEN       = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_API    = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 MILESTONES_FILE = "data/dex_milestones.json"
+PADRE_FEED_FILE = "data/padre_feed.jsonl"  # one event per line; memedash serves it at /api/padre-feed
 
 
 def _channel_for_chain(chain: str) -> str:
@@ -92,6 +93,22 @@ def _save(state: dict) -> None:
 
 _state: dict = _load()
 _save_lock = asyncio.Lock()
+
+
+def _padre_feed(entry: dict, address: str, multiplier: int, current_mc: float) -> None:
+    """Append the milestone to the feed the Padre browser extension polls through
+    the dashboard. Best effort: a failure here must never cost the Telegram reply.
+    ponytail: append-only, never trimmed — ~100 bytes per pump, years before it matters."""
+    try:
+        with open(PADRE_FEED_FILE, "a") as f:
+            f.write(json.dumps({
+                "ts": time.time(), "kind": "pump", "address": address,
+                "ticker": entry.get("ticker", ""), "name": entry.get("name", ""),
+                "chain": entry.get("chain", "solana"), "mult": multiplier,
+                "initial_mc": entry.get("initial_mc", 0), "current_mc": current_mc,
+            }) + "\n")
+    except Exception as e:
+        logger.warning(f"milestone_tracker: padre feed write failed: {e}")
 
 
 # ── Public registration API (called by dex_watcher) ───────────────────────
@@ -337,6 +354,7 @@ async def _process(session: aiohttp.ClientSession) -> int:
                 _reply_telegram(session, text, combined_msg_id, combined_id)
             )
         await asyncio.gather(*replies)
+        _padre_feed(entry, address, milestone, current_mc)
 
         # Mark ALL milestones up to and including this one as hit — so if we
         # jumped from 1x to 10x we don't retroactively announce 2/3/5.
