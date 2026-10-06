@@ -9,7 +9,7 @@ channel whenever a project pays for either:
   2. Community Takeover (CTO) claim
      → https://api.dexscreener.com/community-takeovers/latest/v1
 
-Only Solana tokens older than DEX_WATCHER_MIN_AGE_HOURS (default 3) are alerted.
+Only Solana tokens older than DEX_WATCHER_MIN_AGE_HOURS (default 1.5) are alerted.
 Every qualifying token is alerted — no filter by whether the token was seen
 by the group scrapers.
 
@@ -47,7 +47,7 @@ CHANNEL_ID          = os.getenv("DEX_UPDATES_CHANNEL_ID", "")
 COMBINED_CHANNEL_ID = os.getenv("DEX_UPDATES_COMBINED_CHANNEL_ID", "")
 DISCORD_WEBHOOK     = os.getenv("DEX_UPDATES_DISCORD_WEBHOOK", "")
 POLL_SECONDS        = int(os.getenv("DEX_WATCHER_POLL_SECONDS", "30"))
-MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_MIN_AGE_HOURS", "3"))
+MIN_AGE_HOURS       = float(os.getenv("DEX_WATCHER_MIN_AGE_HOURS", "1.5"))
 # If a token was alerted more than REALERT_HOURS ago and reappears in the
 # Dexscreener feed, treat it as a new paid update and alert again. Keeps
 # dedup for the "same paid update still visible in the feed" case while
