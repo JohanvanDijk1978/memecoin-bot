@@ -89,12 +89,6 @@ def _save_seen(seen: dict) -> None:
 _seen: dict = _load_seen()
 _save_lock = asyncio.Lock()
 
-# Per-token "don't re-check until" timestamps for tokens skipped because they
-# were too young. In-memory only — on restart we'll re-poll each once and
-# repopulate. Keeps us from hammering Dexscreener with the same young-token
-# check every 10s for hours until it ages past MIN_AGE_HOURS.
-_age_gated: dict = {}  # address -> unix_ts_when_eligible_to_recheck
-
 
 # ── Dexscreener client ────────────────────────────────────────────────────
 async def _fetch_feed(session: aiohttp.ClientSession, url: str) -> list:
@@ -490,13 +484,6 @@ async def _process_feed(session: aiohttp.ClientSession, feed: list, event_type: 
             continue
         # else: never seen OR seen long enough ago to count as a fresh paid update
 
-        # If we recently determined this token was too young, skip silently
-        # until the deadline passes. Avoids re-hitting Dexscreener every 10s
-        # for hours on a coin that's obviously not going to qualify yet.
-        gate_deadline = _age_gated.get(address, 0)
-        if gate_deadline and time.time() < gate_deadline:
-            continue
-
         market = await _fetch_pair_data(session, address)
         age_h = _age_hours((market or {}).get("pair_created_ms") if market else None)
 
@@ -505,18 +492,15 @@ async def _process_feed(session: aiohttp.ClientSession, feed: list, event_type: 
             logger.info(f"dex_watcher: skip {address} ({event_type}) — no age data")
             continue
         if age_h < MIN_AGE_HOURS:
-            # Compute when this token will be eligible; skip until then to
-            # spare Dexscreener API budget. 5-minute lead-in so we catch the
-            # transition slightly early rather than exactly at the threshold.
-            hours_until_eligible = MIN_AGE_HOURS - age_h
-            _age_gated[address] = time.time() + max(60, (hours_until_eligible - 0.083) * 3600)
+            # Too young when it paid: drop this update for good, don't hold it
+            # and alert an hour late once the coin ages in. Marked seen so the
+            # entry lingering in the feed (or a restart) can't revive it.
+            _seen[seen_key] = time.time()
             logger.info(
-                f"dex_watcher: skip {address} ({event_type}) — "
-                f"{age_h:.1f}h < {MIN_AGE_HOURS}h, gated for {hours_until_eligible:.1f}h"
+                f"dex_watcher: drop {address} ({event_type}) — "
+                f"{age_h:.1f}h < {MIN_AGE_HOURS}h"
             )
             continue
-        # Cleared the age gate — no need to keep the entry around.
-        _age_gated.pop(address, None)
 
         ok = await _send_alert(profile, market, event_type)
         if ok:
@@ -548,15 +532,18 @@ async def run_dex_watcher() -> None:
 
     while True:
         try:
+            seen_before = dict(_seen)
             async with aiohttp.ClientSession() as session:
                 profiles = await _fetch_feed(session, PROFILES_URL)
                 p_sent   = await _process_feed(session, profiles, "profile_update")
                 ctos     = await _fetch_feed(session, CTO_URL)
                 c_sent   = await _process_feed(session, ctos, "cto")
 
-            if p_sent or c_sent:
+            # Alerts and too-young drops both land in _seen.
+            if _seen != seen_before:
                 async with _save_lock:
                     _save_seen(_seen)
+            if p_sent or c_sent:
                 logger.info(f"dex_watcher: sent {p_sent} profile + {c_sent} cto alerts")
         except Exception as e:
             logger.warning(f"dex_watcher: iteration failed: {e}")

@@ -79,6 +79,25 @@ async def main():
          "pairCreatedAt": (NOW - 72 * 3600) * 1000}]})
     await dw._fetch_pair_data(s2, "MintClear")
     assert s2.rpc_calls == []
+
+    # too young when it paid: dropped, and still dropped once it has aged in
+    age_ms = {"v": (NOW - 600) * 1000}
+    alerts = []
+
+    async def fake_pair(session, address):
+        return {"symbol": "Y", "pair_created_ms": age_ms["v"]}
+
+    async def fake_alert(profile, market, event_type):
+        alerts.append(profile["tokenAddress"])
+        return True
+
+    dw._fetch_pair_data, dw._send_alert = fake_pair, fake_alert
+    dw._seen.clear()
+    feed = [{"chainId": "solana", "tokenAddress": "MintYoung"}]
+    assert await dw._process_feed(None, feed, "profile_update") == 0
+    age_ms["v"] = (NOW - 5 * 3600) * 1000
+    assert await dw._process_feed(None, feed, "profile_update") == 0
+    assert alerts == []
     print("ok")
 
 
