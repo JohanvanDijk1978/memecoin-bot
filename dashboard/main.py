@@ -36,7 +36,7 @@ HISTORY_FILE = Path(os.environ.get("HISTORY_FILE", BASE_DIR.parent / "data" / "c
 DB_FILE = Path(os.environ.get("DASH_DB", BASE_DIR / "data" / "dash.db"))
 DASH_PASSWORD = os.environ.get("DASH_PASSWORD", "")
 
-INGEST_INTERVAL = 2           # s — just an mtime stat unless the file changed
+INGEST_INTERVAL = 0.5         # s — just an mtime stat unless the file changed; the Padre extension waits on it
 PEAK_INTERVAL = 300           # s between poll rounds
 ACTIVE_WINDOW = 48 * 3600     # poll tokens called within this window
 STALE_RECHECK = 24 * 3600     # older tokens: once a day
