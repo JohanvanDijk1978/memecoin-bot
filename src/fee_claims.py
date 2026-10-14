@@ -126,10 +126,26 @@ async def social_coins(http, pda, limit=30):
     return out
 
 
-async def embed(http, ev, sig, val, unit, coins):
+PADRE_FEED_FILE = "data/padre_feed.jsonl"  # one event per line, next to the milestone pumps; memedash serves it at /api/padre-feed
+
+
+def _padre_feed(ev, gh, val, unit, coins, sig) -> None:
+    """Append the claim to the feed the Padre browser extension polls through the dashboard.
+    Best effort: a failure here must never cost the Discord alert. ts is the write time, so the
+    extension (which reads past its newest ts) never skips a claim whose block is older than a pump."""
+    try:
+        with open(PADRE_FEED_FILE, "a") as f:
+            f.write(json.dumps({"ts": time.time(), "kind": "claim", "claimed_at": ev["ts"], "github": gh,
+                                "user_id": ev["user_id"], "amount": val, "unit": unit,
+                                "coins": [{"mint": m, "name": n} for m, n in coins],
+                                "recipient": ev["recipient"], "sig": sig}) + "\n")
+    except Exception as e:
+        logger.warning("fee_claims: padre feed write failed: %s", e)
+
+
+async def embed(http, ev, sig, val, unit, coins, gh):
     tx = f"https://solscan.io/tx/{sig}"
     base = {"url": tx, "color": 0x2ECC71, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ev["ts"]))}
-    gh = (await get_json(http, f"https://api.github.com/user/{ev['user_id']}") or {}).get("login")
     who = f"[{gh}](https://github.com/{gh})" if gh else f"GitHub id {ev['user_id']}"
     links = " · ".join(f"[{name}]({TRADE_URL.format(mint=m)})" for m, name in coins)
     if coins:  # title and picture: the coin that paid in the most recently
@@ -154,7 +170,10 @@ async def handle(http, sig, logs, post=True):
         # first claim ever by this GitHub account: its lifetime total is just this claim
         if ev["lifetime_stable" if unit == "USDC" else "lifetime"] > ev["raw"]:
             continue
-        e = await embed(http, ev, sig, val, unit, await social_coins(http, ev["pda"]))
+        gh = (await get_json(http, f"https://api.github.com/user/{ev['user_id']}") or {}).get("login")
+        coins = await social_coins(http, ev["pda"])
+        e = await embed(http, ev, sig, val, unit, coins, gh)
+        _padre_feed(ev, gh, val, unit, coins, sig)
         logger.info("fee_claims: %.2f %s by GitHub %s %s", val, unit, ev["user_id"], sig)
         if post:
             async with http.post(WEBHOOK, json={"embeds": [e]}) as r:
