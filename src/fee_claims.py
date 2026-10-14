@@ -5,12 +5,12 @@ Discord alert when a GitHub account claims pump.fun creator fees for the first t
 
 pump.fun coins can route creator fees to a GitHub account ("fee sharing"). When the account withdraws them the
 Pump Fees program emits SocialFeePdaClaimed (all its coins at once). Every such claim is signed by one
-social_claim_authority, so subscribing to that address gives a stream of only claims — cheap on the paid Alchemy
-socket. Layouts are from https://github.com/pump-fun/pump-public-docs (idl/pump.json, idl/pump_fees.json).
+social_claim_authority, so polling that address's history gives only claims. Layouts are from
+https://github.com/pump-fun/pump-public-docs (idl/pump.json, idl/pump_fees.json).
 Ported from SolanaVolume/fee_claims.py.
 
 Env: FEE_CLAIM_DISCORD_WEBHOOK (required), FEE_CLAIM_MIN_SOL (1), FEE_CLAIM_MIN_USDC (200),
-FEE_CLAIM_BLACKLIST (recipient wallets / numeric GitHub ids, comma-separated), FEE_CLAIM_WS_URL (override).
+FEE_CLAIM_BLACKLIST (recipient wallets / numeric GitHub ids, comma-separated), FEE_CLAIM_POLL_S (3).
 """
 
 import asyncio
@@ -23,7 +23,7 @@ import time
 
 import aiohttp
 
-from src.multiwallet_sources import solana_rpcs, solana_wss, _to_wss  # also loads fomo/.env for the RPC keys
+from src.multiwallet_sources import solana_rpcs  # also loads fomo/.env for the RPC keys
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +38,10 @@ PUMP_HEADERS = {"Origin": "https://pump.fun", "Referer": "https://pump.fun/", "U
 WEBHOOK = os.getenv("FEE_CLAIM_DISCORD_WEBHOOK", "").strip()
 MIN_SOL = float(os.getenv("FEE_CLAIM_MIN_SOL") or 1)
 MIN_USDC = float(os.getenv("FEE_CLAIM_MIN_USDC") or 200)
+POLL_S = float(os.getenv("FEE_CLAIM_POLL_S") or 3)
 BLACKLIST = {w.strip() for w in (os.getenv("FEE_CLAIM_BLACKLIST") or "").split(",") if w.strip()}
 
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-
-
-def ws_url() -> str:
-    """The Alchemy socket when an Alchemy RPC is configured (paid, steady), else the bot's usual Solana socket."""
-    alchemy = next((u for u in solana_rpcs() if "alchemy.com" in u), "")
-    return os.getenv("FEE_CLAIM_WS_URL", "").strip() or _to_wss(alchemy) or solana_wss() \
-        or "wss://api.mainnet-beta.solana.com"
 
 
 def b58(b: bytes) -> str:
@@ -107,7 +101,8 @@ async def rpc(http, method, params):
 
 
 async def get_tx(http, sig):
-    return await rpc(http, "getTransaction", [sig, {"encoding": "json", "maxSupportedTransactionVersion": 0}])
+    return await rpc(http, "getTransaction", [sig, {"encoding": "json", "commitment": "confirmed",
+                                                "maxSupportedTransactionVersion": 0}])
 
 
 async def social_coins(http, pda, limit=30):
@@ -191,22 +186,27 @@ async def run_fee_claims():
         g = await rpc(http, "getAccountInfo", [FEE_GLOBAL, {"encoding": "base64"}])
         # disc 8, bump 1, authority 32, disable_flags 1, social_claim_authority 32
         authority = b58(base64.b64decode(g["value"]["data"][0])[42:74])
-        url = ws_url()
-        logger.info("fee_claims: watching GitHub claims >= %g SOL / %g USDC on %s",
-                    MIN_SOL, MIN_USDC, url.split("/v2/")[0].split("?")[0])
-        sub = {"jsonrpc": "2.0", "id": 1, "method": "logsSubscribe",
-               "params": [{"mentions": [authority]}, {"commitment": "confirmed"}]}
+        # Polls the authority's history instead of a logsSubscribe socket: Alchemy's socket silently skipped claims
+        # (2026-10-14: 4.05 SOL at 19:42 and 70.56 SOL at 23:51, connection up, no error). ~40 claims/hour, so this
+        # is one cheap call per poll plus one getTransaction per new claim.
+        hist = [authority, {"limit": 100, "commitment": "confirmed"}]
+        seen = {s["signature"] for s in await rpc(http, "getSignaturesForAddress", hist) or []}
+        logger.info("fee_claims: polling GitHub claims >= %g SOL / %g USDC every %gs", MIN_SOL, MIN_USDC, POLL_S)
         while True:
-            # ponytail: claims landing during a reconnect are missed; backfill with getSignaturesForAddress if needed.
+            await asyncio.sleep(POLL_S)
             try:
-                async with http.ws_connect(url, heartbeat=30) as ws:
-                    await ws.send_json(sub)
-                    async for m in ws:
-                        if m.type != aiohttp.WSMsgType.TEXT or "ClaimSocialFeePda" not in m.data:
-                            continue
-                        v = json.loads(m.data)["params"]["result"]["value"]
-                        if v["err"] is None:
-                            await handle(http, v["signature"], v["logs"])
+                sigs = await rpc(http, "getSignaturesForAddress", hist)
+                if not sigs:
+                    continue
+                for s in reversed(sigs):  # oldest first
+                    if s["signature"] in seen:
+                        continue
+                    tx = None if s.get("err") else await get_tx(http, s["signature"])
+                    if s.get("err") or tx:  # a failed fetch stays unseen and is retried next poll
+                        seen.add(s["signature"])
+                    if tx:
+                        await handle(http, s["signature"], tx["meta"]["logMessages"] or [])
+                # ponytail: more than 100 claims between two polls would skip the oldest; page with "before" if so
+                seen &= {s["signature"] for s in sigs}
             except Exception as e:
-                logger.warning("fee_claims: stream dropped (%r); reconnecting", e)
-            await asyncio.sleep(2)
+                logger.warning("fee_claims: poll failed (%r)", e)
