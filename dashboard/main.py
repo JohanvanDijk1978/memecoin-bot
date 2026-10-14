@@ -36,7 +36,7 @@ HISTORY_FILE = Path(os.environ.get("HISTORY_FILE", BASE_DIR.parent / "data" / "c
 DB_FILE = Path(os.environ.get("DASH_DB", BASE_DIR / "data" / "dash.db"))
 DASH_PASSWORD = os.environ.get("DASH_PASSWORD", "")
 
-INGEST_INTERVAL = 0.5         # s — just an mtime stat unless the file changed; the Padre extension waits on it
+INGEST_INTERVAL = 0.1         # s — just an mtime stat unless the file changed; the Padre extension waits on it
 PEAK_INTERVAL = 300           # s between poll rounds
 ACTIVE_WINDOW = 48 * 3600     # poll tokens called within this window
 STALE_RECHECK = 24 * 3600     # older tokens: once a day
@@ -178,13 +178,24 @@ def _notify_subscribers(msg: str = "new"):
             q.put_nowait(msg)
 
 
+def _fresh_rows(seconds: float = 120) -> list:
+    """The call rows that changed in the last `seconds`, in /api/calls' row shape. They ride the
+    stream, so the Padre extension alerts from them without asking again."""
+    now = time.time()
+    return [_row_json(r) for r in fetch_calls(days=1) if r["activity_at"] > now - seconds][:20]
+
+
 async def ingest_loop():
     while True:
         try:
             n = await asyncio.to_thread(ingest_history)
             if n:
                 log.info(f"ingested {n} call rows")
-                _notify_subscribers()
+                try:
+                    _notify_subscribers(json.dumps({"rows": await asyncio.to_thread(_fresh_rows)}))
+                except Exception as e:  # the word alone still gets the rows fetched
+                    log.warning(f"fresh rows for the stream: {e}")
+                    _notify_subscribers()
         except Exception as e:
             log.warning(f"ingest error: {e}")
         await asyncio.sleep(INGEST_INTERVAL)
@@ -584,18 +595,23 @@ def calls_explorer(q: str = "", caller: str = "", group: str = "", chain: str = 
         for d in extras.values():
             d["history"].sort(key=lambda h: h["called_at"])
     return {"total": total, "page": page,
-            "rows": [{"address": r["address"], "ticker": r["tick"], "chain": r["chain_label"],
-                      "chain_id": r["dex_chain"],
-                      "group": r["group_name"], "caller": r["sender_name"],
-                      "caller_key": r["caller_key"], "source": r["source"],
-                      "first_mc": r["first_mc"], "eff_peak": r["eff_peak"],
-                      "current_mc": r["current_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,
-                      "scan_count": r["scan_count"], "called_at": r["called_at"],
-                      "activity_at": r["activity_at"],
-                      "rescan": r["activity_at"] > r["called_at"],
-                      "dead": r["dead"],
+            "rows": [{**_row_json(r),
                       **extras.get(r["address"], {"groups_n": 1, "scans_total": r["scan_count"], "history": []}),
                       } for r in rows]}
+
+
+def _row_json(r) -> dict:
+    """One fetch_calls row as /api/calls (and the stream) hand it out."""
+    return {"address": r["address"], "ticker": r["tick"], "chain": r["chain_label"],
+            "chain_id": r["dex_chain"],
+            "group": r["group_name"], "caller": r["sender_name"],
+            "caller_key": r["caller_key"], "source": r["source"],
+            "first_mc": r["first_mc"], "eff_peak": r["eff_peak"],
+            "current_mc": r["current_mc"], "mult": round(r["mult"], 2) if r["mult"] else None,
+            "scan_count": r["scan_count"], "called_at": r["called_at"],
+            "activity_at": r["activity_at"],
+            "rescan": r["activity_at"] > r["called_at"],
+            "dead": r["dead"]}
 
 
 async def _live_refresh(address: str) -> dict:
