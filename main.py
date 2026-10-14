@@ -15,6 +15,8 @@ Entrypoint — runs all the bot's async loops concurrently:
      Long, and when Robinhood deploys a new tokenised stock upstream of it
  10. CA re-check loop — re-enriches pings that went out before Dexscreener
      had the token, and edits the original alert in place
+ 11. pump.fun GitHub fee claim watcher — alerts a GitHub account's first
+     creator fee claim (own Discord webhook)
 """
 
 import asyncio
@@ -81,6 +83,12 @@ async def run_ca_recheck():
     await run_recheck_loop()
 
 
+async def run_fee_claims():
+    """Start the pump.fun GitHub fee claim watcher (own Discord webhook)."""
+    from src.fee_claims import run_fee_claims as _run
+    await _run()
+
+
 async def run_bot():
     """Start the Telegram bot that handles /status, /leaderboard, /pump."""
     from src.bot import build_bot_app, register_commands
@@ -130,13 +138,14 @@ async def main():
         run_multiwallet(),
         run_long(),
         run_ca_recheck(),
+        run_fee_claims(),
         return_exceptions=True,
     )
 
     for name, result in zip(
         ["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher",
          "dex_watcher_evm", "milestone_tracker", "multiwallet", "long_watcher",
-         "ca_recheck"],
+         "ca_recheck", "fee_claims"],
         results,
     ):
         if isinstance(result, Exception):
