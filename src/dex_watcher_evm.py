@@ -109,20 +109,8 @@ def _chain_pretty(chain: str) -> str:
 
 
 # ── Dexscreener client ────────────────────────────────────────────────────
-async def _fetch_feed(session: aiohttp.ClientSession, url: str) -> list:
-    try:
-        await dex_wait()
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:
-                logger.warning(f"dex_watcher_evm: feed {url} returned {resp.status}")
-                return []
-            data = await resp.json()
-            if isinstance(data, list):
-                return data
-            return data.get("data", []) or []
-    except Exception as e:
-        logger.warning(f"dex_watcher_evm: feed fetch failed for {url}: {e}")
-        return []
+# Same feeds as the Solana watcher — share its fetch rather than ask twice.
+from .dex_watcher import _fetch_feed  # noqa: E402
 
 
 async def _fetch_pair_data(session: aiohttp.ClientSession, address: str) -> Optional[dict]:

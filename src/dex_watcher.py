@@ -91,8 +91,29 @@ _save_lock = asyncio.Lock()
 
 
 # ── Dexscreener client ────────────────────────────────────────────────────
+# The Solana and EVM watchers poll the same two feeds. Each fetch is shared
+# for FEED_SHARE_SECS, so the second watcher reuses the first one's copy
+# instead of asking Dexscreener again — two callers were drawing 429s.
+FEED_SHARE_SECS = 20
+_feed_cache: dict = {}   # url -> (fetched_at, entries)
+_feed_locks: dict = {}   # url -> asyncio.Lock
+
+
 async def _fetch_feed(session: aiohttp.ClientSession, url: str) -> list:
-    """GET a Dexscreener paid feed. Returns [] on any error (logged)."""
+    """GET a Dexscreener paid feed, shared across watchers for FEED_SHARE_SECS.
+    Returns [] on any error (logged); failures aren't shared."""
+    lock = _feed_locks.setdefault(url, asyncio.Lock())
+    async with lock:
+        fetched_at, entries = _feed_cache.get(url, (0.0, []))
+        if time.time() - fetched_at < FEED_SHARE_SECS:
+            return entries
+        entries = await _get_feed(session, url)
+        if entries:
+            _feed_cache[url] = (time.time(), entries)
+        return entries
+
+
+async def _get_feed(session: aiohttp.ClientSession, url: str) -> list:
     try:
         await dex_wait()
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:

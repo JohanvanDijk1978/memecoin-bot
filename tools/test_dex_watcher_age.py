@@ -98,6 +98,23 @@ async def main():
     age_ms["v"] = (NOW - 5 * 3600) * 1000
     assert await dw._process_feed(None, feed, "profile_update") == 0
     assert alerts == []
+
+    # both watchers share one feed fetch inside FEED_SHARE_SECS
+    from src import dex_watcher_evm as evm
+    gets = []
+
+    class _FeedSession:
+        def get(self, url, **kw):
+            gets.append(url)
+            return _Resp([{"chainId": "solana", "tokenAddress": "A"}])
+
+    url = "https://example.test/feed"
+    a = await dw._fetch_feed(_FeedSession(), url)
+    b = await evm._fetch_feed(_FeedSession(), url)
+    assert a == b and len(gets) == 1, gets
+    dw._feed_cache[url] = (0.0, [])          # expired: fetch again
+    await evm._fetch_feed(_FeedSession(), url)
+    assert len(gets) == 2
     print("ok")
 
 
