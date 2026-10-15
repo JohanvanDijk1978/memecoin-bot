@@ -35,13 +35,19 @@ FRESH_S = 600  # a payment older than this was alerted by dex_watcher long ago
 
 
 def candidates(n: int = WATCH, path: str = CA_HISTORY) -> list:
-    """The n Solana coins the groups called last, newest call first."""
+    """The n Solana coins the groups called last, newest call first. The Dex watchers record their own alerts in
+    the same history (source dex_watcher*); those are not calls, and counting them made every Dex-paid alert
+    spawn a second, late one here (CHUNKEE, SAFEGUARD, 2026-10-15 22:49)."""
     try:
         with open(path) as f:
             hist = json.load(f)
     except Exception:
         return []
-    last = {a: max(e.get("timestamp") or 0 for e in es) for a, es in hist.items() if es and not a.startswith("0x")}
+    last = {}
+    for a, es in hist.items():
+        calls = [e.get("timestamp") or 0 for e in es if not str(e.get("source") or "").startswith("dex_watcher")]
+        if calls and not a.startswith("0x"):
+            last[a] = max(calls)
     return sorted(last, key=last.get, reverse=True)[:n]
 
 
@@ -61,6 +67,7 @@ async def alert(http, address: str, order: dict, paid: float) -> None:
     mc = float(market.get("market_cap") or market.get("fdv") or 0)
     ago, pending = int(time.time() - paid), order.get("status") == "processing"
     label = "Dex paid (pending)" if pending else f"Dex paid ({order.get('status')})"
+    state = "profile not live yet" if pending else "approved, not in the feed yet"
     try:
         with open(PADRE_FEED, "a") as f:
             f.write(json.dumps({"ts": time.time(), "kind": "dexpaid", "address": address, "chain": "solana",
@@ -69,9 +76,9 @@ async def alert(http, address: str, order: dict, paid: float) -> None:
         logger.warning("dex_orders: padre feed write failed: %s", e)
     logger.info("dex_orders: %s $%s %s paid %ds ago", label, sym, address, ago)
     caption = (f"💸 *{label}*: ${escape_md(sym)} — {fmt_usd(mc)} MC\n"
-               f"paid {ago}s ago, profile not live yet\n`{address}`")
+               f"paid {ago}s ago, {state}\n`{address}`")
     embed = {"title": f"💸 {label}: ${sym}", "url": f"https://dexscreener.com/solana/{address}", "color": 0xE74C3C,
-             "description": f"Profile order paid {ago}s ago, not live yet.\nMC {fmt_usd(mc)}\n`{address}`"}
+             "description": f"Profile order paid {ago}s ago, {state}.\nMC {fmt_usd(mc)}\n`{address}`"}
     await asyncio.gather(dw._send_telegram_alert(caption, "") if dw.CHANNEL_ID else asyncio.sleep(0),
                          dw._notify_discord(embed))
 
@@ -89,6 +96,8 @@ async def run_dex_orders_watcher() -> None:
                 await asyncio.sleep(10)
                 continue
             for address in todo:
+                if time.time() - (dw._seen.get(f"profile_update:{address}") or 0) < dw.REALERT_TTL_SECS:
+                    continue  # the profile is live and dex_watcher alerted it: nothing early left to say
                 try:
                     prof = await orders(http, address)
                 except Exception as e:
@@ -114,8 +123,10 @@ if __name__ == "__main__":  # python -m src.dex_orders_watcher
         [{"type": "tokenProfile", "status": "processing", "paymentTimestamp": 1000}]
     assert profile_orders([]) == [] and profile_orders({}) == []
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump({"A": [{"timestamp": 1}], "B": [{"timestamp": 5}, {"timestamp": 2}], "0xC": [{"timestamp": 9}], "D": []}, f)
-    assert candidates(path=f.name) == ["B", "A"], candidates(path=f.name)
+        json.dump({"A": [{"timestamp": 1}], "B": [{"timestamp": 5}, {"timestamp": 2}], "0xC": [{"timestamp": 9}], "D": [],
+                   "E": [{"timestamp": 8, "source": "dex_watcher"}],  # a scanner find, not a call
+                   "F": [{"timestamp": 7, "source": "dex_watcher_evm"}, {"timestamp": 3, "source": "telegram"}]}, f)
+    assert candidates(path=f.name) == ["B", "F", "A"], candidates(path=f.name)
     assert candidates(n=1, path=f.name) == ["B"]
     assert candidates(path="/nonexistent") == []
     os.unlink(f.name)
