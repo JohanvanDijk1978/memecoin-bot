@@ -185,6 +185,36 @@ def _fresh_rows(seconds: float = 120) -> list:
     return [_row_json(r) for r in fetch_calls(days=1) if r["activity_at"] > now - seconds][:20]
 
 
+_feed_seen = [-1]  # bytes of the Padre feed file already pushed on the stream; -1 = not looked yet
+
+
+def _fresh_feed() -> list:
+    """Events the bot appended to the Padre feed since the last look (pumps, GitHub fee claims). They ride
+    the stream too, so the extension needs no poll for them. The first look only takes a baseline."""
+    try:
+        size = PADRE_FEED.stat().st_size
+    except OSError:
+        return []
+    pos = _feed_seen[0]
+    if pos < 0 or size < pos:  # first look, or the file was rewritten
+        _feed_seen[0] = size
+        return []
+    if size == pos:
+        return []
+    with PADRE_FEED.open("rb") as f:
+        f.seek(pos)
+        chunk = f.read(size - pos)
+    end = chunk.rfind(b"\n") + 1  # a line still being written waits for its newline
+    _feed_seen[0] = pos + end
+    out = []
+    for ln in chunk[:end].decode("utf-8", "replace").splitlines():
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            pass
+    return out
+
+
 async def ingest_loop():
     while True:
         try:
@@ -196,6 +226,9 @@ async def ingest_loop():
                 except Exception as e:  # the word alone still gets the rows fetched
                     log.warning(f"fresh rows for the stream: {e}")
                     _notify_subscribers()
+            events = _fresh_feed()
+            if events:
+                _notify_subscribers(json.dumps({"feed": events}))
         except Exception as e:
             log.warning(f"ingest error: {e}")
         await asyncio.sleep(INGEST_INTERVAL)
