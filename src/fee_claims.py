@@ -214,11 +214,12 @@ async def handle(http, sig, logs, post=True):
 
 def embed_early(gh, user_id, val, unit, mint, name, sig):
     who = f"[{gh}](https://github.com/{gh})" if gh else f"GitHub id {user_id}"
-    return {"title": f"GitHub @{gh or user_id} is collecting {val:,.2f} {unit} from {name} — claim incoming",
+    return {"title": f"GitHub @{gh or user_id}: {val:,.2f} {unit} of {name} fees swept into their account, unclaimed",
             "url": TRADE_URL.format(mint=mint), "color": 0xF1C40F, "thumbnail": {"url": COIN_IMAGE.format(mint=mint)},
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "description": f"{who} swept [{name}]({TRADE_URL.format(mint=mint)})'s creator fees into their GitHub "
-                           f"account; the claim follows within seconds.\n[Sweep](https://solscan.io/tx/{sig})"}
+            "description": f"[{name}]({TRADE_URL.format(mint=mint)})'s creator fees were swept into {who}'s GitHub "
+                           f"account, which has never claimed. The claim can follow in seconds (DCITY: 4 s) or "
+                           f"hours.\n[Sweep](https://solscan.io/tx/{sig})"}
 
 
 async def early(http, pda, user_id, post=True):

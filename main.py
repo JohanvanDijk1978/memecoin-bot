@@ -89,6 +89,12 @@ async def run_fee_claims():
     await _run()
 
 
+async def run_dex_orders():
+    """Dexscreener profile payments on recently called coins, before the profile goes live."""
+    from src.dex_orders_watcher import run_dex_orders_watcher
+    await run_dex_orders_watcher()
+
+
 async def run_bot():
     """Start the Telegram bot that handles /status, /leaderboard, /pump."""
     from src.bot import build_bot_app, register_commands
@@ -139,13 +145,14 @@ async def main():
         run_long(),
         run_ca_recheck(),
         run_fee_claims(),
+        run_dex_orders(),
         return_exceptions=True,
     )
 
     for name, result in zip(
         ["telegram_scraper", "discord_scraper", "bot", "cleanup", "dex_watcher",
          "dex_watcher_evm", "milestone_tracker", "multiwallet", "long_watcher",
-         "ca_recheck", "fee_claims"],
+         "ca_recheck", "fee_claims", "dex_orders"],
         results,
     ):
         if isinstance(result, Exception):
