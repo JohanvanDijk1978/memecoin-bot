@@ -105,15 +105,22 @@ async def get_tx(http, sig):
                                                 "maxSupportedTransactionVersion": 0}])
 
 
-async def social_coins(http, pda, limit=30):
+async def social_coins(http, pda, sig="", logs=(), limit=30):
     """(mint, name) of coins that recently paid fees into a GitHub holding account, biggest payer first. The claim
-    event names no coin, so this reads the account's last `limit` transactions for payouts into it."""
+    event names no coin, so this reads the claim's own logs (claims often bundle the payout that funds them) and the
+    account's last `limit` transactions for payouts into it. "confirmed": the claim is handled seconds after it
+    lands, when the payouts just before it are not finalized yet (2026-10-15: 36.17 SOL claim showed no coin)."""
     paid = {}
-    for s in await rpc(http, "getSignaturesForAddress", [pda, {"limit": limit}]) or []:
-        tx = None if s.get("err") else await get_tx(http, s["signature"])
-        for ev in parse_events(tx["meta"]["logMessages"] or []) if tx else []:
+
+    def add(lines):
+        for ev in parse_events(lines):
             if ev["kind"] == "distribute":
                 paid[ev["mint"]] = paid.get(ev["mint"], 0) + sum(ev["raw"] * bps for a, bps in ev["holders"] if a == pda)
+
+    add(logs)
+    for s in await rpc(http, "getSignaturesForAddress", [pda, {"limit": limit, "commitment": "confirmed"}]) or []:
+        tx = None if s.get("err") or s["signature"] == sig else await get_tx(http, s["signature"])
+        add(tx["meta"]["logMessages"] or [] if tx else [])
     out = []
     for m in sorted((m for m in paid if paid[m]), key=lambda m: -paid[m])[:5]:
         c = await get_json(http, f"https://frontend-api-v3.pump.fun/coins-v2/{m}", headers=PUMP_HEADERS) or {}
@@ -166,7 +173,7 @@ async def handle(http, sig, logs, post=True):
         if ev["lifetime_stable" if unit == "USDC" else "lifetime"] > ev["raw"]:
             continue
         gh = (await get_json(http, f"https://api.github.com/user/{ev['user_id']}") or {}).get("login")
-        coins = await social_coins(http, ev["pda"])
+        coins = await social_coins(http, ev["pda"], sig, logs)
         e = await embed(http, ev, sig, val, unit, coins, gh)
         _padre_feed(ev, gh, val, unit, coins, sig)
         logger.info("fee_claims: %.2f %s by GitHub %s %s", val, unit, ev["user_id"], sig)
