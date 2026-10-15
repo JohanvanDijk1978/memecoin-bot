@@ -7,11 +7,12 @@ live 62 s and 117 s after payment, with the order still "processing"; 3 of 5 liv
 endpoint at all, so dex_watcher stays the complete source and this is the early one.
 
 The orders endpoint answers per coin only, 60 a minute, so this cycles through the Solana coins the groups
-called most recently (data/ca_history.json), about one a second. 0x addresses need a chain id the history
-does not hold: not watched.
+called most recently (data/ca_history.json), about one a second: the HOT newest calls every pass (~20 s),
+the rest of the WATCH newest in rotation, COLD_PER of them per pass (each every ~3 min). 0x addresses need
+a chain id the history does not hold: not watched.
 
-Env: DEX_ORDERS_WATCH (recent called coins to cycle through, default 60). Delivery reuses dex_watcher's
-Telegram channel and Discord webhook, and the Padre feed.
+Env: DEX_ORDERS_WATCH (recent called coins watched, 60), DEX_ORDERS_HOT (checked every pass, 15). Delivery
+reuses dex_watcher's Telegram channel and Discord webhook, and the Padre feed.
 """
 
 import asyncio
@@ -28,6 +29,8 @@ from .utils import dex_wait, escape_md, fmt_usd
 logger = logging.getLogger(__name__)
 
 WATCH = int(os.getenv("DEX_ORDERS_WATCH") or 60)
+HOT = int(os.getenv("DEX_ORDERS_HOT") or 15)
+COLD_PER = 5
 ORDERS_URL = "https://api.dexscreener.com/orders/v1/solana/{address}"
 CA_HISTORY = "data/ca_history.json"
 PADRE_FEED = "data/padre_feed.jsonl"
@@ -49,6 +52,13 @@ def candidates(n: int = WATCH, path: str = CA_HISTORY) -> list:
         if calls and not a.startswith("0x"):
             last[a] = max(calls)
     return sorted(last, key=last.get, reverse=True)[:n]
+
+
+def batch(todo: list, i: int, hot: int = HOT, step: int = COLD_PER) -> tuple:
+    """One pass: the hot newest coins plus the next `step` of the rest, and where the rotation continues."""
+    cold = todo[hot:]
+    i = i if i < len(cold) else 0
+    return todo[:hot] + cold[i:i + step], i + step
 
 
 def profile_orders(o) -> list:
@@ -87,14 +97,15 @@ async def run_dex_orders_watcher() -> None:
     if not (dw.CHANNEL_ID or dw.DISCORD_WEBHOOK):
         logger.info("dex_orders: no DEX_UPDATES channel — not started")
         return
-    started, seen = time.time(), {}  # address -> paymentTimestamp alerted
-    logger.info("dex_orders: armed — %d most recent called coins, one a second", WATCH)
+    started, seen, cold_i = time.time(), {}, 0  # seen: address -> paymentTimestamp alerted
+    logger.info("dex_orders: armed — %d most recent called coins, the newest %d every pass", WATCH, HOT)
     async with aiohttp.ClientSession() as http:
         while True:
             todo = candidates()
             if not todo:
                 await asyncio.sleep(10)
                 continue
+            todo, cold_i = batch(todo, cold_i)
             for address in todo:
                 if time.time() - (dw._seen.get(f"profile_update:{address}") or 0) < dw.REALERT_TTL_SECS:
                     continue  # the profile is live and dex_watcher alerted it: nothing early left to say
@@ -130,4 +141,10 @@ if __name__ == "__main__":  # python -m src.dex_orders_watcher
     assert candidates(n=1, path=f.name) == ["B"]
     assert candidates(path="/nonexistent") == []
     os.unlink(f.name)
+    todo = list(range(12))
+    assert batch(todo, 0, hot=3, step=4) == ([0, 1, 2, 3, 4, 5, 6], 4)
+    assert batch(todo, 4, hot=3, step=4) == ([0, 1, 2, 7, 8, 9, 10], 8)
+    assert batch(todo, 8, hot=3, step=4) == ([0, 1, 2, 11], 12)
+    assert batch(todo, 12, hot=3, step=4) == ([0, 1, 2, 3, 4, 5, 6], 4)  # wrapped
+    assert batch([1, 2], 7, hot=3, step=4) == ([1, 2], 4)  # fewer coins than hot: all of them, every pass
     print("ok")
