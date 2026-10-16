@@ -97,8 +97,15 @@ def parse_social_pda(data: bytes):
 
 
 SEEN: dict[str, float] = {}   # signature -> when handled, shared by the socket and the poll so neither repeats the other
-EARLY: dict[str, float] = {}  # holding account -> when its sweep was alerted; the claim that follows is then old news
+EARLY: dict[str, float] = {}  # holding account -> when its sweep was alerted; once per account, and the claim within 5 min is old news
 SWEPT: set = set()            # sweep signatures already read
+
+
+def pre_balance(tx, account: str) -> int:
+    """Lamports `account` held before `tx` (static keys first, then the looked-up ones, as preBalances lists them)."""
+    loaded = tx["meta"].get("loadedAddresses") or {}
+    keys = tx["transaction"]["message"]["accountKeys"] + loaded.get("writable", []) + loaded.get("readonly", [])
+    return tx["meta"]["preBalances"][keys.index(account)] if account in keys else 0
 
 
 async def get_json(http, url, body=None, headers=None):
@@ -251,6 +258,11 @@ async def early(http, pda, user_id, post=True):
         val, unit = amount(sum(paid.values()), quote)
         if not paid or val < (MIN_USDC if unit == "USDC" else MIN_SOL):
             continue
+        # a stocked account getting its routine payout is not news: a hot coin pays its GitHub account every few
+        # minutes (2026-10-16: 20 alerts in an hour). Only the payout that first brings the account past the
+        # threshold counts, and the claim alert covers the rest.
+        if pre_balance(tx, pda) >= MIN_SOL * 1e9:
+            continue
         mint = max(paid, key=paid.get)
         EARLY[pda] = time.time()
         gh, name = await asyncio.gather(github_login(http, user_id), coin_name(http, mint))
@@ -308,7 +320,8 @@ async def watch(http, authority):
                         prev, bal[v["pubkey"]] = bal.get(v["pubkey"]), acct["lamports"]
                         # never claimed, and gained MIN_SOL in one go, or first seen holding that much (an account
                         # quiet since the socket came up changes first on its sweep): the transaction decides
-                        if info and not info["lifetime"] and acct["lamports"] - (prev or 0) >= MIN_SOL * 1e9:
+                        if (info and not info["lifetime"] and v["pubkey"] not in EARLY
+                                and acct["lamports"] - (prev or 0) >= MIN_SOL * 1e9):
                             asyncio.create_task(_guarded(early(http, v["pubkey"], info["user_id"])))
                     elif d.get("method") == "logsNotification" and not v.get("err") and v.get("signature") not in SEEN:
                         SEEN[v["signature"]] = time.time()
@@ -363,4 +376,7 @@ if __name__ == "__main__":  # python -m src.fee_claims: the holding-account layo
     assert parse_social_pda(acct) == {"user_id": "11375221", "lifetime": 47963813311}
     assert parse_social_pda(bytes(179)) is None
     assert amount(47963813311, "") == (47.963813311, "SOL")
+    tx = {"transaction": {"message": {"accountKeys": ["A", "B"]}},
+          "meta": {"preBalances": [5, 1559560, 7], "loadedAddresses": {"writable": ["C"], "readonly": []}}}
+    assert pre_balance(tx, "B") == 1559560 and pre_balance(tx, "C") == 7 and pre_balance(tx, "Z") == 0
     print("ok")
